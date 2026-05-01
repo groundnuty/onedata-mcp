@@ -89,9 +89,13 @@ The fork now exposes ~21 MCP tools (M0rgho's 14 + 7 we added: 6 from the spec pl
 
 This strengthens the paper's curation argument rather than weakening it. The allowlist is machine-readable in `benchmark/tool_allowlist.py`, drift-tested against the live MCP server in `test/unit/test_tool_allowlist.py`, and rationalised per-tool in `design/03-tool-allowlist-curation.md`. One paper Table 1 edit the writing agent should make: add `get_transfer` and bump the headline count from "14-tool" to "15-tool" wherever it appears (P4 needs `get_transfer` because `list_space_transfers` returns IDs only).
 
+## Benchmark scenario set
+
+The 18 PPAM 2026 scenarios are defined in `benchmark/scenarios.py` (with dataclasses in `benchmark/_scenario_types.py`). Tier distribution matches paper Table 3 (8 format / 8 static / 2 dynamic), drift-tested in `test/unit/test_scenarios.py`. Authoring decisions — A4 reframed cross-space → cross-directory, P2 uses unfulfillable `country=DE`, P5 uses `country=*` conflict instead of SSD/HDD — recorded in `design/04-scenario-authoring-decisions.md`. Oracle implementations are workstream #21.
+
 ## Testing
 
-Unit tests for the 5 new/extended `api/` modules pass (60/60 total, including 33 pre-existing M0rgho tests):
+Unit tests pass (78/78 total: 33 pre-existing M0rgho + 11 new-tool api + 16 metadata-query + 5 allowlist-drift + 5 move_file + 9 scenario-drift):
 
 ```bash
 uv run pytest test/unit -v
@@ -99,7 +103,7 @@ uv run pytest test/unit -v
 
 Tests use `pytest-httpx` to mock all HTTP traffic; no live federation contact needed. Schemas in tests are pinned to the Onedata 25.0 swagger response shapes (referenced by file in each test's docstring).
 
-The `mcp_smoke.py` script (task #13, deferred) will exercise each tool once against the live federation before each benchmark batch.
+The `mcp_smoke.py` script (12 PASS / 0 FAIL / 6 SKIP last run, 2026-04-30) exercises each tool once against the live federation. Run before each benchmark batch.
 
 ## Versions and pinning
 
