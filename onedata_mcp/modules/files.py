@@ -312,21 +312,27 @@ def register_module(mcp: FastMCP) -> None:
 
     @mcp.tool(name="move_file", annotations=ToolAnnotations(destructiveHint=True))
     async def mcp_move_file(
-        src_file_id_or_path: str = Field(
-            description="Source file id or path in format /<space_name>/<path_to_file>"
+        src_path: str = Field(
+            description="Source logical path /<space_name>/<path_to_file> (intra-space only)"
         ),
         dst_path: str = Field(
-            description="Destination logical path in format /<space_name>/<path_to_file>"
+            description=(
+                "Destination logical path /<space_name>/<path_to_file> "
+                "(must be in same space as src)"
+            )
         ),
         ctx: Optional[Context] = None,
     ) -> str:
-        """Atomically move/rename a file or directory.
+        """Atomically move/rename a file or directory within a single space.
 
-        NOTE: Onedata 25.0 has no public REST move endpoint; this tool is
-        currently NotImplementedError pending a decision (see
-        IMPLEMENTATION_NOTES.md). Smoke runs will return an error message
-        the agent can read.
+        Implementation uses CDMI (PUT /cdmi/{dst_space}/{dst_path} with
+        body {"move": "<src_space>/<src_path>"}) — same protocol the
+        Onedata Python client wraps. **Intra-space only.** Cross-space
+        moves return a clear ValueError directing the agent to compose
+        download_file + create_file + delete_file (loses atomicity).
+
+        Returns the fileId of the moved entity at the destination.
         """
-        src_file_id_or_path = await _resolve_with_mcp_root(src_file_id_or_path, ctx)
+        src_path = await _resolve_with_mcp_root(src_path, ctx)
         dst_path = await _resolve_with_mcp_root(dst_path, ctx)
-        return await move_file(src_file_id_or_path, dst_path)
+        return await move_file(src_path, dst_path)

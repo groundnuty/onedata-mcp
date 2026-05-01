@@ -394,34 +394,77 @@ async def get_file_distribution(file_id_or_path: str) -> dict[str, Any]:
 
 
 async def move_file(
-    src_file_id_or_path: str,
+    src_path: str,
     dst_path: str,
 ) -> str:
-    """Atomically move/rename a file or directory.
+    """Atomically move/rename a file or directory within a single space.
 
-    NOTE: Onedata 25.0 does NOT expose a public REST move/rename endpoint.
-    The original Onedata MCP server (gitlab.spice-platform.eu/work-packages/wp6)
-    delegated to OnedataFileRESTClient.move(), which posts to a private
-    endpoint with no public contract. This is a known threat to validity for
-    the PPAM benchmark (see paper §7 Threats — Infrastructure).
+    Implementation: CDMI move (Cloud Data Management Interface, standardised
+    spec, but not exposed in Onedata's `/api/v3/oneprovider/` swagger).
+    Endpoint: PUT https://{oneprovider}/cdmi/{dst_space}/{dst_path}
+    Headers:  X-Auth-Token, X-CDMI-Specification-Version: 1.1.1,
+              Content-Type: application/cdmi-object
+    Body:     {"move": "<src_space>/<src_path>"}
 
-    This function is intentionally NotImplementedError pending one of:
-      (a) port the private endpoint snippet from OnedataFileRESTClient.move()
-          source — atomic, but breaks if the API moves;
-      (b) implement non-atomic download → create_at_destination → delete_source
-          fallback — works through public endpoints, loses atomicity;
-      (c) wait for upstream to ship a public move endpoint (no ETA).
-
-    The choice will be made after the first smoke pass against the live
-    federation, when we can characterise the failure modes.
+    See `design/01-move-file-strategy.md` for the alternatives considered.
+    Source: ported from `OnedataFileRESTClient.move()` in the official
+    onedatafilerestclient package (commit 6887661).
 
     Args:
-        src_file_id_or_path: source file id or path (/space/path/...).
-        dst_path: destination logical path (/space/path/...).
+        src_path: source logical path in the form '/<space>/<path>'.
+        dst_path: destination logical path in the form '/<space>/<path>'.
+                  src_space MUST equal dst_space — Onedata 25.0 CDMI move
+                  rejects cross-space operations.
 
-    Returns: file id of the moved entity at the destination.
+    Returns: fileId of the moved entity at the destination.
+
+    Raises:
+        ValueError: if src_path or dst_path is not in '/<space>/<path>' form,
+            or if the spaces differ (cross-space move not supported).
     """
-    raise NotImplementedError(
-        "move_file: pending decision on private-endpoint port vs. download/create/delete "
-        "fallback. See IMPLEMENTATION_NOTES.md."
-    )
+    src_space, src_inner = _parse_space_path(src_path, "src_path")
+    dst_space, dst_inner = _parse_space_path(dst_path, "dst_path")
+    if src_space != dst_space:
+        raise ValueError(
+            f"Cross-space moves are not supported by Onedata 25.0 CDMI: "
+            f"src_space={src_space!r}, dst_space={dst_space!r}. "
+            f"Use download_file + create_file + delete_file instead, "
+            f"accepting the loss of atomicity."
+        )
+
+    config = get_oneprovider_config()
+    # CDMI is at the host root (/cdmi/...), not under /api/v3/oneprovider/.
+    cdmi_base = config.base_url.removesuffix("/api/v3/oneprovider")
+    encoded_dst_inner = quote(dst_inner, safe="/")
+    cdmi_url = f"{cdmi_base}/cdmi/{quote(dst_space, safe='')}/{encoded_dst_inner}"
+
+    headers = dict(config.auth_headers)
+    headers["X-CDMI-Specification-Version"] = "1.1.1"
+    headers["Content-Type"] = "application/cdmi-object"
+
+    body = {"move": f"{src_space}/{src_inner}"}
+
+    async with httpx.AsyncClient(verify=config.verify_ssl) as client:
+        response = await client.put(cdmi_url, headers=headers, json=body)
+
+    if response.is_error:
+        raise OnedataApiError(
+            f"CDMI move failed: PUT {cdmi_url} (status={response.status_code}) - {response.text}",
+            response={"status_code": response.status_code, "body": response.text},
+        )
+
+    # CDMI move returns no fileId; fetch it via the standard lookup.
+    return await get_file_id(dst_path)
+
+
+def _parse_space_path(path: str, arg_name: str) -> tuple[str, str]:
+    """Parse '/<space>/<inner_path>' into (space, inner_path)."""
+    if not path.startswith("/"):
+        raise ValueError(
+            f"{arg_name} must be a logical path starting with '/' "
+            f"(form: /<space>/<path>); got {path!r}"
+        )
+    parts = path.lstrip("/").split("/", 1)
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        raise ValueError(f"{arg_name} must be a logical path of form /<space>/<path>; got {path!r}")
+    return parts[0], parts[1]

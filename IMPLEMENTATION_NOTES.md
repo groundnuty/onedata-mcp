@@ -58,9 +58,9 @@ The paper-writing agent should update Table 1 / prose accordingly:
 2. **`add_qos_requirement` posts to top-level `/qos_requirements`, with `fileId` in the JSON body** — not to a per-file `/data/{file_id}/qos_requirements` URL. Spec §3.7 had it wrong.
 3. **`list_space_transfers` state filter values are `waiting | ongoing | ended`** — not `completed | failed | all`. Spec §3.8 had it wrong.
 
-## Move file: known gap
+## Move file: CDMI implementation
 
-Onedata 25.0 has **no public REST endpoint for move/rename** (verified by grep against `oneprovider-swagger@25.0`). `api/files.py::move_file` currently raises `NotImplementedError`. Three candidate strategies and the deferral rationale are tracked in **[`design/01-move-file-strategy.md`](design/01-move-file-strategy.md)**. Decision lands after first live smoke pass.
+Onedata 25.0 has no public REST move endpoint in `/api/v3/oneprovider/`, but the same operation is exposed via **CDMI** (PUT `/cdmi/{dst_space}/{dst_path}` with body `{"move": "<src_space>/<src_path>"}`) — same protocol the official Python client uses. **Intra-space only.** Cross-space requests get a clear `ValueError` directing the agent to compose `download_file` + `create_file` + `delete_file`. Decision rationale + source pointer in **[`design/01-move-file-strategy.md`](design/01-move-file-strategy.md)**. Live smoke against the new CDMI path pending user write-gate.
 
 ## QoS expression error handling (paper §5.4 H_qos_syntax metric)
 

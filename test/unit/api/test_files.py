@@ -617,15 +617,100 @@ async def test_get_file_distribution_resolves_path_via_lookup_first(
 
 
 # ---------------------------------------------------------------------------
-# move_file (no public REST endpoint in Onedata 25.0 — currently NotImplementedError)
+# move_file (CDMI PUT against /cdmi/{space}/{path} on the oneprovider host)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_move_file_raises_not_implemented_pending_decision(
+async def test_move_file_issues_cdmi_put_with_correct_body_and_headers(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    # CDMI PUT to the destination
+    httpx_mock.add_response(
+        method="PUT",
+        url="https://provider.example/cdmi/myspace/newfile.txt",
+        status_code=204,
+    )
+    # Subsequent get_file_id lookup for the destination
+    httpx_mock.add_response(
+        method="POST",
+        url=_lookup_url("/myspace/newfile.txt"),
+        json={"fileId": "destFid"},
+    )
+
+    result = await files.move_file("/myspace/oldfile.txt", "/myspace/newfile.txt")
+
+    assert result == "destFid"
+    cdmi_request = next(
+        r for r in httpx_mock.get_requests() if r.url.path == "/cdmi/myspace/newfile.txt"
+    )
+    assert cdmi_request.method == "PUT"
+    assert cdmi_request.headers["X-CDMI-Specification-Version"] == "1.1.1"
+    assert cdmi_request.headers["Content-Type"] == "application/cdmi-object"
+    assert cdmi_request.headers["X-Auth-Token"] == "token"
+    import json as _json
+
+    assert _json.loads(cdmi_request.content) == {"move": "myspace/oldfile.txt"}
+
+
+@pytest.mark.asyncio
+async def test_move_file_handles_nested_paths_and_url_encodes_spaces(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="PUT",
+        url="https://provider.example/cdmi/myspace/dir%20with%20spaces/file.bin",
+        status_code=204,
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=_lookup_url("/myspace/dir with spaces/file.bin"),
+        json={"fileId": "destFid"},
+    )
+
+    result = await files.move_file(
+        "/myspace/datasets/file.bin",
+        "/myspace/dir with spaces/file.bin",
+    )
+
+    assert result == "destFid"
+
+
+@pytest.mark.asyncio
+async def test_move_file_rejects_cross_space_move(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _set_env(monkeypatch)
+    with pytest.raises(ValueError, match="Cross-space moves"):
+        await files.move_file("/space_a/foo.txt", "/space_b/foo.txt")
 
-    with pytest.raises(NotImplementedError, match="private-endpoint"):
-        await files.move_file("/space/a/foo.txt", "/space/b/foo.txt")
+
+@pytest.mark.asyncio
+async def test_move_file_rejects_invalid_path_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_env(monkeypatch)
+    with pytest.raises(ValueError, match="logical path"):
+        await files.move_file("relative/no_leading_slash.txt", "/space/x.txt")
+    with pytest.raises(ValueError, match="logical path"):
+        await files.move_file("/space/x.txt", "/no_inner_path")
+
+
+@pytest.mark.asyncio
+async def test_move_file_surfaces_cdmi_server_error(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="PUT",
+        url="https://provider.example/cdmi/myspace/newfile.txt",
+        status_code=500,
+        text="oneprovider boom",
+    )
+
+    from onedata_mcp.utils import OnedataApiError
+
+    with pytest.raises(OnedataApiError, match="CDMI move failed"):
+        await files.move_file("/myspace/oldfile.txt", "/myspace/newfile.txt")

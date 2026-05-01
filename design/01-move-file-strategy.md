@@ -1,8 +1,8 @@
 # Design decision: `move_file` strategy
 
-**Status:** open. Decision deferred to first live-federation smoke pass.
-**Tool:** `move_file(src_file_id_or_path, dst_path)` in `onedata_mcp/api/files.py`.
-**Currently:** `NotImplementedError` with a structured message the agent can surface.
+**Status:** **decided 2026-05-01 — option (a): CDMI move, intra-space only.**
+**Tool:** `move_file(src_path, dst_path)` in `onedata_mcp/api/files.py`.
+**Implemented at:** `onedata_mcp/api/files.py::move_file` (mocked unit tests pass; live smoke pending user write-gate).
 
 ## Context
 
