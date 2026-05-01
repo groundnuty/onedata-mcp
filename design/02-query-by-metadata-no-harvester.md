@@ -66,8 +66,8 @@ If either bound is hit, the result includes `"truncated": true` so the agent kno
 
 We extend, not replace (per user directive 2026-04-30). M0rgho's `list_user_harvesters`, `get_harvester_index_schema`, `query_harvester_index` remain registered and callable. They are:
 
-- ✅ included in the `tool_context_mode="full"` ablation surface (so the §5.6 ablation has a fair surface)
-- ❌ excluded from the `tool_context_mode="minimal"` 14-tool benchmark allowlist (the headline benchmark)
+- ❌ **excluded from the `tool_context_mode="minimal"` 14-tool benchmark allowlist** (the headline benchmark)
+- ❌ **excluded from the `tool_context_mode="full"` ablation surface as well** — the SPICE federation has no harvester configured (confirmed 2026-04-30 by user). The harvester tools would always fail on this deployment, so they would degrade the ablation rather than enrich it.
 
 The 14-tool allowlist is defined in the benchmark scenario set (task #18, separate workstream).
 
