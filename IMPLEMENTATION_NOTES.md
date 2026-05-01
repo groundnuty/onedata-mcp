@@ -1,5 +1,8 @@
 # Implementation notes — PPAM 2026 MCP server fork
 
+> **Documentation map.** This file is the operational reference. Decisions are in `design/` (00 fork, 01 move, 02 query-by-metadata, 03 allowlist, 04 scenarios). Empirical observations against the live 25.0 deployment are in `research/empirical-onedata-25.0-findings.md`. Paper-writing-agent handoff (corrections to §3 / §4 / §7 spec text) is in `papers/ppam-2026/research/28-empirical-spec-corrections.md`.
+
+
 **Branch:** `ppam2026/14-tools` of `groundnuty/onedata-mcp` (fork of `M0rgho/onedata-mcp`).
 **Pinned target:** Onedata 25.0 (federation deployed at `data.spice-platform.eu` reports `version: 25.0`, build `46-g14b5bda7`).
 **Swagger refs used during implementation:** `oneprovider-swagger@25.0` (commit `39da981`), `onezone-swagger@25.0` (commit `58c6976`), `onepanel-swagger@25.0` (commit `aa17c67`). All three repos cloned to `/Users/orzech/repos/onedata/`.

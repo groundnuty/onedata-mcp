@@ -1,0 +1,213 @@
+# Empirical findings — Onedata 25.0 + SPICE deployment
+
+**Maintained 2026-04-30 onwards.** Implementation-side observations that
+came out of building the PPAM 2026 fork against
+`data.spice-platform.eu`. Distinct from `papers/ppam-2026/research/` which
+hosts paper-relevant context; this file is for future MCP-server
+developers and is referenced from `IMPLEMENTATION_NOTES.md`.
+
+## 1. Three corrections to paper §3 spec endpoint paths
+
+The original implementation spec (`papers/ppam-2026/research/22-mcp-implementation-spec.md`)
+gave indicative endpoint paths and explicitly said "verify against the
+live `https://data.spice-platform.eu/api/v3/` REST documentation before
+coding". Three of the spec paths were wrong; verified against
+`oneprovider-swagger@25.0` (commit `407940e` of `25.0` tag, no drift vs
+`develop` tip on these paths):
+
+| Spec §3 said | Reality (25.0 swagger) | operationId |
+|---|---|---|
+| `GET /data/{file_id}/qos_summary` | `GET /data/{file_id}/qos/summary` *(slash, not underscore)* | `get_file_qos_summary` |
+| `POST /data/{file_id}/qos_requirements` *(per-file URL)* | `POST /qos_requirements` *(top-level; fileId in JSON body)* | `add_qos_requirement` |
+| `state ∈ {ongoing, completed, failed, all}` for `list_space_transfers` | `state ∈ {waiting, ongoing, ended}` | `get_all_transfers` |
+
+Caught this at task #7 (verify endpoints) before any code touched the
+wrong paths. Each is documented as a paper-text edit the writing agent
+will need to make in `IMPLEMENTATION_NOTES.md` and surfaces again in
+`design/03-tool-allowlist-curation.md`.
+
+## 2. The "private move endpoint" is actually CDMI
+
+The GitLab Onedata MCP server's `OnedataFileRESTClient.move()` was
+described as posting to a "private undocumented endpoint" (paper §7
+Threats to Validity, Infrastructure). Tracking down the source
+(`onedatafilerestclient` submodule of `onedatarestfsspec`, commit
+`6887661`, `onedata_file_rest_client.py:527-555`):
+
+```
+PUT https://{oneprovider}/cdmi/{dst_space}/{dst_path}
+Headers: X-Auth-Token, X-CDMI-Specification-Version: 1.1.1,
+         Content-Type: application/cdmi-object
+Body:    {"move": "<src_space>/<src_path>"}
+```
+
+It's **CDMI** — Cloud Data Management Interface, an SNIA-standardised
+protocol. Not in Onedata's `/api/v3/oneprovider/` swagger, so the §7
+caveat about "no public REST contract" stands; but CDMI itself is a
+documented standard, just integrated with Onedata's auth/space
+namespacing in undocumented ways. The Python client raises an explicit
+error if `src_space != dst_space` — **CDMI move is intra-space only**.
+
+Decision recorded in `design/01-move-file-strategy.md`.
+
+## 3. Onepanel auth quirk: `admin` vs `onepanel` users
+
+The SPICE deployment helm values (`enviroments/*/values/*.yaml`) declare
+two admin accounts on every OnePanel:
+
+```yaml
+onepanel_emergency_account:
+  name: onepanel
+  password: SP!CEPLATF@RM
+main_onezone_admin:        # only on the onezone helm values
+  name: admin
+  password: SP!CEPLATF@RM
+```
+
+In practice:
+
+- **Onezone OnePanel** (port via `data.spice-platform.eu/api/v3/onepanel/`): both `admin` and `onepanel` work.
+- **Per-provider OnePanels** (`cloud-pl.../onepanel/`, `cloud-sk.../onepanel/`, `uibk.../onepanel/`): **only `onepanel` works**. `admin:SP!CEPLATF@RM` returns `unauthorized / badBasicCredentials`.
+
+Discovered while listing storages on cloud-pl + Cloud-SK before
+supporting `ppam_2026_mcp_tests`. Probably an artefact of how the
+deployment provisions accounts — the `main_onezone_admin` clause only
+appears in the onezone helm values, not the per-provider values.
+
+**Operational implication:** all per-provider OnePanel curls must use
+`onepanel:SP!CEPLATF@RM`. The mcp-side code only talks to `/api/v3/oneprovider/`,
+not `/api/v3/onepanel/`, so this quirk doesn't affect the MCP server
+itself — but it matters for any space-support / federation-state
+maintenance scripts.
+
+## 4. POST `/api/v3/onezone/user/spaces` returns 201 + empty body
+
+Tripped the first space-create attempt: my response parser tried to
+extract `spaceId` from the JSON body, but the response was empty. The
+spaceId is in the `Location` header:
+
+```
+HTTP/2 201
+location: https://data.spice-platform.eu/api/v3/onezone/user/spaces/<sid>
+content-length: 0
+```
+
+Created a duplicate space silently before realising the first call had
+succeeded. Cleaned up by deleting the duplicate. **Always parse the
+Location header on Onedata 201s, not the body.**
+
+## 5. `list_space_transfers` returns transferIds only
+
+The `/api/v3/oneprovider/spaces/{sid}/transfers` endpoint returns:
+
+```json
+{
+  "transfers": ["<tid>", "<tid>", ...],
+  "nextPageToken": "<token>" | null
+}
+```
+
+No metadata — no source / destination / state / bytes / timing per
+transfer. Agents needing detail must follow up with `GET /transfers/{tid}`
+per id (`get_transfer` tool).
+
+This drove the inclusion of `get_transfer` in the headline 15-tool
+allowlist (`design/03`). Without it, scenario P4 ("most-recent migration
+of file F") is unsolvable from IDs alone.
+
+## 6. The federation that runs vs the federation Onezone advertises
+
+Onezone reports 5 registered providers (`/api/v3/onezone/user/effective_providers`):
+
+| Name | Country | Online (2026-04-30) | Notes |
+|---|---|---|---|
+| cloud-pl | PL (Cyfronet) | ✅ | bound to `ppam_2026_mcp_tests` |
+| Cloud-SK | SK (IISAS) | ✅ | bound to `ppam_2026_mcp_tests` |
+| uibk | AT (UIBK) | ✅ | available, not bound |
+| Cloud | DE (azure-interway) | ❌ | namespace exists, no pods |
+| Edge | DE (azure-interway) | ❌ | namespace exists, no pods |
+
+Querying the cluster directly:
+
+```
+$ ssh azureuser@data-spice... 'kubectl get pods -A | grep -iE "onezone|oneprovider"'
+onezone-spice  onezone-0  Running  1/1  58d
+# (no oneprovider-cloud or oneprovider-edge pods despite namespaces)
+```
+
+So onezone has 5 providers in its registry but only 3 of them have a
+running data plane. `getProviderDetails(...).online` is the authoritative
+reachability signal; the registry alone over-states federation health.
+
+The paper's headline claim of "5 OPs / 4 countries / 75 GiB" is currently
+inaccurate against reality (3 OPs reachable / 3 countries / X GiB
+support actually attached to the benchmark space). Tracked for the
+paper-writing agent as a §4.1 edit.
+
+## 7. 25.0 vs develop tip vs 25.1: zero drift on the endpoints we use
+
+Verified at task #7. After pinning all three swagger repos to tag `25.0`
+(matching what the live federation reports as `version: 25.0`):
+
+```
+diff 25.0 25.1 on each of:
+  paths/data/id/distribution.yaml
+  paths/data/id/qos/summary.yaml
+  paths/qos_requirements.yaml
+  paths/spaces/sid/transfers.yaml
+  paths/spaces/sid.yaml
+  paths/data/id.yaml
+  definitions/data/data_distribution.yaml
+  definitions/qos/qos_summary.yaml
+  definitions/qos/qos_create_request.yaml
+  definitions/qos/qos_requirement.yaml
+→ 0 lines diff on each
+```
+
+So the verification we did against develop tip earlier in the session
+also holds against the deployed 25.0. Useful precedent: for stable
+endpoint surfaces, swagger develop tip is a reasonable proxy when the
+deployed version is 1-2 minor releases behind.
+
+## 8. The `-spice-v1` onezone patch is still unverified
+
+The deployed onezone runs `onedata/onezone:ID-ba7a778696-spice-v1`. The
+`-spice-v1` suffix is a SPICE-specific patch on the 25.0 base. We
+haven't yet hit any onezone-side endpoint where the patch's behaviour
+would differ from upstream 25.0 (the MCP server's `list_space_providers`
+calls *oneprovider*'s `/spaces/{sid}`, not onezone's). Tracked as
+conversation task #23.
+
+If we later need richer per-provider attributes (geo, storage class)
+via onezone's `/providers/{id}`, we should compare the response shape
+against upstream 25.0 swagger before assuming.
+
+## 9. Token caveats are unbounded
+
+The benchmark token (`ppam2026-mcp-bench-2026-04-30`) was minted
+without any caveats — no time limit, no service restriction. To be
+tightened pre-camera-ready (planned: 30-day time caveat, service caveat
+scoping to oneprovider-only). Onedata supports caveat composition via
+the `caveats` field on `POST /api/v3/onezone/user/tokens/named`. The
+schema is in `onezone-swagger@25.0/definitions/token/named_token_create_request.yaml`.
+
+Documented in `papers/ppam-2026/research/27-benchmark-space-snapshot.md`
+under the Token section.
+
+## 10. dirStatsServiceEnabled defaults to true on space support
+
+When supporting `ppam_2026_mcp_tests` from cloud-pl + Cloud-SK, OnePanel's
+default for `dirStatsServiceEnabled` was `true` on both providers. We
+didn't request it; it was on by default. This means directory-level size
+statistics are tracked, which P1 / P6 oracles may benefit from. Worth
+knowing if a future deployment opts out.
+
+---
+
+## Maintenance
+
+This file accretes as we discover more empirical behaviour. New entries
+go at the bottom with a short heading + concise observation + how it
+was discovered + paper / code cross-references. Avoid restating things
+covered by the swagger; only record gaps between spec / docs and live
+behaviour, or non-obvious operational know-how.
