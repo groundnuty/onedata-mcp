@@ -202,6 +202,57 @@ didn't request it; it was on by default. This means directory-level size
 statistics are tracked, which P1 / P6 oracles may benefit from. Worth
 knowing if a future deployment opts out.
 
+## 11. CDMI move requires explicit `Accept: application/cdmi-object`
+
+Discovered live 2026-05-01 first `--write` smoke. The CDMI PUT for move
+returns **HTTP 406 Not Acceptable** if the request omits an `Accept`
+header (or uses `*/*`):
+
+```
+v1 (no Accept):                               → 406
+v2 (Accept: application/cdmi-object):         → 201 ✓
+v3 (Accept: */*):                             → 400 (file already moved by v2)
+```
+
+Onedata's CDMI implementation strictly requires the Accept header to
+match the request body media type. The Python `OnedataFileRESTClient`
+that we ported from happens to set this — but the snippet quoted in
+`design/01-move-file-strategy.md` glossed over it. Fixed in
+`onedata_mcp/api/files.py::move_file` (commit `999b987`, 2026-05-01).
+
+This is the most important "spec is incomplete" gotcha we've found:
+the CDMI 1.1.1 standard *recommends* matching Accept but doesn't
+mandate it; Onedata's enforcement of "match exactly" is stricter than
+the standard. Worth flagging in the paper §7 *Threats / Infrastructure*.
+
+## 12. Convergence is fast (~6-7s) for small fixtures, well under the soft cap
+
+The first live fixture_runner exercise (D5 = 1 file with metadata; A2
+= 4 files with metadata) converged in **6.0s and 6.8s** respectively on
+the cloud-pl + Cloud-SK pair. Soft cap is 60s, hard cap is 120s. So
+the conservative caps from paper §4¶5 leave 10× headroom on small
+fixtures.
+
+This is encouraging for the full sweep timing budget but doesn't
+generalise to scenarios with many files (P1 puts an 8-file fixture
+under QoS) or to the bigger scenarios with `replicas_num=2` constraints
+that need both providers to settle. The dbsync calibration sweep
+(paper §4¶5 TODO) should still happen before the camera-ready run; the
+6-7s number is a lower bound, not the worst case.
+
+## 13. Four-cell oracle matrix verified live
+
+The two-axis OracleResult (design/06) survives contact with reality.
+Smoke run 2026-05-01 explicitly exercised three cells:
+
+- D5 with correct answer: `mcp_pass=True, federation_pass=None` (format-tier).
+- A2 with correct writes: `mcp_pass=True, federation_pass=True`.
+- A2 with empty agent trace: `mcp_pass=False, federation_pass=False`.
+
+The fourth cell (`mcp_pass=True, federation_pass=False` — Onedata-side
+divergence) hasn't naturally occurred yet. We'll see it the first time
+dbsync lags or a transient 5xx hits during a real benchmark sweep.
+
 ---
 
 ## Maintenance
