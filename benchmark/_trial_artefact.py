@@ -49,6 +49,12 @@ class TrialArtefact:
     oracle_mcp_pass: bool | None
     oracle_federation_pass: bool | None
     oracle_diagnosis: str
+    # Built-in tools the agent attempted to use that the adapter denied
+    # (e.g. Bash, Read, ToolSearch). Empty for the OpenAI-compat leg, which
+    # has no built-in toolset to fall back on. Paper-relevant: shows
+    # harness-bundled-tool substitution behaviour. See
+    # benchmark/llm_adapters/claude_agent_sdk.py for the gate logic.
+    denied_calls: tuple[dict, ...] = ()
     error: str | None = None
 
 

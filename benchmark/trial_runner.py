@@ -103,6 +103,7 @@ async def run_trial(
     oracle_result: OracleResult = await oracle(ctx, trace)
 
     outcome: TrialOutcome = "PASS" if oracle_result.mcp_pass else "FAIL"
+    denied = tuple(dispatch.raw_trace.get("denied_calls") or ())
     artefact = TrialArtefact(
         run_id=run_id,
         llm_name=adapter.config.name,
@@ -124,6 +125,7 @@ async def run_trial(
         oracle_mcp_pass=oracle_result.mcp_pass,
         oracle_federation_pass=oracle_result.federation_pass,
         oracle_diagnosis=oracle_result.diagnosis,
+        denied_calls=denied,
         error=dispatch.error,
     )
     return _persist(artefact, artefact_dir)

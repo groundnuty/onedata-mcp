@@ -40,6 +40,40 @@ class _FakeAsyncIterator:
         return self._items.pop(0)
 
 
+class _FakeClient:
+    """Stand-in for `ClaudeSDKClient` — implements just enough of the API the
+    adapter touches: `__aenter__/__aexit__`, `query()`, and `receive_response()`.
+    Captures the constructor args so tests can inspect what the adapter
+    requested.
+    """
+
+    def __init__(self, options=None, transport=None):
+        self.options = options
+        self.transport = transport
+        self.queried_prompt: str | None = None
+        # Class-level injection: each test sets `_FakeClient.next_messages`
+        # before calling adapter.dispatch().
+        self._messages = list(_FakeClient.next_messages)
+        _FakeClient.last_options = options
+
+    next_messages: list[Any] = []
+    last_options: Any = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def query(self, prompt, session_id="default"):
+        self.queried_prompt = prompt
+        _FakeClient.last_prompt = prompt
+
+    async def receive_response(self):
+        for m in self._messages:
+            yield m
+
+
 def _make_assistant_msg(content_blocks):
     """Build a stand-in AssistantMessage. We only need .content."""
     msg = MagicMock(spec=["content"])
@@ -144,14 +178,8 @@ async def test_adapter_parses_tool_use_and_result(monkeypatch):
     result_msg.subtype = "success"
     result_msg.usage = {"input_tokens": 100, "output_tokens": 5}
 
-    captured_query_kwargs = {}
-
-    def fake_query(*, prompt, options):
-        captured_query_kwargs["prompt"] = prompt
-        captured_query_kwargs["options"] = options
-        return _FakeAsyncIterator([assistant_msg, user_msg, result_msg])
-
-    monkeypatch.setattr(adapter_mod, "query", fake_query)
+    _FakeClient.next_messages = [assistant_msg, user_msg, result_msg]
+    monkeypatch.setattr(adapter_mod, "ClaudeSDKClient", _FakeClient)
 
     adapter = ClaudeAgentSdkAdapter(LLMConfig(name="c", model_id="claude-test", max_tool_rounds=5))
     out = await adapter.dispatch(
@@ -162,11 +190,11 @@ async def test_adapter_parses_tool_use_and_result(monkeypatch):
     )
 
     # The adapter should have requested the SDK with the prefixed tool name.
-    options = captured_query_kwargs["options"]
+    options = _FakeClient.last_options
     assert options.allowed_tools == ["mcp__onedata__list_user_spaces"]
     assert options.max_turns == 5
     # The SDK gets the user prompt verbatim.
-    assert captured_query_kwargs["prompt"] == "brief"
+    assert _FakeClient.last_prompt == "brief"
 
     # Tool call captured + result spliced in.
     assert len(out.tool_calls) == 1
@@ -192,13 +220,8 @@ async def test_adapter_records_denied_calls_for_out_of_allowlist(monkeypatch):
 
     monkeypatch.setattr(adapter_mod.shutil, "which", lambda name: f"/fake/{name}")
 
-    captured = {}
-
-    def fake_query(*, prompt, options):
-        captured["can_use_tool"] = options.can_use_tool
-        return _FakeAsyncIterator([])
-
-    monkeypatch.setattr(adapter_mod, "query", fake_query)
+    _FakeClient.next_messages = []
+    monkeypatch.setattr(adapter_mod, "ClaudeSDKClient", _FakeClient)
 
     adapter = ClaudeAgentSdkAdapter(LLMConfig(name="c", model_id="claude-test"))
     await adapter.dispatch(
@@ -208,9 +231,9 @@ async def test_adapter_records_denied_calls_for_out_of_allowlist(monkeypatch):
         allowed_tools=frozenset({"list_user_spaces"}),
     )
 
-    # Now invoke the captured can_use_tool callback directly with a built-in
-    # tool name and verify it returns deny.
-    can_use_tool = captured["can_use_tool"]
+    # Pull the captured can_use_tool callback off the options the adapter
+    # passed to ClaudeSDKClient and exercise it directly.
+    can_use_tool = _FakeClient.last_options.can_use_tool
     out = await can_use_tool("Bash", {"command": "ls"}, MagicMock())
     assert out.behavior == "deny"
     assert "not in the benchmark allowlist" in out.message

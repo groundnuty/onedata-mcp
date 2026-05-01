@@ -44,6 +44,7 @@ from typing import Any
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
+    ClaudeSDKClient,
     PermissionResultAllow,
     PermissionResultDeny,
     ResultMessage,
@@ -51,7 +52,6 @@ from claude_agent_sdk import (
     TextBlock,
     ToolUseBlock,
     UserMessage,
-    query,
 )
 from claude_agent_sdk.types import (
     PermissionResult,
@@ -64,6 +64,49 @@ from benchmark.llm_adapters._protocol import LLMConfig, TrialDispatch
 
 MCP_SERVER_NAME = "onedata"
 TOOL_PREFIX = f"mcp__{MCP_SERVER_NAME}__"
+
+# Claude Code's built-in toolset (`claude --print --output-format stream-json`
+# init message lists these). We disallow ALL of them for benchmark parity
+# with the OpenAI-compat leg, which only ever sees the 15-tool HEADLINE.
+#
+# Defence-in-depth — empirically (live D1 smoke 2026-05-01) the
+# `can_use_tool` callback alone did NOT block `ToolSearch`; denied_calls=[]
+# despite ToolSearch appearing in the agent's trace. Hypothesis: some
+# built-ins bypass the can_use_tool gate (auto-approved by SDK / Claude
+# Code internals), so an explicit disallow list is needed alongside the
+# callback for hard parity.
+_BUILTIN_TOOLS = (
+    "AskUserQuestion",
+    "Bash",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "Edit",
+    "EnterPlanMode",
+    "EnterWorktree",
+    "ExitPlanMode",
+    "ExitWorktree",
+    "Glob",
+    "Grep",
+    "Monitor",
+    "NotebookEdit",
+    "PushNotification",
+    "Read",
+    "RemoteTrigger",
+    "ScheduleWakeup",
+    "SendMessage",
+    "Skill",
+    "Task",
+    "TaskOutput",
+    "TaskStop",
+    "TeamCreate",
+    "TeamDelete",
+    "TodoWrite",
+    "ToolSearch",
+    "WebFetch",
+    "WebSearch",
+    "Write",
+)
 
 # Federation env vars the spawned onedata-mcp child needs. Forwarded from
 # the harness env so the child connects to the same federation we're
@@ -143,7 +186,7 @@ class ClaudeAgentSdkAdapter:
         opts = ClaudeAgentOptions(
             system_prompt=system_prompt,
             allowed_tools=sdk_allowed,
-            disallowed_tools=[],
+            disallowed_tools=list(_BUILTIN_TOOLS),
             mcp_servers={
                 MCP_SERVER_NAME: {
                     "type": "stdio",
@@ -169,42 +212,49 @@ class ClaudeAgentSdkAdapter:
         error: str | None = None
 
         loop_t0 = time.perf_counter()
+        # `can_use_tool` requires streaming mode → use ClaudeSDKClient, NOT the
+        # standalone `query()` function. Per the SDK README: "Unlike query(),
+        # ClaudeSDKClient additionally enables custom tools and hooks."
         try:
-            async for msg in query(prompt=user_prompt, options=opts):
-                if isinstance(msg, AssistantMessage):
-                    rounds += 1
-                    for block in msg.content:
-                        if isinstance(block, ToolUseBlock):
-                            idx = len(captured_calls)
-                            captured_calls.append(
-                                ToolCall(
-                                    tool_name=_strip_prefix(block.name),
-                                    arguments=dict(block.input or {}),
-                                    succeeded=True,  # may be flipped when result arrives
-                                    error=None,
-                                    result=None,
+            async with ClaudeSDKClient(options=opts) as client:
+                await client.query(user_prompt)
+                async for msg in client.receive_response():
+                    if isinstance(msg, AssistantMessage):
+                        rounds += 1
+                        for block in msg.content:
+                            if isinstance(block, ToolUseBlock):
+                                idx = len(captured_calls)
+                                captured_calls.append(
+                                    ToolCall(
+                                        tool_name=_strip_prefix(block.name),
+                                        arguments=dict(block.input or {}),
+                                        succeeded=True,  # may be flipped when result arrives
+                                        error=None,
+                                        result=None,
+                                    )
                                 )
-                            )
-                            pending[block.id] = idx
-                        elif isinstance(block, TextBlock):
-                            pass  # final answer comes from ResultMessage
-                elif isinstance(msg, UserMessage):
-                    content = getattr(msg, "content", None)
-                    if isinstance(content, list):
-                        for block in content:
-                            if isinstance(block, ToolResultBlock):
-                                idx = pending.pop(block.tool_use_id, None)
-                                if idx is not None:
-                                    captured_calls[idx] = _splice_result(captured_calls[idx], block)
-                elif isinstance(msg, ResultMessage):
-                    final_text = getattr(msg, "result", None)
-                    finish_reason = getattr(msg, "subtype", None) or "result"
-                    usage = getattr(msg, "usage", None) or {}
-                    if isinstance(usage, dict):
-                        usage_in = usage.get("input_tokens", 0) or 0
-                        usage_out = usage.get("output_tokens", 0) or 0
-                elif isinstance(msg, SystemMessage):
-                    pass  # init / hook events
+                                pending[block.id] = idx
+                            elif isinstance(block, TextBlock):
+                                pass  # final answer comes from ResultMessage
+                    elif isinstance(msg, UserMessage):
+                        content = getattr(msg, "content", None)
+                        if isinstance(content, list):
+                            for block in content:
+                                if isinstance(block, ToolResultBlock):
+                                    idx = pending.pop(block.tool_use_id, None)
+                                    if idx is not None:
+                                        captured_calls[idx] = _splice_result(
+                                            captured_calls[idx], block
+                                        )
+                    elif isinstance(msg, ResultMessage):
+                        final_text = getattr(msg, "result", None)
+                        finish_reason = getattr(msg, "subtype", None) or "result"
+                        usage = getattr(msg, "usage", None) or {}
+                        if isinstance(usage, dict):
+                            usage_in = usage.get("input_tokens", 0) or 0
+                            usage_out = usage.get("output_tokens", 0) or 0
+                    elif isinstance(msg, SystemMessage):
+                        pass  # init / hook events
         except Exception as e:  # noqa: BLE001
             error = f"{type(e).__name__}: {e}"
 
