@@ -253,7 +253,114 @@ The fourth cell (`mcp_pass=True, federation_pass=False` — Onedata-side
 divergence) hasn't naturally occurred yet. We'll see it the first time
 dbsync lags or a transient 5xx hits during a real benchmark sweep.
 
----
+**Update 2026-05-01 evening**: the fourth cell (mcp=T, federation=F)
+showed up *naturally* in the placement-band smoke after the QoS-rule
+reauthoring (entry #14). See entry #16.
+
+## 14. SPICE federation has NO admin-set QoS attributes
+
+Discovered live 2026-05-01 placement-band smoke. Every QoS rule the
+benchmark fixture-runner issued ended up in `status=impossible` despite
+identical cluster, identical token, identical providers being online.
+Probed via the `evaluate_qos_expression` endpoint:
+
+```
+expr='anyStorage'                           → matches 2 (both POSIX)
+expr='country=PL'                           → matches 0
+expr='country=SK'                           → matches 0
+expr='geo=PL' / 'geo=SK' / 'geo=EU'         → matches 0
+expr='type=posix'                           → matches 0
+expr='providerId=27c0...d591'   (cloud-pl)  → matches 1
+expr='providerId=736092c5...1411' (Cloud-SK) → matches 1
+expr='storageId=1f72...2e5d'                → matches 1
+```
+
+Conclusion: the SPICE deployment's POSIX storage backends carry **no
+admin-configured QoS tags**. Only implicit operands work
+(`providerId=`, `storageId=`, `anyStorage`). User-attribute tokens
+(`country=`, `geo=`, `type=`) compile but match no storages, leaving
+any rule using them pinned in `impossible` status.
+
+This is the most consequential finding so far for paper §4 / §6: any
+scenario brief naming `country=` / `geo=` / `type=` will fail not on
+agent capability but on missing federation configuration. Two paths:
+
+- **Short term** (this paper): re-author scenarios to use `providerId=`
+  expressions. Captured in `benchmark/_federation_constants.py`.
+- **Medium term**: ask Cyfronet to configure storage QoS tags
+  (`country`, `geo`, `type`) on the SPICE providers. They're admin-set
+  per-storage-backend, so it's a 3-line config change per provider.
+  This would let scenarios use the paper-canonical syntax, matching
+  Onedata's user-facing QoS docs and the curation argument the paper
+  makes about agent-friendly DSLs.
+
+Verified by commit `68ac2ee` (paths in scenarios.py + oracles/EU_TOKENS).
+
+## 15. Field-name corrections discovered live
+
+Two cases where the Onedata 25.0 swagger's *example body* uses one
+field name but the actual JSON returned from the live federation uses
+another. Both bit our oracles before the live smoke.
+
+| Endpoint | Swagger example shows | Live response uses |
+|---|---|---|
+| `GET /qos_requirements/{qid}` | `qosExpression` | **`expression`** |
+| `GET /data/{id}/distribution` | `logicalSize` (older docs) | **`virtualSize`** |
+
+Permissive fallback (`detail.get("expression") or detail.get("qosExpression")`,
+similarly for size) is the cheapest fix. Onedata may eventually align
+the swagger; until then, both names are accepted.
+
+These count as paper §3 / §7 textual corrections — the writing agent's
+handoff doc (`papers/ppam-2026/research/28-empirical-spec-corrections.md`)
+should be updated to add these two to the existing 3 corrections.
+
+## 16. QoS rule status doesn't settle even when data IS replicated
+
+Discovered live 2026-05-01 P1 fixture: with two separate single-replica
+QoS rules (one per provider), the data DOES replicate to both providers
+within ~10 seconds, but one of the two rule statuses stays `pending`
+indefinitely. Direct timeline observation on the live federation:
+
+```
+ t+ 5s  qos=pending  req_statuses=[pending, pending]   dist={SK:4096, PL:0}
+ t+10s  qos=pending  req_statuses=[pending, fulfilled] dist={SK:4096, PL:4096}  ← data fully present
+ t+15s  qos=pending  req_statuses=[pending, fulfilled] dist={SK:4096, PL:4096}
+ t+20s  qos=pending  req_statuses=[pending, fulfilled] dist={SK:4096, PL:4096}
+ t+25s  qos=pending  req_statuses=[pending, fulfilled] dist={SK:4096, PL:4096}
+ t+30s  qos=pending  req_statuses=[pending, fulfilled] dist={SK:4096, PL:4096}
+```
+
+After 30s polling, one rule still reads `pending` while its data
+requirement is fully satisfied. Implication: the convergence-wait
+strategy in `fixture_runner._check_convergence` must inspect **actual
+data placement** (via `get_file_distribution`), not just QoS rule
+status. The two-axis OracleResult also needs a "data-presence" path
+for `federation_pass`, otherwise scenarios that legitimately set up
+multi-rule QoS will spuriously time out.
+
+Fix planned for the immediate follow-up commit: convergence wait checks
+"each fixture file's distributionPerProvider matches the expected
+provider set" instead of "no rule pending".
+
+This may also explain entry #17 (P4 pre-stage timeout): if the
+pre-stage QoS rule we add to trigger a migration similarly stays
+`pending` after the migration completes, our pre-stage poll loop never
+exits because we wait for transfer-log entries that may have completed
+and aged out before we noticed.
+
+## 17. P4 pre-stage transfer didn't appear in transfer log within 120s
+
+Hard cap (120s) hit. Either:
+- The migration triggered but completed and aged out of `state=ongoing`
+  before we polled (we DID also poll `state=ended`, but with limit=100
+  the captured tid may be later in the page). Check pagination.
+- The migration never triggered because the `providerId=` pinning rule
+  itself stayed `pending` per entry #16, so Onedata never scheduled
+  the actual transfer.
+
+Triage in flight. Fixing convergence first (entry #16) will likely
+unstick this too — same root cause family.
 
 ## Maintenance
 
