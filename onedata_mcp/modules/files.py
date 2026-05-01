@@ -11,11 +11,13 @@ from onedata_mcp.api.files import (
     delete_file,
     download_file,
     get_file_attributes,
+    get_file_distribution,
     get_file_id,
     get_file_metadata,
     grep_file_content,
     list_children,
     list_files_recursively,
+    move_file,
     set_file_metadata,
 )
 
@@ -290,3 +292,41 @@ def register_module(mcp: FastMCP) -> None:
         """
         file_id_or_path = await _resolve_with_mcp_root(file_id_or_path, ctx)
         return await set_file_metadata(file_id_or_path, metadata_type, metadata)
+
+    @mcp.tool(name="get_file_distribution", annotations=ToolAnnotations(readOnlyHint=True))
+    async def mcp_get_file_distribution(
+        file_id_or_path: str = Field(
+            description="File id or path to the file in format /<space_name>/<path_to_file>"
+        ),
+        ctx: Optional[Context] = None,
+    ) -> dict[str, Any]:
+        """Return per-provider, per-storage-backend block distribution.
+
+        For each provider supporting the file's space, reports which blocks
+        are physically held (the steady state is partial replication).
+        Symbolic links are not supported (server returns 400). For
+        directories, returns aggregate distribution.
+        """
+        file_id_or_path = await _resolve_with_mcp_root(file_id_or_path, ctx)
+        return await get_file_distribution(file_id_or_path)
+
+    @mcp.tool(name="move_file", annotations=ToolAnnotations(destructiveHint=True))
+    async def mcp_move_file(
+        src_file_id_or_path: str = Field(
+            description="Source file id or path in format /<space_name>/<path_to_file>"
+        ),
+        dst_path: str = Field(
+            description="Destination logical path in format /<space_name>/<path_to_file>"
+        ),
+        ctx: Optional[Context] = None,
+    ) -> str:
+        """Atomically move/rename a file or directory.
+
+        NOTE: Onedata 25.0 has no public REST move endpoint; this tool is
+        currently NotImplementedError pending a decision (see
+        IMPLEMENTATION_NOTES.md). Smoke runs will return an error message
+        the agent can read.
+        """
+        src_file_id_or_path = await _resolve_with_mcp_root(src_file_id_or_path, ctx)
+        dst_path = await _resolve_with_mcp_root(dst_path, ctx)
+        return await move_file(src_file_id_or_path, dst_path)

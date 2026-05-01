@@ -358,3 +358,70 @@ async def set_file_metadata(
         body=metadata if isinstance(metadata, bytes) else metadata.encode("utf-8"),
         additional_headers=additional_headers,
     )
+
+
+async def get_file_distribution(file_id_or_path: str) -> dict[str, Any]:
+    """Return per-provider, per-storage block distribution for a file.
+
+    Endpoint: GET /api/v3/oneprovider/data/{file_id}/distribution
+    operationId: get_data_distribution (Onedata 25.0).
+
+    Symbolic links are not supported (server returns 400). Directories
+    are returned as DataDirDistribution; regular files as DataRegDistribution.
+
+    Response shape (DataDistribution swagger):
+        {
+          "type": "REG" | "DIR",
+          "distributionPerProvider": {
+            "<providerId>": {
+              "success": true,
+              "logicalSize": N,
+              "locationsPerStorageBackend": {
+                "<storageId>": {"success": true, "location": "..."}
+                  | {"success": false, "error": {...}}
+              },
+              "distributionPerStorageBackend": {
+                "<storageId>": {"success": true, "blocks": [[start,len],...], "physicalSize": N}
+              }
+            } | {"success": false, "error": {...}}
+          }
+        }
+    """
+    config = get_oneprovider_config()
+    file_id = await _normalize_path_to_file_id(file_id_or_path)
+    response = await request(config, "GET", f"/data/{file_id}/distribution")
+    return response["body"]
+
+
+async def move_file(
+    src_file_id_or_path: str,
+    dst_path: str,
+) -> str:
+    """Atomically move/rename a file or directory.
+
+    NOTE: Onedata 25.0 does NOT expose a public REST move/rename endpoint.
+    The original Onedata MCP server (gitlab.spice-platform.eu/work-packages/wp6)
+    delegated to OnedataFileRESTClient.move(), which posts to a private
+    endpoint with no public contract. This is a known threat to validity for
+    the PPAM benchmark (see paper §7 Threats — Infrastructure).
+
+    This function is intentionally NotImplementedError pending one of:
+      (a) port the private endpoint snippet from OnedataFileRESTClient.move()
+          source — atomic, but breaks if the API moves;
+      (b) implement non-atomic download → create_at_destination → delete_source
+          fallback — works through public endpoints, loses atomicity;
+      (c) wait for upstream to ship a public move endpoint (no ETA).
+
+    The choice will be made after the first smoke pass against the live
+    federation, when we can characterise the failure modes.
+
+    Args:
+        src_file_id_or_path: source file id or path (/space/path/...).
+        dst_path: destination logical path (/space/path/...).
+
+    Returns: file id of the moved entity at the destination.
+    """
+    raise NotImplementedError(
+        "move_file: pending decision on private-endpoint port vs. download/create/delete "
+        "fallback. See IMPLEMENTATION_NOTES.md."
+    )

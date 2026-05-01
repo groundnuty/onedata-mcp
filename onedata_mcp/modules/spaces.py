@@ -1,9 +1,14 @@
 from typing import Any
 
 from fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from onedata_mcp.api.spaces import list_marketplace_spaces, list_user_spaces
+from onedata_mcp.api.spaces import (
+    get_space_providers,
+    list_marketplace_spaces,
+    list_user_spaces,
+)
 
 
 def register_module(mcp: FastMCP) -> None:
@@ -46,3 +51,17 @@ def register_module(mcp: FastMCP) -> None:
             token=token,
             offset=offset,
         )
+
+    @mcp.tool(name="list_space_providers", annotations=ToolAnnotations(readOnlyHint=True))
+    async def mcp_list_space_providers(
+        space_id: str = Field(description="Space id"),
+    ) -> dict[str, Any]:
+        """List providers supporting a space, queried from Oneprovider.
+
+        Returns the canonical (providerId, providerName) pairs as the
+        oneprovider sees them. For richer per-provider attributes
+        (geographic location, storage classes, online status), follow up
+        with an onezone /providers/{providerId} call per id — the agent
+        chains the two calls when needed.
+        """
+        return await get_space_providers(space_id)

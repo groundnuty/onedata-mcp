@@ -538,3 +538,94 @@ async def test_create_file_put_path_when_create_parents_true(
     )
     assert put.url.params["create_parents"] == "true"
     assert put.content == b"x"
+
+
+# ---------------------------------------------------------------------------
+# get_file_distribution (Onedata 25.0, GET /data/{id}/distribution)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_file_distribution_returns_per_provider_blocks(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    file_id = "094576776E66743172323067776777"
+    httpx_mock.add_response(
+        method="GET",
+        url=f"https://provider.example/api/v3/oneprovider/data/{file_id}/distribution",
+        json={
+            "type": "REG",
+            "distributionPerProvider": {
+                "p_de": {
+                    "success": True,
+                    "logicalSize": 8,
+                    "locationsPerStorageBackend": {
+                        "s1": {"success": True, "location": "/file/loc/de"}
+                    },
+                    "distributionPerStorageBackend": {
+                        "s1": {"success": True, "blocks": [[0, 4], [6, 2]], "physicalSize": 6}
+                    },
+                },
+                "p_pl": {
+                    "success": True,
+                    "logicalSize": 8,
+                    "locationsPerStorageBackend": {"s2": {"success": True, "location": None}},
+                    "distributionPerStorageBackend": {
+                        "s2": {"success": True, "blocks": [], "physicalSize": 0}
+                    },
+                },
+            },
+        },
+    )
+
+    result = await files.get_file_distribution(file_id)
+
+    assert result["type"] == "REG"
+    assert "p_de" in result["distributionPerProvider"]
+    assert "p_pl" in result["distributionPerProvider"]
+    assert result["distributionPerProvider"]["p_de"]["distributionPerStorageBackend"]["s1"][
+        "blocks"
+    ] == [[0, 4], [6, 2]]
+    # Zero-block providers must surface (so agents can distinguish "not replicated" from "unknown")
+    assert (
+        result["distributionPerProvider"]["p_pl"]["distributionPerStorageBackend"]["s2"]["blocks"]
+        == []
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_file_distribution_resolves_path_via_lookup_first(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    file_id = "abcdefghijklmnopqrstuvwxyz0123456789"
+    httpx_mock.add_response(
+        method="POST",
+        url=_lookup_url("/myspace/big.bin"),
+        json={"fileId": file_id},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=f"https://provider.example/api/v3/oneprovider/data/{file_id}/distribution",
+        json={"type": "REG", "distributionPerProvider": {}},
+    )
+
+    result = await files.get_file_distribution("/myspace/big.bin")
+
+    assert result["type"] == "REG"
+
+
+# ---------------------------------------------------------------------------
+# move_file (no public REST endpoint in Onedata 25.0 — currently NotImplementedError)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_move_file_raises_not_implemented_pending_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_env(monkeypatch)
+
+    with pytest.raises(NotImplementedError, match="private-endpoint"):
+        await files.move_file("/space/a/foo.txt", "/space/b/foo.txt")

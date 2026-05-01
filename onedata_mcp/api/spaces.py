@@ -1,7 +1,7 @@
 import asyncio
 from typing import Any, TypedDict
 
-from onedata_mcp.config import get_onezone_config
+from onedata_mcp.config import get_oneprovider_config, get_onezone_config
 from onedata_mcp.utils import request
 
 
@@ -42,6 +42,36 @@ async def list_user_spaces() -> list[dict[str, Any]]:
 
 async def get_space_details(space_id: str) -> dict[str, Any]:
     config = get_onezone_config()
+    response = await request(config, "GET", f"/spaces/{space_id}")
+    return response["body"]
+
+
+async def get_space_providers(space_id: str) -> dict[str, Any]:
+    """Return the providers supporting a space, from the Oneprovider side.
+
+    Endpoint: GET /api/v3/oneprovider/spaces/{sid}  (operation: get_space)
+    Source of truth for which providers actually serve this space.
+
+    Response shape (per oneprovider Space definition, Onedata 25.0):
+        {
+          "name": "<space name>",
+          "spaceId": "<id>",
+          "providers": [
+            {"providerId": "<id>", "providerName": "<name>"},
+            ...
+          ],
+          "fileId": "<root dir id>",
+          "dirId": "<root dir id>",
+          "trashDirId": "<id>",
+          "archivesDirId": "<id>"
+        }
+
+    Note: this endpoint does NOT include geographic / storage-class
+    attributes per provider. For richer attributes, follow up with the
+    onezone /providers/{id} endpoint per providerId. The benchmark's
+    `list_space_providers` MCP tool wraps this two-call enrichment.
+    """
+    config = get_oneprovider_config()
     response = await request(config, "GET", f"/spaces/{space_id}")
     return response["body"]
 

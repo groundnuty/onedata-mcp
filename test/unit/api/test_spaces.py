@@ -204,3 +204,44 @@ async def test_list_marketplace_spaces_rejects_limit_out_of_range(
 
     with pytest.raises(ValueError, match="between 1 and 50"):
         await spaces.list_marketplace_spaces(limit=51)
+
+
+# ---------------------------------------------------------------------------
+# get_space_providers (Onedata 25.0, GET oneprovider /spaces/{sid})
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_space_providers_calls_oneprovider_not_onezone(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    monkeypatch.setenv("ONEDATA_ONEPROVIDER_HOST", "https://oneprovider.example")
+    monkeypatch.setenv("ONEDATA_ONEPROVIDER_TOKEN", "token-p")
+    space_id = "fb519d81146bcc635b890ff03a5da0fdch34fe"
+    httpx_mock.add_response(
+        method="GET",
+        url=f"https://oneprovider.example/api/v3/oneprovider/spaces/{space_id}",
+        json={
+            "name": "My Space 1",
+            "spaceId": space_id,
+            "providers": [
+                {"providerId": "p1", "providerName": "MyPrivateCloud"},
+                {"providerId": "p2", "providerName": "PublicCloud1"},
+            ],
+            "fileId": "rootFileId",
+            "dirId": "rootFileId",
+            "trashDirId": "trashId",
+            "archivesDirId": "archivesId",
+        },
+    )
+
+    result = await spaces.get_space_providers(space_id)
+
+    assert result["name"] == "My Space 1"
+    assert len(result["providers"]) == 2
+    assert {p["providerId"] for p in result["providers"]} == {"p1", "p2"}
+    # Confirm we hit the oneprovider host, not onezone
+    requests = httpx_mock.get_requests()
+    assert requests[0].url.host == "oneprovider.example"
+    assert "/api/v3/oneprovider/spaces/" in requests[0].url.path
