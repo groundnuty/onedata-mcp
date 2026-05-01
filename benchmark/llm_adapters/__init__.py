@@ -14,11 +14,13 @@ through a single intermediate.
 from __future__ import annotations
 
 from benchmark.llm_adapters._protocol import LLMAdapter, LLMConfig, TrialDispatch
+from benchmark.llm_adapters.claude_agent_sdk import ClaudeAgentSdkAdapter
 from benchmark.llm_adapters.openai_compat import OpenAICompatAdapter
 
 __all__ = [
+    "ClaudeAgentSdkAdapter",
     "LLMAdapter",
     "LLMConfig",
-    "TrialDispatch",
     "OpenAICompatAdapter",
+    "TrialDispatch",
 ]

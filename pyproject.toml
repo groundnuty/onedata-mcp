@@ -5,6 +5,7 @@ description = "Collection"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "claude-agent-sdk>=0.1.72",
     "fastmcp==3.2.4",
     "python-dotenv>=1.2.2",
 ]

@@ -5,25 +5,32 @@ whose credentials are missing from `.env` are silently omitted from the
 panel — the trial runner only sees activated models, and the run-panel
 script reports which legs were skipped.
 
-Convention (mirrors M0rgho's existing `test/plgrid/conftest.py`):
+Convention:
 - `PLGRID_FORGE_API_KEY` + `PLGRID_FORGE_BASE_URL` → Forge models
-  (Llama 3.3 70B, Qwen 3 Coder 30B, etc.)
-- `ANTHROPIC_API_KEY` → Claude (Anthropic SDK adapter — currently a stub
-  that raises NotImplementedError until the SDK leg is implemented;
-  see benchmark/llm_adapters/anthropic_native.py)
-- `OPENAI_API_KEY` → GPT models (not currently in the panel)
+  (Llama 3.3 70B, Qwen 3 Coder 30B, etc.) — uses `OpenAICompatAdapter`.
+- Claude leg → uses `claude-agent-sdk` Python package, which authenticates
+  via the local Claude Code session (no API key). The leg activates iff
+  the `claude` binary is reachable. To opt out, set
+  `BENCHMARK_DISABLE_CLAUDE=1`.
+- `OPENAI_API_KEY` → GPT models (not currently in the panel).
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-from benchmark.llm_adapters import LLMAdapter, LLMConfig, OpenAICompatAdapter
+from benchmark.llm_adapters import (
+    ClaudeAgentSdkAdapter,
+    LLMAdapter,
+    LLMConfig,
+    OpenAICompatAdapter,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -82,27 +89,32 @@ def build_panel() -> tuple[tuple[PanelEntry, ...], tuple[str, ...]]:
     else:
         skipped.append("PLGrid Forge legs (Llama, Qwen): PLGRID_FORGE_API_KEY missing in .env")
 
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
-    if anthropic_key:
-        from benchmark.llm_adapters.anthropic_native import AnthropicAdapter
-
+    if os.getenv("BENCHMARK_DISABLE_CLAUDE", "").strip():
+        skipped.append("Claude leg: disabled via BENCHMARK_DISABLE_CLAUDE")
+    elif shutil.which("claude") is None:
+        skipped.append(
+            "Claude leg: `claude` binary not on PATH — install Claude Code "
+            "(https://claude.ai/install.sh) to activate this leg."
+        )
+    elif shutil.which("onedata-mcp") is None:
+        skipped.append(
+            "Claude leg: `onedata-mcp` binary not on PATH — run "
+            "`uv pip install -e .` from the MCP fork repo so the SDK can "
+            "spawn it as the MCP transport."
+        )
+    else:
+        # Claude Agent SDK uses local session auth — no API key needed.
         panel.append(
             PanelEntry(
                 name="claude-sonnet-4-5",
                 config=LLMConfig(
                     name="claude-sonnet-4-5",
                     api_base=None,
-                    api_key=anthropic_key,
+                    api_key=None,
                     model_id="claude-sonnet-4-5-20250929",
                 ),
-                adapter_factory=AnthropicAdapter,
+                adapter_factory=ClaudeAgentSdkAdapter,
             )
-        )
-    else:
-        skipped.append(
-            "Claude leg: ANTHROPIC_API_KEY missing in .env "
-            "(Claude Code session auth is NOT inherited — see "
-            "memory reference_anthropic_sdk_in_claude_code.md)"
         )
 
     return tuple(panel), tuple(skipped)
