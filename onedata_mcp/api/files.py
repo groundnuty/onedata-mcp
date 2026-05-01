@@ -441,6 +441,10 @@ async def move_file(
     headers = dict(config.auth_headers)
     headers["X-CDMI-Specification-Version"] = "1.1.1"
     headers["Content-Type"] = "application/cdmi-object"
+    # Onedata 25.0 CDMI returns 406 without an explicit Accept matching the
+    # request body type. Verified live 2026-05-01; without Accept: 406, with
+    # `application/cdmi-object`: 201. See research/empirical-onedata-25.0-findings.md.
+    headers["Accept"] = "application/cdmi-object"
 
     body = {"move": f"{src_space}/{src_inner}"}
 
