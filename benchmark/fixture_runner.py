@@ -26,7 +26,8 @@ from onedata_mcp.api import files as files_api
 from onedata_mcp.api import qos as qos_api
 from onedata_mcp.api import spaces as spaces_api
 from onedata_mcp.api import transfers as transfers_api
-from onedata_mcp.utils import OnedataApiError
+from onedata_mcp.config import get_oneprovider_config
+from onedata_mcp.utils import OnedataApiError, request
 
 SPACE = "ppam_2026_mcp_tests"
 
@@ -286,24 +287,102 @@ async def _check_convergence(scenario: Scenario) -> bool:
                 return False
 
         if f.qos_expressions:
+            # First: check rules are at least attached (catches the
+            # "rule was never created" case).
             try:
                 summary = await qos_api.get_file_qos_summary(file_id)
             except OnedataApiError:
                 return False
-            requirements = summary.get("requirements", {})
+            requirements = summary.get("requirements") or {}
             if not isinstance(requirements, dict):
                 return False
-            # Any requirement still in 'pending' status → not converged.
-            for status in requirements.values():
-                if status == "pending":
-                    return False
-            # Number of distinct rules attached must be at least the
-            # number we requested (the system may add more for inheritance,
-            # which we tolerate).
             if len(requirements) < len(f.qos_expressions):
                 return False
 
+            # Strategy 3a (research/empirical-findings #16): inspect
+            # actual data placement, not QoS rule status. Onedata 25.0
+            # leaves rule status pinned at 'pending' indefinitely in
+            # multi-rule cases even when the underlying data IS fully
+            # replicated to all required providers.
+            #
+            # Special case: if EVERY rule is in 'impossible' status, the
+            # fixture is intentionally unfulfillable (e.g. P2 violator
+            # files) — that's the terminal converged state, even though
+            # no data placement satisfies it. Treat as converged.
+            statuses = list(requirements.values())
+            if statuses and all(s == "impossible" for s in statuses):
+                continue  # this file converged: rule is terminally impossible
+            if not await _qos_data_satisfied(file_id, f.qos_expressions):
+                return False
+
     return True
+
+
+async def _qos_data_satisfied(
+    file_id: str,
+    qos_expressions: tuple[tuple[str, int], ...],
+) -> bool:
+    """True if the file's data is replicated to satisfy each QoS expression.
+
+    Reads `get_file_distribution`. For each (expression, replicas_num)
+    pair, evaluates the expression once via the space-level QoS
+    evaluator to get the matching providerIds, then checks the file is
+    fully replicated to at least `replicas_num` of them.
+    """
+    try:
+        dist = await files_api.get_file_distribution(file_id)
+    except OnedataApiError:
+        return False
+    per_provider = dist.get("distributionPerProvider") or {}
+    if not isinstance(per_provider, dict):
+        return False
+
+    fully_replicated_pids: set[str] = set()
+    for pid, entry in per_provider.items():
+        if not isinstance(entry, dict) or not entry.get("success"):
+            continue
+        # Empirical-findings #15: 25.0 returns virtualSize, older docs
+        # showed logicalSize. Permissive fallback.
+        logical = entry.get("virtualSize") or entry.get("logicalSize") or 0
+        physical = sum(
+            sb.get("physicalSize") or 0
+            for sb in (entry.get("distributionPerStorageBackend") or {}).values()
+            if isinstance(sb, dict) and sb.get("success")
+        )
+        if logical > 0 and physical >= logical:
+            fully_replicated_pids.add(pid)
+
+    space_id = await _resolve_space_id_async()
+    for expression, replicas_num in qos_expressions:
+        try:
+            matching = await _evaluate_qos_expression_provider_ids(space_id, expression)
+        except OnedataApiError:
+            return False
+        # How many of the matching providers actually hold the file fully?
+        if len(matching & fully_replicated_pids) < replicas_num:
+            return False
+    return True
+
+
+async def _evaluate_qos_expression_provider_ids(space_id: str, expression: str) -> set[str]:
+    """Resolve a QoS expression to the set of providerIds whose storages
+    match it. Uses POST /spaces/{sid}/evaluate_qos_expression."""
+    config = get_oneprovider_config()
+    response = await request(
+        config,
+        "POST",
+        f"/spaces/{space_id}/evaluate_qos_expression",
+        json_body={"expression": expression},
+    )
+    body = response["body"] or {}
+    matching = body.get("matchingStorageBackends") or body.get("matchingStorages") or []
+    pids: set[str] = set()
+    for entry in matching:
+        if isinstance(entry, dict):
+            pid = entry.get("providerId")
+            if isinstance(pid, str):
+                pids.add(pid)
+    return pids
 
 
 # ---------------------------------------------------------------------------

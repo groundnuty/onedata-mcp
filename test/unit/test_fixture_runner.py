@@ -150,10 +150,14 @@ async def test_materialise_files_creates_with_metadata_and_qos(
 
 
 @pytest.mark.asyncio
-async def test_check_convergence_returns_true_when_all_files_present_and_qos_settled(
+async def test_check_convergence_returns_true_when_data_replicated(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
+    """Strategy 3a: convergence inspects DATA placement, not rule status.
+    File metadata matches, distribution shows the file is fully present
+    on the provider matched by the QoS expression — converged."""
     _set_env(monkeypatch)
+    fixture_runner._reset_space_id_cache_for_tests()
     sc = _scenario(
         "D99",
         files=(
@@ -161,20 +165,57 @@ async def test_check_convergence_returns_true_when_all_files_present_and_qos_set
                 path="/ppam_2026_mcp_tests/d99/x.txt",
                 content="x",
                 json_metadata={"k": "v"},
-                qos_expressions=(("country=PL", 1),),
+                qos_expressions=(("providerId=p1", 1),),
             ),
         ),
     )
+    # Lookup file id
     httpx_mock.add_response(
         method="POST",
         url=_lookup("/ppam_2026_mcp_tests/d99/x.txt"),
         json={"fileId": "x-id"},
     )
+    # Metadata matches the fixture
     httpx_mock.add_response(
         method="GET",
         url="https://provider.example/api/v3/oneprovider/data/x-id/metadata/json",
         json={"k": "v"},
     )
+    # Distribution: provider p1 fully holds the file
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/data/x-id/distribution",
+        json={
+            "type": "REG",
+            "distributionPerProvider": {
+                "p1": {
+                    "success": True,
+                    "virtualSize": 1,
+                    "distributionPerStorageBackend": {
+                        "s1": {"success": True, "physicalSize": 1, "blocks": [[0, 1]]}
+                    },
+                }
+            },
+        },
+    )
+    # Cache the space id so _resolve_space_id_async returns immediately
+    httpx_mock.add_response(
+        method="GET",
+        url="https://onezone.example/api/v3/onezone/spaces",
+        json={"spaces": ["sp1"]},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url="https://onezone.example/api/v3/onezone/spaces/sp1",
+        json={"name": "ppam_2026_mcp_tests", "spaceId": "sp1"},
+    )
+    # evaluate_qos_expression matches p1's storage
+    httpx_mock.add_response(
+        method="POST",
+        url="https://provider.example/api/v3/oneprovider/spaces/sp1/evaluate_qos_expression",
+        json={"matchingStorageBackends": [{"id": "s1", "name": "posix-local", "providerId": "p1"}]},
+    )
+    # qos_summary still polled for the "rules attached" sanity
     httpx_mock.add_response(
         method="GET",
         url="https://provider.example/api/v3/oneprovider/data/x-id/qos/summary",
@@ -185,17 +226,22 @@ async def test_check_convergence_returns_true_when_all_files_present_and_qos_set
 
 
 @pytest.mark.asyncio
-async def test_check_convergence_returns_false_when_qos_pending(
+async def test_check_convergence_returns_true_even_when_rule_status_pending(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
+    """Strategy 3a (research/empirical-findings #16): a QoS rule may
+    stay 'pending' indefinitely on Onedata 25.0 even when the data IS
+    fully replicated. Convergence MUST treat data presence as authoritative,
+    not rule status — otherwise legitimate fixtures spuriously time out."""
     _set_env(monkeypatch)
+    fixture_runner._reset_space_id_cache_for_tests()
     sc = _scenario(
         "D99",
         files=(
             FileFixture(
                 path="/ppam_2026_mcp_tests/d99/x.txt",
                 content="x",
-                qos_expressions=(("country=PL", 1),),
+                qos_expressions=(("providerId=p1", 1),),
             ),
         ),
     )
@@ -204,13 +250,147 @@ async def test_check_convergence_returns_false_when_qos_pending(
         url=_lookup("/ppam_2026_mcp_tests/d99/x.txt"),
         json={"fileId": "x-id"},
     )
+    # Data IS fully replicated on p1
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/data/x-id/distribution",
+        json={
+            "type": "REG",
+            "distributionPerProvider": {
+                "p1": {
+                    "success": True,
+                    "virtualSize": 1,
+                    "distributionPerStorageBackend": {
+                        "s1": {"success": True, "physicalSize": 1, "blocks": [[0, 1]]}
+                    },
+                }
+            },
+        },
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url="https://onezone.example/api/v3/onezone/spaces",
+        json={"spaces": ["sp1"]},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url="https://onezone.example/api/v3/onezone/spaces/sp1",
+        json={"name": "ppam_2026_mcp_tests", "spaceId": "sp1"},
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url="https://provider.example/api/v3/oneprovider/spaces/sp1/evaluate_qos_expression",
+        json={"matchingStorageBackends": [{"id": "s1", "name": "posix-local", "providerId": "p1"}]},
+    )
+    # The rule is STILL 'pending' even though data is fully present.
+    # Pre-strategy-3a, this would have blocked convergence.
     httpx_mock.add_response(
         method="GET",
         url="https://provider.example/api/v3/oneprovider/data/x-id/qos/summary",
         json={"requirements": {"q1": "pending"}, "status": "pending"},
     )
 
+    assert await fixture_runner._check_convergence(sc) is True
+
+
+@pytest.mark.asyncio
+async def test_check_convergence_returns_false_when_data_not_yet_replicated(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """Inverse: if the QoS-matching providers don't yet hold the data
+    fully (physicalSize < virtualSize), convergence must say no."""
+    _set_env(monkeypatch)
+    fixture_runner._reset_space_id_cache_for_tests()
+    sc = _scenario(
+        "D99",
+        files=(
+            FileFixture(
+                path="/ppam_2026_mcp_tests/d99/x.txt",
+                content="xxxx",
+                qos_expressions=(("providerId=p1", 1),),
+            ),
+        ),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=_lookup("/ppam_2026_mcp_tests/d99/x.txt"),
+        json={"fileId": "x-id"},
+    )
+    # Rule IS attached but data only PARTIALLY replicated.
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/data/x-id/qos/summary",
+        json={"requirements": {"q1": "pending"}, "status": "pending"},
+    )
+    # Data only PARTIALLY replicated on p1: virtualSize=4, physicalSize=2
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/data/x-id/distribution",
+        json={
+            "type": "REG",
+            "distributionPerProvider": {
+                "p1": {
+                    "success": True,
+                    "virtualSize": 4,
+                    "distributionPerStorageBackend": {
+                        "s1": {"success": True, "physicalSize": 2, "blocks": [[0, 2]]}
+                    },
+                }
+            },
+        },
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url="https://onezone.example/api/v3/onezone/spaces",
+        json={"spaces": ["sp1"]},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url="https://onezone.example/api/v3/onezone/spaces/sp1",
+        json={"name": "ppam_2026_mcp_tests", "spaceId": "sp1"},
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url="https://provider.example/api/v3/oneprovider/spaces/sp1/evaluate_qos_expression",
+        json={"matchingStorageBackends": [{"id": "s1", "name": "posix-local", "providerId": "p1"}]},
+    )
+
     assert await fixture_runner._check_convergence(sc) is False
+
+
+@pytest.mark.asyncio
+async def test_check_convergence_returns_true_when_all_rules_terminal_impossible(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """Strategy 3a special case: a fixture file with intentionally
+    unfulfillable rules (e.g. P2 violator.bin) is terminal-converged
+    even though no data placement satisfies the rules. All rules must
+    be in 'impossible' status."""
+    _set_env(monkeypatch)
+    fixture_runner._reset_space_id_cache_for_tests()
+    sc = _scenario(
+        "D99",
+        files=(
+            FileFixture(
+                path="/ppam_2026_mcp_tests/d99/violator.bin",
+                content="x",
+                qos_expressions=(("providerId=fakedoesnotexist000000000000000000ch0000", 1),),
+            ),
+        ),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=_lookup("/ppam_2026_mcp_tests/d99/violator.bin"),
+        json={"fileId": "v-id"},
+    )
+    # All rules are terminally 'impossible' — accept as converged.
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/data/v-id/qos/summary",
+        json={"requirements": {"q1": "impossible"}, "status": "impossible"},
+    )
+
+    assert await fixture_runner._check_convergence(sc) is True
 
 
 @pytest.mark.asyncio

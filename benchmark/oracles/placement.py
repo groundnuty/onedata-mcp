@@ -26,7 +26,26 @@ SPACE = "ppam_2026_mcp_tests"
 SPACE_PATH_PREFIX = f"/{SPACE}/"
 DYNAMIC_DEADLINE_SECONDS = 60.0
 DYNAMIC_POLL_INTERVAL = 5.0
-EU_TOKENS = ("country=PL", "country=SK", "country=AT", "country=DE", "geo=EU")
+# EU placement signals — accept paper-canonical user-attribute tokens
+# (kept for forward compat if Cyfronet later configures user QoS attrs)
+# AND providerId-based fallbacks because SPICE providers don't expose
+# user QoS attrs (research/empirical-findings #14).
+from benchmark._federation_constants import (  # noqa: E402
+    PROVIDER_ID_CLOUD_PL,
+    PROVIDER_ID_CLOUD_SK,
+)
+
+EU_TOKENS = (
+    "country=PL",
+    "country=SK",
+    "country=AT",
+    "country=DE",
+    "geo=EU",
+    PROVIDER_ID_CLOUD_PL,
+    PROVIDER_ID_CLOUD_SK,
+)
+PL_TOKENS = ("country=PL", PROVIDER_ID_CLOUD_PL)
+SK_TOKENS = ("country=SK", PROVIDER_ID_CLOUD_SK)
 
 
 # ---------------------------------------------------------------------------
@@ -280,8 +299,11 @@ async def verify_p5(ctx: RunContext, trace: AgentTrace) -> OracleResult:
         )
     )
     answer = trace.final_answer
-    has_pl = contains_token(answer, "country=PL")
-    has_sk = contains_token(answer, "country=SK")
+    # Accept either canonical attribute tokens or providerId tokens
+    # (per research/empirical-findings #14 — SPICE federation doesn't
+    # expose user-attribute QoS tags so scenarios use providerIds).
+    has_pl = any(contains_token(answer, t) for t in PL_TOKENS)
+    has_sk = any(contains_token(answer, t) for t in SK_TOKENS)
     has_conflict_word = any(
         contains_token(answer, kw)
         for kw in ("conflict", "mutual", "exclusive", "incompatible", "cannot")
@@ -303,10 +325,11 @@ async def verify_p5(ctx: RunContext, trace: AgentTrace) -> OracleResult:
             # (the swagger example is misleading). Empirical-findings #15.
             expr = detail.get("expression") or detail.get("qosExpression") or ""
             expressions.append(expr)
-        if not (
-            any("country=PL" in e for e in expressions)
-            and any("country=SK" in e for e in expressions)
-        ):
+        # Either user-attr tokens (paper-canonical) or providerId tokens
+        # (SPICE-empirical) count as the PL / SK signal.
+        has_pl_rule = any(any(t in e for t in PL_TOKENS) for e in expressions)
+        has_sk_rule = any(any(t in e for t in SK_TOKENS) for e in expressions)
+        if not (has_pl_rule and has_sk_rule):
             federation_pass = False
             fed_diag.append(f"missing PL or SK rule; got expressions={expressions}")
     except OnedataApiError as e:
@@ -317,9 +340,9 @@ async def verify_p5(ctx: RunContext, trace: AgentTrace) -> OracleResult:
     if not called:
         mcp_diag.append("no get_file_qos_summary on conflict file")
     if not has_pl:
-        mcp_diag.append("answer missing 'country=PL'")
+        mcp_diag.append("answer missing PL rule (country=PL or cloud-pl providerId)")
     if not has_sk:
-        mcp_diag.append("answer missing 'country=SK'")
+        mcp_diag.append("answer missing SK rule (country=SK or Cloud-SK providerId)")
     if not has_conflict_word:
         mcp_diag.append("answer missing conflict / mutual-exclusion signal")
 
