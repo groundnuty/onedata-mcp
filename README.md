@@ -1,6 +1,38 @@
-# Onedata MCP Server
+# Onedata MCP Server (PPAM 2026 fork)
 
-An [MCP](https://modelcontextprotocol.io/) server that connects assistants to [Onedata](https://onedata.org/) (Onezone + Oneprovider): spaces, harvesters, and file operations.
+An [MCP](https://modelcontextprotocol.io/) server that connects assistants to [Onedata](https://onedata.org/) (Onezone + Oneprovider): spaces, harvesters, files, **QoS, distribution, providers, transfers**.
+
+This fork (branch `ppam2026/14-tools` of `groundnuty/onedata-mcp`) extends [`M0rgho/onedata-mcp`](https://github.com/M0rgho/onedata-mcp) with six federation-state tools needed for the PPAM 2026 *LLM-agentic access to a federated scientific data layer with Onedata* benchmark. Pinned to **Onedata 25.0** swagger. See [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) for endpoint mapping, three corrections vs. paper §3 spec, and known gaps (notably: no public move/rename endpoint upstream).
+
+## Tool surface
+
+| Tool                          | Group         | Notes                                                |
+|-------------------------------|---------------|------------------------------------------------------|
+| `list_user_spaces`            | spaces        |                                                      |
+| `list_marketplace_spaces`     | spaces        |                                                      |
+| `list_space_providers`        | spaces        | **NEW** — providers from oneprovider's `/spaces/{sid}` |
+| `get_file_id`                 | files         |                                                      |
+| `get_file_attributes`         | files         |                                                      |
+| `list_children`               | files         |                                                      |
+| `list_files_recursively`      | files         |                                                      |
+| `download_file`               | files         |                                                      |
+| `grep_file_content`           | files         |                                                      |
+| `create_file`                 | files         |                                                      |
+| `delete_file`                 | files         |                                                      |
+| `move_file`                   | files         | **NEW** — currently `NotImplementedError` (no public REST endpoint in Onedata 25.0; pending decision) |
+| `get_file_metadata`           | files         | json / rdf / xattrs                                  |
+| `set_file_metadata`           | files         | json / rdf / xattrs                                  |
+| `get_file_distribution`       | files         | **NEW** — per-provider, per-storage block ranges     |
+| `get_file_qos_summary`        | qos           | **NEW**                                              |
+| `add_file_qos_requirement`    | qos           | **NEW** — async; returns ID, replication eventual    |
+| `get_qos_requirement`         | qos           | **NEW** — detail by ID                               |
+| `remove_qos_requirement`      | qos           | **NEW**                                              |
+| `list_space_transfers`        | transfers     | **NEW** — IDs only; pair with `get_transfer`         |
+| `get_transfer`                | transfers     | **NEW**                                              |
+| `list_user_harvesters`        | harvesters    |                                                      |
+| `get_harvester_index_schema`  | harvesters    |                                                      |
+| `query_harvester_index`       | harvesters    | excluded from headline benchmark allowlist           |
+| `query_by_metadata`           | metadata      | **NEW** — recursive predicate evaluator (no harvester) |
 
 ## Requirements
 
