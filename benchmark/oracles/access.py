@@ -220,7 +220,22 @@ async def verify_a4(ctx: RunContext, trace: AgentTrace) -> OracleResult:
 
 async def verify_a5(ctx: RunContext, trace: AgentTrace) -> OracleResult:
     target_path = f"{SPACE_PATH_PREFIX}a5/important/checkpoint.bin"
-    eu_tokens = ("country=PL", "country=SK", "country=AT", "country=DE", "geo=EU")
+    # Accept either user-attribute tokens (paper-canonical) or providerId
+    # tokens (SPICE-empirical) per research/empirical-findings #14.
+    from benchmark._federation_constants import (
+        PROVIDER_ID_CLOUD_PL,
+        PROVIDER_ID_CLOUD_SK,
+    )
+
+    eu_tokens = (
+        "country=PL",
+        "country=SK",
+        "country=AT",
+        "country=DE",
+        "geo=EU",
+        PROVIDER_ID_CLOUD_PL,
+        PROVIDER_ID_CLOUD_SK,
+    )
 
     # mcp_pass: agent created the file at target_path AND added a QoS req
     # with EU expression and replicas_num ≥ 2.

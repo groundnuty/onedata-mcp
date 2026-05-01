@@ -349,18 +349,68 @@ pre-stage QoS rule we add to trigger a migration similarly stays
 exits because we wait for transfer-log entries that may have completed
 and aged out before we noticed.
 
-## 17. P4 pre-stage transfer didn't appear in transfer log within 120s
+## 17. P4 pre-stage — fixed by switching to direct `POST /transfers`
 
-Hard cap (120s) hit. Either:
-- The migration triggered but completed and aged out of `state=ongoing`
-  before we polled (we DID also poll `state=ended`, but with limit=100
-  the captured tid may be later in the page). Check pagination.
-- The migration never triggered because the `providerId=` pinning rule
-  itself stayed `pending` per entry #16, so Onedata never scheduled
-  the actual transfer.
+Original strategy (temp `providerId=<id>` QoS rule whose side-effect
+was a migration, with the runner polling for the resulting transfer
+log entry) timed out reliably at 120s. Root cause: entry #16 — the
+temp QoS rule itself stayed `pending` indefinitely, so the migration
+was never reliably scheduled.
 
-Triage in flight. Fixing convergence first (entry #16) will likely
-unstick this too — same root cause family.
+**Fix landed 2026-05-01 (commit `55669ac`)**: pre-stage uses
+`POST /api/v3/oneprovider/transfers` directly with
+`{type: "migration", replicatingProviderId, evictingProviderId, fileId}`.
+Returns the transferId immediately. P4 pre-stage now completes in
+~6s on the live federation (was 120s timeout).
+
+Lesson: when a high-level Onedata abstraction (QoS rules) doesn't
+behave as documented under load, look for the lower-level direct API
+that bypasses the abstraction entirely. POST /transfers is the
+canonical migration scheduler; the QoS-rule indirection was always
+"side effect of higher-level intent" rather than "atomic primitive".
+
+## 18. Snapshot-vs-re-query: the oracle race window
+
+Discovered live 2026-05-01 D-band smoke. D1's oracle re-queries
+`list_user_spaces` at oracle time to derive ground truth. The
+federation has 27+ spaces visible to the admin user, including some
+with duplicate names (`TestData` × 2, `StefansSpace` × 2 — Onedata
+permits non-unique space names). Between the agent's
+`list_user_spaces` call and the oracle's, the federation can churn
+(entries appear/disappear, provider counts shift). The agent's
+honest answer fails verification not because of agent error but
+because ground truth has shifted under the oracle's feet.
+
+**Partial fix this turn**: `RunContext` now carries a
+`spaces_snapshot` field populated at fixture-prepare time. D1's
+oracle reads from the snapshot, not from a fresh re-query.
+
+**The deeper problem**: the synthetic smoke harness still
+regenerates the agent's answer from a *new* `list_user_spaces` call,
+which can disagree with the snapshot. In a real LLM-driven benchmark
+this won't happen — the agent's actual `tools/list` response is
+captured once and used both for the answer and for verification.
+The smoke's residual D1 failure is a smoke-harness limitation, not
+a substrate or oracle bug.
+
+**Implication for the paper**: §4 oracle-design discussion should
+acknowledge that ground truth needs to be *snapshotted at trial
+boundaries*, not re-derived at oracle time, when the substrate is
+visibly mutable. Not novel (τ-bench's ground truth is also
+snapshotted) but worth surfacing as a federation-specific concern.
+
+## 19. POST /transfers requires both `replicatingProviderId` AND `evictingProviderId` for `migration`
+
+Discovered when implementing the entry #17 fix. Onedata's `migration`
+transfer type semantically equals "replicate then evict"; the API
+requires both the destination provider (`replicatingProviderId`) AND
+the source provider (`evictingProviderId`) to be specified. The
+swagger documents this but the inline cURL example only shows
+`replication` (single provider), which can mislead.
+
+The fixture runner picks the OTHER bound provider as the eviction
+source — works on a 2-provider space; 3+ providers would need an
+explicit choice from the test fixture.
 
 ## Maintenance
 

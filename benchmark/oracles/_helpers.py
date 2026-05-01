@@ -24,8 +24,22 @@ def extract_paths(text: str, anchor: str | None = None) -> set[str]:
 
 
 def extract_int(text: str, key: str) -> int | None:
-    """Pull `<key>=<int>` from text. Returns None if not found / not int."""
-    m = re.search(rf"{re.escape(key)}\s*[=:]\s*(\d+)", text)
+    """Pull a number associated with `key` from `text`. Returns None if not
+    found or not parseable as int.
+
+    Tolerates several output shapes agents typically use:
+      'tagged=5'                — kv equals
+      'count: 5'                — kv colon
+      '| CloudSKTest | 3 |'     — markdown table row
+      'CloudSKTest 3 providers' — name-then-number
+      '`Cloud-SK`: 3'           — backticked key + colon
+
+    Strategy: locate `key` (literal, case-sensitive), then scan forward
+    on the same line for the first non-negative integer that's not part
+    of a longer alphanumeric token (e.g. ignore '46-g14b5bda7' digits).
+    """
+    pattern = rf"{re.escape(key)}\s*[=:|\-`*\s]*(\d+)(?!\w)"
+    m = re.search(pattern, text)
     return int(m.group(1)) if m else None
 
 

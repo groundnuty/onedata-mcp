@@ -22,11 +22,13 @@ SPACE_PATH_PREFIX = f"/{SPACE}/"
 async def verify_d1(ctx: RunContext, trace: AgentTrace) -> OracleResult:
     """D1: List spaces with provider counts.
 
-    Ground truth = `list_user_spaces` (whatever's currently registered with
-    Onezone). The agent uses the same source — we're verifying the
-    transcription, not testing federation correctness.
+    Ground truth = ctx.spaces_snapshot — the spaces visible at
+    fixture-prepare time. Re-querying at oracle time would be
+    flaky: the federation can churn (entries appear/disappear)
+    between the agent's call and the oracle's. See
+    research/empirical-findings #18.
     """
-    spaces = await spaces_api.list_user_spaces()
+    spaces = ctx.spaces_snapshot or tuple(await spaces_api.list_user_spaces())
     answer = trace.final_answer
     for s in spaces:
         name = s.get("name")

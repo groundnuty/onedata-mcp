@@ -45,6 +45,11 @@ class RunContext:
     # ready. Dynamic oracles use ready_at as the deadline anchor.
     fixture_started_at: float = 0.0
     fixture_ready_at: float = 0.0
+    # Snapshot of the user's visible spaces at fixture-prepare time, so
+    # D1 / D4 / D6 oracles compare against a stable ground truth instead
+    # of re-querying (the federation can churn between the agent's call
+    # and the oracle's call). See research/empirical-findings #18.
+    spaces_snapshot: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)

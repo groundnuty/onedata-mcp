@@ -59,12 +59,18 @@ async def prepare_trial(scenario: Scenario) -> RunContext:
     # Phase 4 — Convergence wait
     await _wait_for_convergence(scenario, started_at)
 
+    # Snapshot federation state right before handing off to the harness.
+    # See research/empirical-findings #18: re-querying at oracle time
+    # produces flaky results when the federation has many spaces churning.
+    spaces_snapshot = tuple(await spaces_api.list_user_spaces())
+
     return RunContext(
         scenario_id=scenario.id,
         fixture_paths=fixture_paths,
         captured_transfer_id=captured_transfer_id,
         fixture_started_at=started_at,
         fixture_ready_at=time.time(),
+        spaces_snapshot=spaces_snapshot,
     )
 
 
