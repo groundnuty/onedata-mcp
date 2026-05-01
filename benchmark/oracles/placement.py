@@ -60,7 +60,9 @@ async def verify_p1(ctx: RunContext, trace: AgentTrace) -> OracleResult:
         fully = set()
         for pid, entry in per_provider.items():
             if isinstance(entry, dict) and entry.get("success"):
-                logical = entry.get("logicalSize") or 0
+                # Onedata 25.0 returns `virtualSize`; older docs sometimes
+                # show `logicalSize`. Empirical-findings #14, 2026-05-01.
+                logical = entry.get("virtualSize") or entry.get("logicalSize") or 0
                 physical = sum(
                     sb.get("physicalSize") or 0
                     for sb in (entry.get("distributionPerStorageBackend") or {}).values()
@@ -297,7 +299,9 @@ async def verify_p5(ctx: RunContext, trace: AgentTrace) -> OracleResult:
                 detail = await qos_api.get_qos_requirement(qos_id)
             except OnedataApiError:
                 continue
-            expr = detail.get("qosExpression") or ""
+            # Onedata 25.0 returns `expression`, NOT `qosExpression`
+            # (the swagger example is misleading). Empirical-findings #15.
+            expr = detail.get("expression") or detail.get("qosExpression") or ""
             expressions.append(expr)
         if not (
             any("country=PL" in e for e in expressions)

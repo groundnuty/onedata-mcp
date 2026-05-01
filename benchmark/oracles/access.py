@@ -251,7 +251,9 @@ async def verify_a5(ctx: RunContext, trace: AgentTrace) -> OracleResult:
                     detail = await qos_api.get_qos_requirement(qos_id)
                 except OnedataApiError:
                     continue
-                expr = detail.get("qosExpression") or ""
+                # Onedata 25.0 returns `expression`, not `qosExpression`.
+                # Empirical-findings #15, 2026-05-01.
+                expr = detail.get("expression") or detail.get("qosExpression") or ""
                 rep = detail.get("replicasNum") or 0
                 if rep >= 2 and any(tok in expr for tok in eu_tokens):
                     ok = True

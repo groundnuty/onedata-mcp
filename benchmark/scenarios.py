@@ -18,6 +18,11 @@ multiple files share a per-scenario subdir.
 
 from __future__ import annotations
 
+from benchmark._federation_constants import (
+    QOS_BOTH_OR,
+    QOS_PL,
+    QOS_SK,
+)
 from benchmark._scenario_types import (
     FileFixture,
     Fixture,
@@ -389,14 +394,23 @@ P1 = Scenario(
             FileFixture(
                 _path("P1", "model_v1.pt"),
                 content="A" * 4096,
-                # The fixture runner waits for both providers to fully
-                # replicate before declaring P1 ready.
-                qos_expressions=(("country=PL | country=SK", 2),),
+                # Two SEPARATE rules, each pinning to one provider, force
+                # replication to both. (Single OR-rule with replicas=2
+                # is satisfied by 2 copies on EITHER provider, not one
+                # on each.) Federation lacks user QoS attributes
+                # (research/empirical-findings #14), so we use
+                # providerId-based expressions.
+                qos_expressions=(
+                    (QOS_PL, 1),
+                    (QOS_SK, 1),
+                ),
             ),
         ),
         notes=(
             "Both PL and SK are EU; the agent must report both as fully "
-            "replicated EU providers in its answer."
+            "replicated EU providers in its answer. Two separate "
+            "providerId-based rules force replication to both providers "
+            "(empirical-findings #14, #16)."
         ),
     ),
     oracle_check=(
@@ -430,21 +444,25 @@ P2 = Scenario(
             FileFixture(
                 _path("P2", "critical", "violator.bin"),
                 content="x" * 1024,
-                # country=DE is unfulfillable on our PL+SK providers, so
-                # the QoS rule will be in 'impossible' state.
-                qos_expressions=(("country=DE", 1),),
+                # Unfulfillable: a fictional providerId that doesn't
+                # exist in the federation — the rule sits 'impossible'.
+                # (Original spec used country=DE; not viable since
+                # country= matches no storages on this federation —
+                # see research/empirical-findings #14.)
+                qos_expressions=(("providerId=00000000nonexistent000000000000ch0000", 1),),
             ),
             FileFixture(
                 _path("P2", "critical", "ok.bin"),
                 content="y" * 1024,
-                # country=PL is fulfillable (cloud-pl satisfies it).
-                qos_expressions=(("country=PL", 1),),
+                # Fulfillable: cloud-pl satisfies providerId=<cloud-pl>.
+                qos_expressions=((QOS_PL, 1),),
             ),
         ),
         notes=(
-            "Uses country=DE as the unfulfillable expression. If the "
-            "federation later acquires a German provider, this fixture "
-            "must be revised — see design/04."
+            "Unfulfillable rule uses a fake providerId. If the "
+            "federation later changes provider IDs, this fixture's "
+            "fake-id stays unfulfillable as long as it doesn't collide "
+            "with a real id — design/04 + empirical-findings #14."
         ),
     ),
     oracle_check=(
@@ -490,9 +508,11 @@ P3 = Scenario(
             FileFixture(
                 _path("P3", "result.bin"),
                 content="z" * 8192,
-                # Initially scoped to ONE provider so the new EU rule
-                # actually triggers a transfer.
-                qos_expressions=(("country=PL", 1),),
+                # Initially scoped to ONE provider (cloud-pl) so the new
+                # 2-EU-provider rule actually triggers a replication
+                # transfer to Cloud-SK. providerId-based per
+                # research/empirical-findings #14.
+                qos_expressions=((QOS_PL, 1),),
             ),
         ),
     ),
@@ -574,9 +594,14 @@ P5 = Scenario(
             FileFixture(
                 _path("P5", "conflicted.bin"),
                 content="conflict",
+                # Two providerId-based rules at replicas=1 each. With
+                # only 2 providers in the federation, the rules together
+                # need 2 distinct providers but each individually points
+                # at a specific one — fulfillable, but the agent should
+                # observe and report the multi-rule constraint.
                 qos_expressions=(
-                    ("country=PL", 1),
-                    ("country=SK", 1),
+                    (QOS_PL, 1),
+                    (QOS_SK, 1),
                 ),
             ),
         ),
@@ -612,17 +637,17 @@ P6 = Scenario(
             FileFixture(
                 _path("P6", "single-copy", "lone1.bin"),
                 content="lone",
-                qos_expressions=(("country=PL", 1),),
+                qos_expressions=((QOS_PL, 1),),
             ),
             FileFixture(
                 _path("P6", "single-copy", "lone2.bin"),
                 content="lone",
-                qos_expressions=(("country=SK", 1),),
+                qos_expressions=((QOS_SK, 1),),
             ),
             FileFixture(
                 _path("P6", "single-copy", "redundant.bin"),
                 content="redundant",
-                qos_expressions=(("country=PL | country=SK", 2),),
+                qos_expressions=((QOS_BOTH_OR, 2),),
             ),
         ),
     ),
