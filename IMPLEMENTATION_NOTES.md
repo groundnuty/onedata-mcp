@@ -1,6 +1,6 @@
 # Implementation notes — PPAM 2026 MCP server fork
 
-> **Documentation map.** This file is the operational reference. Decisions are in `design/` (00 fork, 01 move, 02 query-by-metadata, 03 allowlist, 04 scenarios). Empirical observations against the live 25.0 deployment are in `research/empirical-onedata-25.0-findings.md`. Paper-writing-agent handoff (corrections to §3 / §4 / §7 spec text) is in `papers/ppam-2026/research/28-empirical-spec-corrections.md`.
+> **Documentation map.** This file is the operational reference. Decisions are in `design/` (00 fork, 01 move, 02 query-by-metadata, 03 allowlist, 04 scenarios, 05 reset protocol, 06 oracle philosophy). Empirical observations against the live 25.0 deployment are in `research/empirical-onedata-25.0-findings.md`. Paper-writing-agent handoff (corrections to §3 / §4 / §7 spec text) is in `papers/ppam-2026/research/28-empirical-spec-corrections.md`.
 
 
 **Branch:** `ppam2026/14-tools` of `groundnuty/onedata-mcp` (fork of `M0rgho/onedata-mcp`).
