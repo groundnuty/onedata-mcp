@@ -1,10 +1,11 @@
 """Per-scenario oracle dispatch.
 
-Each oracle takes (RunContext, AgentTrace) and returns bool: did the trial
-succeed per τ-bench's hard-binary discipline (paper §4¶3, "we adopt
-τ-bench's hard-binary discipline (r ∈ {0,1}, no partial credit)").
+Each oracle takes (RunContext, AgentTrace) and returns OracleResult: a
+two-axis judgement of (mcp_pass, federation_pass, diagnosis) per design/06.
+The pass^k aggregator (#22) reduces over `mcp_pass`; the paper §7 Threats
+narrative consumes `mcp_pass=True ∧ federation_pass=False` rates.
 
-Format-tier oracles parse the agent's final_answer.
+Format-tier oracles parse the agent's final_answer; federation_pass is None.
 Static-tier oracles inspect federation post-state via the REST side-channel.
 Dynamic-tier oracles poll federation state with deadlines.
 
@@ -12,17 +13,18 @@ Implementation conventions:
 - Each verifier is async (federation reads are async).
 - Verifiers MUST NOT call write tools — the harness verifies via tool-call
   log that the oracle's REST side-channel only made GETs.
-- Verifiers should never raise on agent error; they return False.
+- Verifiers should never raise on agent error; they return an OracleResult
+  with mcp_pass=False and a diagnostic string.
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 
-from benchmark._runtime_types import AgentTrace, RunContext
+from benchmark._runtime_types import AgentTrace, OracleResult, RunContext
 
 # Each oracle has the same signature for uniform dispatch.
-Oracle = Callable[[RunContext, AgentTrace], Awaitable[bool]]
+Oracle = Callable[[RunContext, AgentTrace], Awaitable[OracleResult]]
 
 
 def get_oracle(scenario_id: str) -> Oracle:
