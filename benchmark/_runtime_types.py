@@ -67,12 +67,19 @@ class AgentTrace:
 
 @dataclass(frozen=True)
 class ToolCall:
-    """One tool invocation logged by the harness."""
+    """One tool invocation logged by the harness.
+
+    `result` is the tool's response content (truncated, utf-8 string),
+    captured so oracles can replay the agent's actual view of federation
+    state without re-querying. See research/empirical-findings #18 for
+    why this matters (oracle race window).
+    """
 
     tool_name: str
     arguments: dict
     succeeded: bool
     error: str | None = None
+    result: str | None = None
 
 
 @dataclass(frozen=True)
