@@ -84,10 +84,10 @@ Full rationale and tradeoffs: **[`design/02-query-by-metadata-no-harvester.md`](
 
 The fork now exposes ~21 MCP tools (M0rgho's 14 + 7 we added: 6 from the spec plus the recursive `query_by_metadata`). The PPAM benchmark will use the harness's `tool_context_mode={"full","minimal"}` to:
 
-- run a **headline** sweep with a curated 14-tool allowlist (`benchmark/tool_allowlist.HEADLINE_14`)
-- run an **ablation** sweep with the 22-tool full surface (`benchmark/tool_allowlist.ABLATION_FULL` = headline + 8 extras; harvesters excluded because the federation has no harvester)
+- run a **headline** sweep with a curated 15-tool allowlist (`benchmark/tool_allowlist.HEADLINE`)
+- run an **ablation** sweep with the 22-tool full surface (`benchmark/tool_allowlist.ABLATION_FULL` = headline + 7 extras; harvesters excluded because the federation has no harvester)
 
-This strengthens the paper's curation argument rather than weakening it. The allowlist is machine-readable in `benchmark/tool_allowlist.py`, drift-tested against the live MCP server in `test/unit/test_tool_allowlist.py`, and rationalised per-tool in `design/03-tool-allowlist-curation.md`. Two paper Table 1 edits the writing agent should make: drop `remove_file` (not exercised by any of the 18 tasks), add `get_transfer` (P4 needs it because `list_space_transfers` returns IDs only).
+This strengthens the paper's curation argument rather than weakening it. The allowlist is machine-readable in `benchmark/tool_allowlist.py`, drift-tested against the live MCP server in `test/unit/test_tool_allowlist.py`, and rationalised per-tool in `design/03-tool-allowlist-curation.md`. One paper Table 1 edit the writing agent should make: add `get_transfer` and bump the headline count from "14-tool" to "15-tool" wherever it appears (P4 needs `get_transfer` because `list_space_transfers` returns IDs only).
 
 ## Testing
 
