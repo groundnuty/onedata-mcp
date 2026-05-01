@@ -10,7 +10,6 @@ Public entry point: `prepare_trial(scenario)` → `RunContext`.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import time
 
@@ -125,62 +124,64 @@ async def _materialise_files(
 
 
 async def _prestage_transfer(hint: TransferFixtureHint) -> str:
-    """Trigger a migration of `hint.src_path` to `hint.target_provider_name`,
-    capture the transferId, then back out the staging QoS rule.
+    """Schedule a transfer directly via POST /transfers and return the
+    transferId.
 
-    Strategy: temp QoS rule pinning to providerId. The Onedata QoS DSL
-    supports `providerId=<id>` as an explicit operand. We add the rule,
-    poll until a transfer for this file appears in list_space_transfers,
-    capture the transferId, then remove the rule. The transferId remains
-    in the federation transfer log (Onedata retains transfer history),
-    which is what the oracle reads at trial-end.
+    Earlier strategy used a temp QoS rule (providerId=<id>) to indirectly
+    trigger a migration; live smoke 2026-05-01 found the rule stayed
+    'pending' indefinitely on the live federation (research/empirical-
+    findings #16), so the migration was never reliably triggered.
+
+    Direct strategy: POST /transfers with the desired transfer type,
+    source/dest providerIds, and fileId. Onedata returns the transferId
+    immediately. The transfer remains in the federation log (Onedata
+    retains transfer history), which is what the P4 oracle reads at
+    trial-end.
+
+    For 'migration': replicating_provider_id = target (where the data
+    will be copied to), evicting_provider_id = the OTHER provider in
+    the space (where it currently is and gets removed from). This
+    mirrors paper-canonical 'migration' semantics: replicate then evict.
     """
     target_pid = await _resolve_provider_id(hint.target_provider_name)
 
-    # Resolve the file id for the temp rule.
+    # Pick the OTHER bound provider as the eviction source (works because
+    # this benchmark space has exactly 2 providers).
+    space_id = await _resolve_space_id_async()
+    detail = await spaces_api.get_space_providers(space_id)
+    bound_pids = [
+        e["providerId"]
+        for e in (detail.get("providers") or [])
+        if isinstance(e, dict) and isinstance(e.get("providerId"), str)
+    ]
+    other_pids = [pid for pid in bound_pids if pid != target_pid]
+    if not other_pids:
+        raise RuntimeError(f"Pre-stage migration needs ≥2 bound providers; got {len(bound_pids)}")
+
     file_id = await files_api.get_file_id(hint.src_path)
 
-    # Add temp pinning rule.
-    rule = await qos_api.add_qos_requirement(
-        file_id,
-        f"providerId={target_pid}",
-        replicas_num=1,
-    )
-    rule_id = rule.get("qosRequirementId") or rule.get("id")
+    if hint.transfer_type == "migration":
+        resp = await transfers_api.create_transfer(
+            file_id,
+            "migration",
+            replicating_provider_id=target_pid,
+            evicting_provider_id=other_pids[0],
+        )
+    elif hint.transfer_type == "replication":
+        resp = await transfers_api.create_transfer(
+            file_id, "replication", replicating_provider_id=target_pid
+        )
+    elif hint.transfer_type == "eviction":
+        resp = await transfers_api.create_transfer(
+            file_id, "eviction", evicting_provider_id=target_pid
+        )
+    else:
+        raise ValueError(f"unknown transfer_type: {hint.transfer_type!r}")
 
-    try:
-        # Poll until the migration appears in the transfer log for this file.
-        deadline = time.time() + RESET_HARD_CAP_SECONDS
-        captured: str | None = None
-        while time.time() < deadline:
-            page = await transfers_api.list_space_transfers(
-                _resolve_space_id_sync(),
-                state="ongoing",
-                limit=100,
-            )
-            captured = await _find_transfer_for_file(page["transfers"], file_id)
-            if captured is not None:
-                break
-            page = await transfers_api.list_space_transfers(
-                _resolve_space_id_sync(), state="ended", limit=100
-            )
-            captured = await _find_transfer_for_file(page["transfers"], file_id)
-            if captured is not None:
-                break
-            time.sleep(CONVERGENCE_POLL_INTERVAL)
-
-        if captured is None:
-            raise FixtureResetTimeout(
-                f"Pre-stage transfer for {hint.src_path} did not appear in "
-                f"the transfer log within {RESET_HARD_CAP_SECONDS}s"
-            )
-        return captured
-    finally:
-        # Always release the temp rule, even if polling failed.
-        # Best-effort cleanup; orphan rule is recoverable manually if needed.
-        if rule_id:
-            with contextlib.suppress(OnedataApiError):
-                await qos_api.remove_qos_requirement(rule_id)
+    transfer_id = resp.get("transferId")
+    if not isinstance(transfer_id, str):
+        raise RuntimeError(f"create_transfer returned no transferId: {resp!r}")
+    return transfer_id
 
 
 async def _resolve_provider_id(provider_name: str) -> str:

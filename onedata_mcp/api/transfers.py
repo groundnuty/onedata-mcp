@@ -95,3 +95,53 @@ async def get_transfer(transfer_id: str) -> dict[str, Any]:
     config = get_oneprovider_config()
     response = await request(config, "GET", f"/transfers/{transfer_id}")
     return response["body"]
+
+
+TransferType = Literal["replication", "eviction", "migration"]
+
+
+async def create_transfer(
+    file_id: str,
+    transfer_type: TransferType,
+    *,
+    replicating_provider_id: str | None = None,
+    evicting_provider_id: str | None = None,
+) -> dict[str, Any]:
+    """Schedule a transfer directly. Returns immediately with the transferId.
+
+    Endpoint: POST /api/v3/oneprovider/transfers (operationId: create_transfer)
+
+    Used by the fixture runner's pre-stage phase to set up scenario P4
+    (most-recent migration). The QoS-rule indirection turned out to be
+    flaky — rules stayed 'pending' on the live federation per
+    research/empirical-findings #16, so the migration was never reliably
+    triggered. This endpoint schedules transfers directly.
+
+    Args:
+        file_id: The file or directory to transfer (resolved via lookup_file_id).
+        transfer_type: 'replication', 'eviction', or 'migration'.
+        replicating_provider_id: Required for 'replication' and 'migration'.
+            The provider the data is being copied TO.
+        evicting_provider_id: Required for 'eviction' and 'migration'.
+            The provider whose replica is being removed.
+
+    Returns: {"transferId": "<id>"}.
+    """
+    if transfer_type in ("replication", "migration") and not replicating_provider_id:
+        raise ValueError(f"replicating_provider_id required for {transfer_type!r}")
+    if transfer_type in ("eviction", "migration") and not evicting_provider_id:
+        raise ValueError(f"evicting_provider_id required for {transfer_type!r}")
+
+    body: dict[str, Any] = {
+        "type": transfer_type,
+        "dataSourceType": "file",
+        "fileId": file_id,
+    }
+    if replicating_provider_id is not None:
+        body["replicatingProviderId"] = replicating_provider_id
+    if evicting_provider_id is not None:
+        body["evictingProviderId"] = evicting_provider_id
+
+    config = get_oneprovider_config()
+    response = await request(config, "POST", "/transfers", json_body=body)
+    return response["body"]
