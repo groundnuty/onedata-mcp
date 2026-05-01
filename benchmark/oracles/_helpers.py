@@ -12,12 +12,20 @@ PATH_RE = re.compile(r"/[A-Za-z][A-Za-z0-9_\-]*/[^\s,;'\"`)\]]+")
 
 
 def extract_paths(text: str, anchor: str | None = None) -> set[str]:
-    """Pull paths from a free-form agent answer.
+    """Pull FILE paths from a free-form agent answer.
 
     Robust against bullet points, backticks, list separators. Optionally
     filter to paths starting with `anchor` (e.g. '/ppam_2026_mcp_tests/').
+
+    Excludes trailing-slash matches (those are directory headers in agent
+    prose like "Files in `/space/d2/datasets/`:", NOT file paths the
+    agent intended to enumerate). All current callers expect file paths.
+    Surfaced 2026-05-02 by D2 live smoke: Claude correctly listed 3 file
+    paths but the directory header in its intro line got picked up as a
+    spurious 4th path. See research/empirical-onedata-25.0-findings.md.
     """
     found = set(PATH_RE.findall(text))
+    found = {p for p in found if not p.endswith("/")}
     if anchor:
         found = {p for p in found if p.startswith(anchor)}
     return found
