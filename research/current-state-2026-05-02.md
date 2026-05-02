@@ -5,21 +5,63 @@ infrastructure state, K=1 results, and the queued work for whoever
 picks up the harness next (paper-writing agent, future-self after
 context compaction, or a peer reviewing the project).
 
-## Panel composition (4 LLMs)
+## Panel composition (7 LLMs as of 2026-05-03)
 
-| LLM | Family | Endpoint | Open-weight | License |
-|---|---|---|---|---|
-| `claude-sonnet-4-5` | Anthropic | `claude-agent-sdk` (local CC binary) | ✗ | Proprietary |
-| `qwen3.6-35b` | Alibaba | Cyfronet Forge (`Qwen/Qwen3.6-35B-A3B`) | ✓ | Apache-2.0 |
-| `deepseek-v4-pro` | DeepSeek | OpenRouter → SiliconFlow pinned | ✓ | **MIT** |
-| `glm-4.7-flash` | Z.ai | Cyfronet Forge (`zai-org/GLM-4.7-Flash`) | ✓ | MIT |
+The panel deliberately spans **6 distinct LLM families** + the
+Anthropic frontier reference, with **4 model-vendor jurisdictions**
+(US, China, France, IBM-US). Local vLLM serving demonstrates the
+"deploy in any EU lab" thesis end-to-end.
 
-DeepSeek-V4 (released after my Jan-2026 cutoff): 1.6T / 49B MoE, 1M
-context. Two SKUs (Flash 284B/13B + Pro 1.6T/49B), both plain MIT.
-Discovered via OpenRouter probe + HF API verification.
+| # | LLM | Family / HQ | Endpoint | License | Note |
+|---|---|---|---|---|---|
+| 1 | `claude-sonnet-4-5` | Anthropic / 🇺🇸 | local CC binary | Anthropic ToS | frontier reference |
+| 2 | `qwen3.6-35b` | Alibaba / 🇨🇳 | Cyfronet Forge | Apache-2.0 | OSS, top open performer |
+| 3 | `glm-4.7-flash` | Z.ai / 🇨🇳 | Cyfronet Forge | MIT | OSS, deliberate-weak leg |
+| 4 | `deepseek-v4-pro` | DeepSeek / 🇨🇳 | OpenRouter → SiliconFlow | MIT | OSS, 1.6T/49B MoE, 1M ctx |
+| 5 | `gemma-4-31b-it` | Google / 🇺🇸 | local vLLM `:8002` | Apache-2.0 | OSS, 256K ctx, native FC |
+| 6 | `granite-4.1-30b` | IBM / 🇺🇸 | local vLLM `:8003` | Apache-2.0 | OSS, native FC |
+| 7 | **`devstral-2-123b`** | **Mistral / 🇫🇷** | local vLLM `:8004` | Modified MIT (rev cap) | **only EU-HQ leg, 256K ctx** |
 
-Mistral-Small-4-119B-2603 candidate to be added when user has access
-(would be 5th leg, EU-deployment narrative).
+### EU-end-to-end narrative (paper-grade)
+
+The panel composition lets the paper make a sharp claim about
+**EU sovereignty in agentic federated-data workflows**:
+
+- **EU compute**: Cyfronet (Krakow, Poland) + IISAS (Bratislava, Slovakia) provider sites
+- **EU data layer**: Onedata 25.0 federation (`data.spice-platform.eu`)
+- **EU model**: Mistral Devstral-2-123B (Paris, France — the EU's flagship open-weight frontier lab)
+- **EU client orchestration**: agent harness running locally on operator's machine
+
+This is the *only* benchmark configuration in the paper that has
+**no US or Chinese dependency in the critical path**. Other panel
+legs (Sonnet, Qwen, V4-pro, Gemma, Granite) demonstrate that the
+MCP layer works with any frontier or top-tier OSS model regardless
+of vendor jurisdiction — but the Mistral leg specifically shows
+that the *entire stack* can be EU-sovereign.
+
+### License caveats to flag in paper
+
+- **Mistral Devstral-2-123B**: modified MIT with a $20M
+  consolidated-monthly-revenue clause for the licensee's company.
+  Permissive for academic, research, and public-sector deployment
+  (the SPICE-federation audience), restrictive for $20M+/month
+  enterprises. Mistral also publishes Devstral-Small-2-24B under
+  plain Apache-2.0 if pure-permissive is required.
+- **Sonnet**: closed weights, included as frontier reference only.
+- **All others**: pure Apache-2.0 or MIT — deployable anywhere.
+
+### Local vLLM serving (legs 5-7)
+
+| Leg | Port | Model file | Notes |
+|---|---|---|---|
+| Gemma-4-31B-it | 8002 | `/models/gemma-4-31b-it` | 32K context (vLLM cfg, advertised 256K); needs `--reasoning-parser gemma4` to strip harmony channel markers from `content` |
+| Granite-4.1-30B | 8003 | `/models/granite-4.1-30b-bf16` | 32K context; needs `--tool-call-parser granite4` for structured `tool_calls` (without it, `<tool_call>` markup leaks into text) |
+| Devstral-2-123B | 8004 | `/models/devstral-2-123b` | 32K context (vLLM cfg, advertised 256K); native FC works out-of-the-box |
+
+`max_tokens` capped at 4096 per leg via `LOCAL_VLLM_<N>_MAX_TOKENS`
+because vLLM enforces `prompt_tokens + max_tokens <= max_model_len`
+and the LLMConfig 32k default collides with these models' 32K
+contexts. Operator can override per leg via env var.
 
 ## Infrastructure state
 
@@ -32,6 +74,9 @@ ppam_2026_mcp_tests_claude_sonnet_4_5  d3a48a8d428c9a8ac1ffee471a2d8bb3ch0d5f
 ppam_2026_mcp_tests_qwen3_6_35b        b724a1f754a37c38dc0615cb079f651fchf8b3
 ppam_2026_mcp_tests_glm_4_7_flash      028ebe59f7d722b86ca61ac87810c6a4ch8964
 ppam_2026_mcp_tests_deepseek_v4_pro    bf2994a889b94e6720415b758e478fc6chd084
+ppam_2026_mcp_tests_gemma_4_31b_it     8b02f6c0302dfd47dce04be8a1ec71b0ch174b
+ppam_2026_mcp_tests_granite_4_1_30b    dae3b5a2c1508b78dcf44e12812f69c2chbb47
+ppam_2026_mcp_tests_devstral_2_123b    75069945b622e6190eab947622386d8cchfaee
 ```
 
 All supported by both `cloud-pl` + `Cloud-SK` providers (~100 MiB
