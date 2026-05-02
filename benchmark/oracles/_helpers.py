@@ -32,23 +32,46 @@ def extract_paths(text: str, anchor: str | None = None) -> set[str]:
     about which paths fit the criterion; their final answers are valid
     English. Oracle now respects the exclusion semantics.
 
-    Two-pass design:
+    Three-pass design:
       Pass 1 — per-line: skip paths on lines that contain an exclusion
         marker (catches GLM-style inline `(so excluded)`).
-      Pass 2 — cross-reference: drop any captured path whose basename
-        is mentioned on a self-correction line (catches Qwen-style
-        `Wait, redundant.bin...` follow-ups where the bullet line was
-        captured cleanly but a later line retracts).
+      Pass 2 — section-context: track strong-header sections. A header
+        like `**File NOT meeting the criteria:**` opens an exclusion
+        section; subsequent paths until the next header or blank line
+        are dropped (catches GLM's header pattern observed 2026-05-02
+        in run T202740).
+      Pass 3 — basename cross-reference: drop any captured path whose
+        basename is mentioned on a self-correction line (catches
+        Qwen-style `Wait, redundant.bin...` follow-ups where the bullet
+        line was captured cleanly but a later line retracts).
     """
     candidate_paths: set[str] = set()
     self_correction_lines: list[str] = []
+    in_exclusion_section = False
 
     for line in text.splitlines():
+        stripped = line.strip()
         line_lower = line.lower()
-        is_exclusion = any(marker in line_lower for marker in _EXCLUSION_MARKERS)
-        if is_exclusion:
+
+        # Section-state transitions. Strong headers (markdown bold-with-
+        # colon `**...:**` or `#`/`##` style) reset the section context;
+        # blank lines also end whatever section we were in.
+        if not stripped:
+            in_exclusion_section = False
+            continue
+        if _is_strong_header(stripped):
+            in_exclusion_section = any(
+                phrase in line_lower for phrase in _EXCLUSION_SECTION_HEADERS
+            )
+            # Header lines themselves don't typically contain paths,
+            # but treat them as boundaries either way.
+            continue
+
+        is_inline_exclusion = any(marker in line_lower for marker in _EXCLUSION_MARKERS)
+        if is_inline_exclusion or in_exclusion_section:
             self_correction_lines.append(line_lower)
             continue
+
         for path in PATH_RE.findall(line):
             if path.endswith("/"):
                 continue
@@ -56,7 +79,7 @@ def extract_paths(text: str, anchor: str | None = None) -> set[str]:
                 continue
             candidate_paths.add(path)
 
-    # Pass 2: drop paths whose basename appears on a self-correction line.
+    # Pass 3: drop paths whose basename appears on a self-correction line.
     if self_correction_lines:
         retracted: set[str] = set()
         for path in candidate_paths:
@@ -66,6 +89,24 @@ def extract_paths(text: str, anchor: str | None = None) -> set[str]:
         candidate_paths -= retracted
 
     return candidate_paths
+
+
+def _is_strong_header(line: str) -> bool:
+    """True for lines that look like a Markdown header marking a new
+    section. Two common shapes in agent prose:
+    - `**Header text:**` or `**Header text**` (bold, often colon-suffixed)
+    - `# Header` / `## Header` (ATX-style)
+
+    Used by extract_paths to detect section boundaries: a header opens
+    a new section whose context (inclusion vs exclusion) is determined
+    by phrases inside it.
+    """
+    if line.startswith("#"):
+        return True
+    if line.startswith("**") and ("**" in line[2:] or line.endswith(":")):
+        # Catches `**text:**`, `**text**`, `**File NOT meeting:**`, etc.
+        return True
+    return False
 
 
 # Lines containing any of these markers (case-insensitive) are treated
@@ -85,6 +126,25 @@ _EXCLUSION_MARKERS = (
     "actually,",
     "(distractor",
     "is a distractor",
+)
+
+# Phrases that, when they appear in a Markdown-style strong header line,
+# signal that the section the header opens contains paths the agent is
+# explicitly EXCLUDING from its answer. All paths between this header
+# and the next header / blank line are dropped. Caught GLM's
+# `**File NOT meeting the criteria:**` pattern observed 2026-05-02.
+_EXCLUSION_SECTION_HEADERS = (
+    "not meeting",
+    "doesn't meet",
+    "does not meet",
+    "do not meet",
+    "not match",
+    "doesn't match",
+    "do not qualify",
+    "doesn't qualify",
+    "not included",
+    "to exclude",
+    "excluded",
 )
 
 

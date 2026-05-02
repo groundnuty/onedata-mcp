@@ -125,3 +125,80 @@ def test_extract_paths_does_not_drop_excluding_in_path_name() -> None:
     # filename literally containing 'exclud' is rare. Verify the current
     # behaviour explicitly so a future relaxation is a deliberate change.
     assert result == set()  # documents the conservative behavior
+
+
+# ---------------------------------------------------------------------------
+# Section-context (Pass 2): GLM's header pattern from run T202740
+# ---------------------------------------------------------------------------
+
+
+def test_extract_paths_section_header_exclusion_glm_pattern() -> None:
+    """GLM's actual T202740 P6 final_answer (verbatim shape). Inclusion
+    section + exclusion section, each with bold-with-colon header, paths
+    on separate lines below the header."""
+    text = """
+Based on the QOS analysis:
+
+**Files requiring only 1 replica:**
+* /ppam_2026_mcp_tests_glm_4_7_flash/p6/single-copy/lone1.bin (replicaNum: 1)
+* /ppam_2026_mcp_tests_glm_4_7_flash/p6/single-copy/lone2.bin (replicaNum: 1)
+
+**File NOT meeting the criteria:**
+* /ppam_2026_mcp_tests_glm_4_7_flash/p6/single-copy/redundant.bin (requires 2 replicas)
+
+The two files named "lone*" require a single replica.
+"""
+    result = extract_paths(text, anchor="/ppam_2026_mcp_tests_glm_4_7_flash/")
+    assert "/ppam_2026_mcp_tests_glm_4_7_flash/p6/single-copy/lone1.bin" in result
+    assert "/ppam_2026_mcp_tests_glm_4_7_flash/p6/single-copy/lone2.bin" in result
+    # Section-context (Pass 2): the path is in a section opened by an
+    # exclusion-header `**File NOT meeting the criteria:**` — dropped.
+    assert "/ppam_2026_mcp_tests_glm_4_7_flash/p6/single-copy/redundant.bin" not in result
+
+
+def test_extract_paths_section_header_inclusion_does_not_drop() -> None:
+    """Make sure positive section headers (no exclusion phrase) keep
+    their paths. The opening header `**Matching files:**` should NOT
+    be treated as exclusion."""
+    text = """
+**Matching files:**
+* /space/a.bin
+* /space/b.bin
+
+**Other notes:**
+* These are interesting cases.
+"""
+    result = extract_paths(text, anchor="/space/")
+    assert result == {"/space/a.bin", "/space/b.bin"}
+
+
+def test_extract_paths_blank_line_resets_exclusion_section() -> None:
+    """Once a blank line ends the exclusion section, the next batch of
+    paths (without a new header) should be captured normally."""
+    text = """
+**Files NOT meeting the criteria:**
+* /space/excluded1.bin
+
+* /space/included_after_blank.bin
+"""
+    result = extract_paths(text, anchor="/space/")
+    # Path right after exclusion header → dropped
+    assert "/space/excluded1.bin" not in result
+    # Path after blank line resets the section state. With no fresh
+    # header, current behavior treats lines as section-less (default
+    # inclusion). Document that.
+    assert "/space/included_after_blank.bin" in result
+
+
+def test_extract_paths_atx_header_also_recognised() -> None:
+    """ATX-style headers (`### ...`) work too, not just `**...:**`."""
+    text = """
+### Files NOT included
+* /space/excluded.bin
+
+### Matching files
+* /space/included.bin
+"""
+    result = extract_paths(text, anchor="/space/")
+    assert "/space/excluded.bin" not in result
+    assert "/space/included.bin" in result
