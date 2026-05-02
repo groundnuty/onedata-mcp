@@ -70,14 +70,30 @@ def build_panel() -> tuple[tuple[PanelEntry, ...], tuple[str, ...]]:
     forge_base = os.getenv("PLGRID_FORGE_BASE_URL", DEFAULT_FORGE_BASE_URL).rstrip("/")
 
     if forge_key:
-        # Forge model substitutions worth knowing (probed 2026-05-02):
-        #   meta-llama/Llama-3.3-70B-Instruct  →  inactive on Forge.
-        #     Closest substitute: CYFRAGOVPL/Llama-PLLuM-70B-chat-250801
-        #     (Llama-3 fork, Cyfronet-native, Polish-leaning).
-        # Current panel: GLM-4.7-Flash + Qwen3-Coder-30B as the OSS legs.
+        # Forge model classification probed 2026-05-02. Only models with the
+        # `FC` (function-calling) tag in the Forge web UI are panel-eligible
+        # — non-FC models reject `tool_choice="auto"` with a BadRequestError
+        # at the API boundary. The tag is NOT exposed via `/v1/models`, so
+        # this list must be maintained empirically. See guide.plgrid.pl
+        # (Polish doc) for the FC tag definition.
+        #
+        # Excluded as non-FC:
+        #   - CYFRAGOVPL/pllum-12b-nc-chat-250715
+        #   - speakleash/Bielik-11B-v2.6-Instruct
+        #
+        # Excluded as benchmark-unsuitable (probed 2026-05-02):
+        #   - speakleash/Bielik-11B-v3.0-Instruct  — rejects max_tokens=32k+
+        #     (server-side cap below our budget); 0/4 PASS at any cap
+        #   - CYFRAGOVPL/Llama-PLLuM-70B-chat-250801 — 0/4 PASS even with
+        #     32k tokens; tool-use weakness, not a token issue
+        #
+        # Inactive (Forge says "supported but not loaded"):
+        #   - meta-llama/Llama-3.3-70B-Instruct
         for name, model_id in (
             ("glm-4.7-flash", "zai-org/GLM-4.7-Flash"),
             ("qwen3-coder-30b", "Qwen/Qwen3-Coder-30B-A3B-Instruct"),
+            ("qwen3.6-35b", "Qwen/Qwen3.6-35B-A3B"),
+            ("qwq-32b", "Qwen/QwQ-32B"),
         ):
             panel.append(
                 PanelEntry(

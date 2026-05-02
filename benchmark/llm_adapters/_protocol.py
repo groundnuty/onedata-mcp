@@ -18,7 +18,12 @@ class LLMConfig:
     api_key: str | None = None
     model_id: str = ""  # the specific model identifier passed to the SDK
     temperature: float = 1.0
-    max_tokens: int = 4096
+    # Generous cap to keep reasoning-style models (QwQ-32B chain-of-thought,
+    # Qwen3.6-35B thinking mode) from being truncated mid-answer. Forge
+    # quota is per-token billed but the user has plenty; better to spend
+    # tokens than to have trials fail for a trivial cap. Bumped 2026-05-02
+    # from 4096 after QwQ-32B 0/4 panel run with empty answers.
+    max_tokens: int = 32768
     # Bumped 2026-05-02 (was 15): Claude was hitting `error_max_turns` on P3
     # before it could narrate a final answer (rule-add + multi-poll work
     # genuinely needs more turns than terse scenarios). See artefact
