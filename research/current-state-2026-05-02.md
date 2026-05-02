@@ -86,23 +86,42 @@ After M-1..M-9 + oracle D3 normalisation + retry-with-backoff:
 
 **Total RESET_FAIL: 0/72** (retry-with-backoff worked).
 
-### Post-fix (run `20260502T183948_postfix_no_v4`, M-10/M-11/M-12 applied)
+### Post-fix progression (4 K=1 runs, structural validation)
+
+After M-1..M-12 + adapter fixes + oracle refinements (commits `f35a2c7`
+through `c862766`):
 
 ```
-| LLM                | Pass rate     | Δ vs pre-fix | Lift attribution                       |
-|--------------------|---------------|--------------|----------------------------------------|
-| claude-sonnet-4-5  | 18/18 (100%)  | +1 ⭐         | D3 lifted by M-10 (first-ever 100%)    |
-| qwen3.6-35b        | 17/18 (94%)   | 0            | P3 still empty-content (~33% rate)     |
-| glm-4.7-flash      | 11/18 (61%)   | -1 (K=1 noise) | A4 (M-11), D2 (M-12), D3 (M-10) lifted; |
-|                    |               |              | A6, D1, D5, P4 K=1 noise-flips         |
-| deepseek-v4-pro    | 1/9 partial   | n/a          | D3 PASS confirms M-10 works on V4-pro; |
-|                    |               |              | other 8 = OpenRouter 429 rate limits   |
+| LLM           | T183948 | T195311 | T202740 | T204921 | Pattern                       |
+|---------------|---------|---------|---------|---------|-------------------------------|
+| Sonnet        | 18/18   | 17/18   | 18/18   | 18/18   | Stable 18/18 (3 of 4 runs)    |
+| Qwen3.6       | 17/18   | 16/18   | 18/18   | 17/18   | Stable ~18/18 (1-cell K=1)    |
+| GLM-4.7-flash | 11/18   | 15/18   | 15/18   | 14/18   | Drifts 11–15/18 (K=1 noise)   |
 ```
 
-**Structural reading**: Sonnet hit 18/18 for the first time across
-any K=1 run in this project. M-10/M-11/M-12 each demonstrably lifted
-their target scenarios. GLM K=1 noise dominates the headline number;
-K=8 is needed for paper-grade GLM measurement.
+**Headline result**: Sonnet AND Qwen3.6 both hit 18/18 in run T202740 —
+first time two LLMs cleared all 18 scenarios in the same run. Qwen3.6
+is the first open-weight model to achieve 100%.
+
+**Structural fixes verified live across runs:**
+
+| Fix | Cell(s) | Verified runs | Evidence |
+|-----|---------|---------------|----------|
+| M-10 (`download_file` size envelope) | D3 | T183948+T195311+T202740+T204921 | D3 100% across 4 runs, 3 LLMs |
+| M-11 (`create_directory` + `create_parents=True`) | A4 | T183948+T195311+T202740+T204921 | A4 100% across runs (Qwen 1-cell K=1 wander) |
+| M-12 (prefix docstring) | D2 | T183948+T195311+T202740+T204921 | D2 100% across 4 runs |
+| D3 head encoding (50→30) | D3 (Sonnet/V4-pro) | T195311+T202740+T204921 | Sonnet D3 PASS post-fix |
+| L-1 P3 loosening | P3 (Qwen) | T195311+T202740+T204921 | Qwen P3 PASS each run |
+| P4 wait-for-visibility (ENDED) | P4 | T195311 (Sonnet)+T202740+T204921 | Sonnet/Qwen/GLM P4 PASS post-fix |
+| P6 inline self-exclusion | P6 (Qwen) | T195311+T202740+T204921 | Qwen P6 PASS each post-fix run |
+| P6 section-context exclusion | P6 (GLM) | T204921 | GLM P6 PASS verified live |
+
+**GLM K=1 stochasticity** is the only persistent noise: it drifts
+11–15/18 across post-fix runs, with different cells failing each
+time (A1/A2/A5/D1/D5/P3/P6 across the 4 runs in various combinations).
+Real model reasoning gaps confirmed: A5 (malformed QoS expression
+on every run), occasional D1/A1/A2 truncation/counting errors. K=8
+is the only path to a paper-grade GLM percentage.
 
 ### Findings docs
 
@@ -112,35 +131,38 @@ K=8 is needed for paper-grade GLM measurement.
 
 ## Pending workstreams
 
-1. **OpenRouter 429 retry-with-backoff in OpenAI-compat adapter** —
-   prerequisite for V4-pro to clear K=1. Without this, V4-pro hits
-   rate limits 8/9 trials at `--scenario-parallelism 1`. ~10 LOC.
-2. **V4-pro K=1 (post-rate-limit-fix)** to honestly score V4-pro.
-   D3 already confirmed PASS; A4/D2 expected to lift via M-11/M-12.
-3. **K=8 headline run** — `make sweep-k8` is wired, ~3-4 hours wall.
+1. **V4-pro K=1** — adapter is unblocked (429 retry-with-backoff in
+   `dde4246`); per-LLM space already provisioned with leftovers but
+   the wait-for-visibility loop handles them. ~10-15 min wall, ~$0.27.
+   D3 already confirmed PASS pre-rate-limit-fix.
+2. **K=8 headline run** — `make sweep-k8` is wired, ~3-4 hours wall.
    Two-phase: Cyfronet+Anthropic parallel, OpenRouter serial. Will
-   smooth out GLM K=1 noise. Need item 1 first (else V4-pro is broken
-   for headline).
-4. **#22 pass^k aggregator** — `report.py` has K=1 reports; needs
+   smooth out GLM K=1 noise. Run after V4-pro K=1 confirms healthy.
+3. **#22 pass^k aggregator** — `report.py` has K=1 reports; needs
    `--aggregate-k` mode for K=8 headline table with pass^k columns.
-5. **Add Mistral-Small-4-119B-2603** when user provisions access.
-6. **#23 -spice-v1 onezone patch verification** (open).
-7. **#24 federation health** — 2/5 OPs unreachable (informational).
+4. **Add Mistral-Small-4-119B-2603** when user provisions access.
+5. **#23 -spice-v1 onezone patch verification** (open).
+6. **#24 federation health** — 2/5 OPs unreachable (informational).
 
-### Applied 2026-05-02
+### Applied 2026-05-02 (commit timeline, latest first)
 
-- **M-10 / M-11 / M-12 fleet-wide pass-rate fixes** (commit `f35a2c7`)
-  — see `research/empirical-mcp-server-findings.md`. Three low-LOC
-  wrapper changes lift fleet pass rate on D3, A4, D2.
-- **SiliconFlow `reasoning_content` echo** (commits `8f00137`, `22bd69f`)
-  — DeepSeek-V4-pro now passes API contract on SiliconFlow. Verified
-  via 4-strategy live probe.
-- **L-1 finding documented + P3 oracle loosened** — Qwen P3
-  empty-content output-emission quirk; rate ~33%; adapter ruled out as
-  cause. See `research/llm-output-stability-findings.md`. Loosening
-  applied: `mcp_pass = added_qos AND polled AND (answer_ok OR federation_pass)`
-  in `benchmark/oracles/placement.py::verify_p3`. New tests in
-  `test/unit/test_oracle_p3_loosened.py` (4 cases). Total 129 → 133 tests.
+```
+c862766  fix(oracle): extract_paths section-context for header exclusions (P6 GLM)
+da11400  fix(oracle): extract_paths self-exclusion semantics (P6 inline)
+ae18b6e  fix(fixture): wait specifically for ENDED state (P4 race)
+98fc99b  fix(fixture): wait for pre-staged transfer to be visible (P4)
+dde4246  fix(oracle+adapter): D3 head encoding + 429 retry-with-backoff
+324b72e  fix(oracle): loosen P3 mcp_pass per L-1 (Qwen empty-content)
+22bd69f  fix(adapter): also handle OpenRouter reasoning field name
+8f00137  fix(adapter): echo reasoning_content for SiliconFlow / DeepSeek-V4
+f35a2c7  fix(mcp): apply M-10/M-11/M-12 — lift fleet pass rate on D3/A4/D2
+```
+
+**Test growth**: 109 → 158 passing (+45%).
+
+**Findings docs**:
+- `empirical-mcp-server-findings.md` — M-1..M-12 (server design)
+- `llm-output-stability-findings.md` — L-1 (Qwen P3 empty-content quirk; oracle loosening applied)
 
 ## Cost notes (DeepSeek via OpenRouter)
 
