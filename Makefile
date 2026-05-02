@@ -260,6 +260,11 @@ list-runs:
 
 # Per-LLM pass-rate headline + fail list. Uses the latest run if RID
 # isn't passed.
+#
+# JSONL semantics: each file may contain multiple lines if the cell was
+# re-run or K>1. The LAST line is taken as canonical for K=1 inspection
+# (most recent trial wins, matching re-run-overwrites semantics). For
+# K>1 see issue #22 (pass^k aggregator).
 show-headline:
 	@RID="$(RID)"; \
 	if [ -z "$$RID" ]; then \
@@ -271,12 +276,13 @@ show-headline:
 	for f in $$RID/*.jsonl; do \
 	  basename "$$f" .jsonl; \
 	done | sed 's/__.*//' | sort -u | while read llm; do \
-	  pass=$$(for f in $$RID/$${llm}__*.jsonl; do jq -r '.outcome' "$$f"; done | grep -c PASS); \
-	  total=$$(ls $$RID/$${llm}__*.jsonl 2>/dev/null | wc -l | tr -d ' '); \
-	  fails=""; \
+	  pass=0; total=0; fails=""; \
 	  for f in $$RID/$${llm}__*.jsonl; do \
-	    o=$$(jq -r '.outcome' "$$f"); \
-	    if [ "$$o" != "PASS" ]; then \
+	    total=$$((total + 1)); \
+	    o=$$(tail -1 "$$f" | jq -r '.outcome'); \
+	    if [ "$$o" = "PASS" ]; then \
+	      pass=$$((pass + 1)); \
+	    else \
 	      fails="$$fails $$(basename $$f .jsonl | sed "s/$${llm}__//")($$o)"; \
 	    fi; \
 	  done; \
@@ -297,7 +303,7 @@ show-grid:
 	  | sed 's/__.*//' | sort -u | while read llm; do \
 	  printf "%-22s " "$$llm"; \
 	  for scen in D1 D2 D3 D4 D5 D6 A1 A2 A3 A4 A5 A6 P1 P2 P3 P4 P5 P6; do \
-	    o=$$(jq -r '.outcome' "$$RID/$${llm}__$${scen}.jsonl" 2>/dev/null); \
+	    o=$$(tail -1 "$$RID/$${llm}__$${scen}.jsonl" 2>/dev/null | jq -r '.outcome' 2>/dev/null); \
 	    case "$$o" in \
 	      PASS) printf "✓  ";; \
 	      FAIL) printf "✗  ";; \
@@ -317,11 +323,10 @@ show-trial:
 	  echo "Example: make show-trial RID=20260502T204921_postfix_v3 LLM=glm-4.7-flash SCEN=A5"; \
 	  exit 1; \
 	fi
-	@jq '{outcome, oracle_diagnosis, oracle_mcp_pass, oracle_federation_pass, \
+	@tail -1 "artefacts/$(RID)/$(LLM)__$(SCEN).jsonl" | jq '{outcome, oracle_diagnosis, oracle_mcp_pass, oracle_federation_pass, \
 	      rounds_used, finish_reason, error: (.error // "none"), \
 	      tool_calls_summary: [.tool_calls[] | {tool_name, succeeded, error: (.error // "ok")}], \
-	      final_answer: (.final_answer // "" | tostring)}' \
-	  "artefacts/$(RID)/$(LLM)__$(SCEN).jsonl"
+	      final_answer: (.final_answer // "" | tostring)}'
 
 # Quick failure inspection: outcome + diag + truncated final_answer.
 # Example: make inspect-fail RID=... LLM=glm-4.7-flash SCEN=A5
@@ -330,13 +335,13 @@ inspect-fail:
 	  echo "ERROR: need RID=<run-id> LLM=<llm-name> SCEN=<scenario-id>"; \
 	  exit 1; \
 	fi
-	@jq -r ' \
+	@tail -1 "artefacts/$(RID)/$(LLM)__$(SCEN).jsonl" | jq -r ' \
 	  "outcome: " + .outcome, \
 	  "diag:    " + (.oracle_diagnosis // ""), \
 	  "rounds:  " + (.rounds_used | tostring), \
 	  "tools:   " + ([.tool_calls[].tool_name] | join(",")), \
 	  "ans:     " + ((.final_answer // "") | .[0:500]) \
-	' "artefacts/$(RID)/$(LLM)__$(SCEN).jsonl"
+	'
 
 # ---------------------------------------------------------------------------
 # Housekeeping
