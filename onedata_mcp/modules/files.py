@@ -181,9 +181,24 @@ def register_module(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         """
         Recursively list non-directory files under a given file id or path.
+
+        ## Path-format normalization
+
+        Onedata's recursive listing returns paths *relative to the
+        listed parent* (e.g. 'msg00.txt' when listing `/space/a2/inbox/`).
+        This wrapper rewrites each entry's `path` to be absolute
+        (e.g. '/space/a2/inbox/msg00.txt') for consistency with every
+        other tool in the surface and with how briefs phrase paths.
+        See research/empirical-mcp-server-findings.md M-6.
+
+        Only applied when `parent_id_or_path` was passed as a path
+        (starts with '/'). When called with a fileId, the relative
+        paths are passed through unchanged — the caller chose the id
+        form and presumably knows what to compose with.
         """
+        original_arg = parent_id_or_path
         parent_id_or_path = await _resolve_with_mcp_root(parent_id_or_path, ctx)
-        return await list_files_recursively(
+        result = await list_files_recursively(
             parent_id_or_path,
             attributes=attributes,
             limit=limit,
@@ -191,6 +206,19 @@ def register_module(mcp: FastMCP) -> None:
             start_after=start_after,
             prefix=prefix,
         )
+        # Enrich each returned file with absolute path when the caller
+        # gave us a path to begin with. We use the caller's original
+        # absolute path (after MCP root resolution) as the prefix.
+        if isinstance(original_arg, str) and original_arg.startswith("/"):
+            prefix_path = original_arg.rstrip("/")
+            files = result.get("files")
+            if isinstance(files, list):
+                for entry in files:
+                    if isinstance(entry, dict):
+                        rel = entry.get("path")
+                        if isinstance(rel, str) and not rel.startswith("/"):
+                            entry["path"] = f"{prefix_path}/{rel.lstrip('/')}"
+        return result
 
     @mcp.tool(name="download_file", annotations=ToolAnnotations(readOnlyHint=True))
     async def mcp_download_file(
@@ -280,7 +308,12 @@ def register_module(mcp: FastMCP) -> None:
             description="File id or path to the file in format /<space_name>/<path_to_file>"
         ),
         metadata_type: str = Field(
-            description="Metadata type to set",
+            description=(
+                "Metadata type — accepts 'json' (custom JSON metadata, the "
+                "common case), 'rdf' (RDF/XML), or 'xattrs' (POSIX xattrs). "
+                "Common alias 'custom' is mapped to 'json'. Anything else is "
+                "rejected at tool-call time with a clear list of valid values."
+            ),
         ),
         metadata: str = Field(
             description="Metadata content to set",
@@ -289,9 +322,24 @@ def register_module(mcp: FastMCP) -> None:
     ) -> None:
         """
         Set metadata for a given file id or path by metadata type.
+
+        ## Validation
+
+        `metadata_type` accepts one of {'json', 'rdf', 'xattrs'} or the
+        alias 'custom' (mapped to 'json'). Any other value raises
+        ValueError immediately — Onedata's REST returns an opaque 404
+        for invalid types, which makes the failure look like a missing
+        file. See research/empirical-mcp-server-findings.md M-4.
         """
+        valid = ("json", "rdf", "xattrs")
+        normalized = "json" if metadata_type == "custom" else metadata_type
+        if normalized not in valid:
+            raise ValueError(
+                f"metadata_type must be one of {valid} (or alias 'custom' "
+                f"→ 'json'). Got: {metadata_type!r}"
+            )
         file_id_or_path = await _resolve_with_mcp_root(file_id_or_path, ctx)
-        return await set_file_metadata(file_id_or_path, metadata_type, metadata)
+        return await set_file_metadata(file_id_or_path, normalized, metadata)
 
     @mcp.tool(name="get_file_distribution", annotations=ToolAnnotations(readOnlyHint=True))
     async def mcp_get_file_distribution(
@@ -306,9 +354,58 @@ def register_module(mcp: FastMCP) -> None:
         are physically held (the steady state is partial replication).
         Symbolic links are not supported (server returns 400). For
         directories, returns aggregate distribution.
+
+        ## Provider-name enrichment
+
+        The Oneprovider REST returns the distribution keyed by
+        providerId hex strings only. This wrapper performs an inline
+        join with `list_user_spaces` to add a `providerName` field on
+        each provider entry, so callers don't have to chain a
+        secondary lookup. See research/empirical-mcp-server-findings.md
+        M-5.
         """
+        import asyncio as _asyncio
+
+        from onedata_mcp.api.spaces import get_space_providers, list_user_spaces
+
         file_id_or_path = await _resolve_with_mcp_root(file_id_or_path, ctx)
-        return await get_file_distribution(file_id_or_path)
+        result = await get_file_distribution(file_id_or_path)
+
+        # Build providerId → providerName lookup. The user's spaces
+        # are bounded (typically a handful), and `get_space_providers`
+        # for each is cheap. Run in parallel; ignore individual
+        # failures since enrichment is best-effort.
+        try:
+            spaces = await list_user_spaces()
+        except Exception:  # noqa: BLE001
+            spaces = []
+
+        async def _fetch(sid: str) -> dict | None:
+            try:
+                return await get_space_providers(sid)
+            except Exception:  # noqa: BLE001
+                return None
+
+        space_ids = [s.get("spaceId") for s in spaces if isinstance(s.get("spaceId"), str)]
+        details = await _asyncio.gather(*(_fetch(sid) for sid in space_ids))
+
+        pid_to_name: dict[str, str] = {}
+        for detail in details:
+            if not isinstance(detail, dict):
+                continue
+            for entry in detail.get("providers") or []:
+                if isinstance(entry, dict):
+                    pid = entry.get("providerId")
+                    name = entry.get("providerName")
+                    if isinstance(pid, str) and isinstance(name, str):
+                        pid_to_name.setdefault(pid, name)
+
+        per_provider = result.get("distributionPerProvider")
+        if isinstance(per_provider, dict):
+            for pid, info in per_provider.items():
+                if isinstance(info, dict) and pid in pid_to_name:
+                    info["providerName"] = pid_to_name[pid]
+        return result
 
     @mcp.tool(name="move_file", annotations=ToolAnnotations(destructiveHint=True))
     async def mcp_move_file(

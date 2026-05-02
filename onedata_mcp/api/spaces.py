@@ -55,9 +55,7 @@ async def resolve_space_id_or_name(value: str) -> str:
             if isinstance(sid, str):
                 return sid
     available = sorted(s.get("name", "?") for s in spaces if s.get("name"))
-    raise ValueError(
-        f"Space {value!r} not found. Available names: {available}"
-    )
+    raise ValueError(f"Space {value!r} not found. Available names: {available}")
 
 
 async def list_user_spaces() -> list[dict[str, Any]]:

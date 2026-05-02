@@ -11,6 +11,21 @@ aggregator (#22) consumes these files.
 The script logs a per-trial summary line to stdout so a human can watch
 progress; no other output. Run-level summary at the end shows pass rate
 per (LLM, scenario) and total wall-clock time.
+
+## Scenario-level parallelism
+
+`--scenario-parallelism N` (default 4) caps concurrent scenario tasks.
+Different scenarios use disjoint federation subtree paths so their
+fixtures cannot interfere; within each scenario task the full panel
+(all LLM legs) and all trials remain SERIAL — two LLMs touching the
+same scenario subtree concurrently would corrupt each other's writes.
+
+See `research/empirical-mcp-server-findings.md` M-2 for the cross-
+scenario pollution analysis that motivates this design.
+
+NOTE: `fixture_runner._wait_for_convergence` uses `time.sleep`
+(blocking), so convergence poll waits still serialise across concurrent
+tasks. Wall-clock savings come from overlapping the LLM dispatch phases.
 """
 
 from __future__ import annotations
@@ -27,10 +42,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(REPO_ROOT / ".env")
 
 # Imports that touch onedata_mcp.config must come AFTER load_dotenv.
-# Import all scenarios from the canonical module.
 from benchmark import scenarios as _scenarios_module  # noqa: E402
 from benchmark._scenario_types import Scenario  # noqa: E402
-from benchmark.panel import build_panel  # noqa: E402
+from benchmark.panel import PanelEntry, build_panel  # noqa: E402
 from benchmark.trial_runner import run_trial  # noqa: E402
 from onedata_mcp.main import mcp  # noqa: E402
 
@@ -70,6 +84,59 @@ def _make_run_id() -> str:
     return time.strftime("%Y%m%dT%H%M%S")
 
 
+async def _run_scenario_task(
+    semaphore: asyncio.Semaphore,
+    panel: tuple[PanelEntry, ...],
+    scenario: Scenario,
+    mcp_app,
+    run_id: str,
+    trials: int,
+    artefact_dir: Path,
+) -> dict[tuple[str, str], dict[str, int]]:
+    """Run the full panel × trials loop for one scenario, serialised within
+    the scenario and bounded by the semaphore across concurrent scenarios.
+
+    Returns a counts dict keyed by (llm_name, scenario_id) for every panel
+    entry — callers merge these into the run-level summary.
+
+    Exceptions from run_trial propagate unhandled: oracle bugs should
+    crash rather than be swallowed (per benchmark/oracles/__init__.py).
+    """
+    async with semaphore:
+        counts_by_cell: dict[tuple[str, str], dict[str, int]] = {}
+        for entry in panel:
+            # Build a fresh adapter per (entry, scenario) so concurrent
+            # scenario tasks never share mutable adapter state.
+            adapter = entry.build()
+            counts: dict[str, int] = {
+                "PASS": 0,
+                "FAIL": 0,
+                "RESET_FAIL": 0,
+                "ADAPTER_ERROR": 0,
+            }
+            for trial_ix in range(trials):
+                t0 = time.time()
+                artefact = await run_trial(
+                    adapter=adapter,
+                    scenario=scenario,
+                    mcp_app=mcp_app,
+                    run_id=run_id,
+                    trial_ix=trial_ix,
+                    artefact_dir=artefact_dir,
+                )
+                counts[artefact.outcome] += 1
+                elapsed = time.time() - t0
+                print(
+                    f"  [{entry.name} / {scenario.id} / trial {trial_ix}] "
+                    f"{artefact.outcome}  ({elapsed:.1f}s, "
+                    f"rounds={artefact.rounds_used}, "
+                    f"in={artefact.usage_in_tokens}, out={artefact.usage_out_tokens})"
+                    + (f"  err={artefact.error[:60]}" if artefact.error else "")
+                )
+            counts_by_cell[(entry.name, scenario.id)] = counts
+        return counts_by_cell
+
+
 async def _main_async(args: argparse.Namespace) -> int:
     requested_ids = (
         tuple(s.strip() for s in args.scenarios.split(",") if s.strip())
@@ -92,36 +159,32 @@ async def _main_async(args: argparse.Namespace) -> int:
     print(f"[run_panel] run_id={run_id}  artefacts → {artefact_dir}")
     print(
         f"[run_panel] panel: {[p.name for p in panel]}  "
-        f"scenarios: {[s.id for s in scenarios]}  trials={args.trials}"
+        f"scenarios: {[s.id for s in scenarios]}  trials={args.trials}  "
+        f"scenario_parallelism={args.scenario_parallelism}"
     )
 
     overall_t0 = time.time()
-    summary: dict[tuple[str, str], dict[str, int]] = {}
+    semaphore = asyncio.Semaphore(args.scenario_parallelism)
 
-    for entry in panel:
-        adapter = entry.build()
-        for scenario in scenarios:
-            counts = {"PASS": 0, "FAIL": 0, "RESET_FAIL": 0, "ADAPTER_ERROR": 0}
-            for trial_ix in range(args.trials):
-                t0 = time.time()
-                artefact = await run_trial(
-                    adapter=adapter,
-                    scenario=scenario,
-                    mcp_app=mcp,
-                    run_id=run_id,
-                    trial_ix=trial_ix,
-                    artefact_dir=artefact_dir,
-                )
-                counts[artefact.outcome] += 1
-                elapsed = time.time() - t0
-                print(
-                    f"  [{entry.name} / {scenario.id} / trial {trial_ix}] "
-                    f"{artefact.outcome}  ({elapsed:.1f}s, "
-                    f"rounds={artefact.rounds_used}, "
-                    f"in={artefact.usage_in_tokens}, out={artefact.usage_out_tokens})"
-                    + (f"  err={artefact.error[:60]}" if artefact.error else "")
-                )
-            summary[(entry.name, scenario.id)] = counts
+    tasks = [
+        _run_scenario_task(
+            semaphore=semaphore,
+            panel=panel,
+            scenario=scenario,
+            mcp_app=mcp,
+            run_id=run_id,
+            trials=args.trials,
+            artefact_dir=artefact_dir,
+        )
+        for scenario in scenarios
+    ]
+    # return_exceptions=False (default): first task exception propagates
+    # immediately and cancels remaining tasks — failures never hidden.
+    results: list[dict[tuple[str, str], dict[str, int]]] = await asyncio.gather(*tasks)
+
+    summary: dict[tuple[str, str], dict[str, int]] = {}
+    for cell_counts in results:
+        summary.update(cell_counts)
 
     total_secs = time.time() - overall_t0
     print(f"\n[run_panel] DONE in {total_secs:.0f}s")
@@ -148,6 +211,17 @@ def main() -> None:
         type=str,
         default="",
         help="Comma-separated scenario ids (e.g. 'D1,A1,P1'); empty = all 18.",
+    )
+    parser.add_argument(
+        "--scenario-parallelism",
+        type=int,
+        default=4,
+        help=(
+            "Max number of scenarios running concurrently (default: 4). "
+            "Different scenarios use disjoint federation subtree paths so "
+            "their fixtures cannot interfere. Cap is based on the live "
+            "SPICE federation having 2 active oneproviders; raise cautiously."
+        ),
     )
     parser.add_argument(
         "--run-id",
