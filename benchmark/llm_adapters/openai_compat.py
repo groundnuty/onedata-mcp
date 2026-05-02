@@ -113,18 +113,33 @@ class OpenAICompatAdapter:
                 "content": msg.content or None,
             }
             # SiliconFlow / DeepSeek thinking-mode contract: when the
-            # response carries `reasoning_content` (the model's chain-of-
+            # response carries reasoning content (the model's chain-of-
             # thought), the field MUST be echoed back on the prior-turn
             # assistant message in the next request, or SiliconFlow returns
-            # HTTP 400 (code 20015). Conditional: most providers / models
-            # don't emit this field and the no-op path preserves backward
-            # compatibility. The OpenAI SDK exposes unknown fields via
-            # ChatCompletionMessage.model_extra (Pydantic `extra='allow'`),
-            # but they're also reachable via `getattr` — using getattr keeps
-            # the access uniform across SDK versions.
-            reasoning_content = getattr(msg, "reasoning_content", None)
-            if reasoning_content:
-                assistant_entry["reasoning_content"] = reasoning_content
+            # HTTP 400 (code 20015 — "The `reasoning_content` in the
+            # thinking mode must be passed back to the API.").
+            #
+            # Field-name convention varies by upstream:
+            # - SiliconFlow's native API uses `reasoning_content`
+            # - OpenRouter renames it to `reasoning` (also adds
+            #   `reasoning_details` as a structured form)
+            # We read whichever the SDK has (preferring `reasoning` since
+            # OpenRouter is the only path that currently triggers this) and
+            # echo as `reasoning_content` (the name SiliconFlow's error
+            # explicitly demands; OpenRouter accepts the field on input
+            # regardless and passes it through).
+            #
+            # Conditional: most providers / models don't emit any reasoning
+            # field, and the no-op path preserves backward compatibility.
+            reasoning = getattr(msg, "reasoning", None) or getattr(msg, "reasoning_content", None)
+            if reasoning:
+                assistant_entry["reasoning_content"] = reasoning
+                # Also pass `reasoning_details` through if OpenRouter
+                # included it — some upstreams use the structured form to
+                # verify the chain was preserved end-to-end.
+                reasoning_details = getattr(msg, "reasoning_details", None)
+                if reasoning_details:
+                    assistant_entry["reasoning_details"] = reasoning_details
             if tool_calls:
                 assistant_entry["tool_calls"] = [
                     {
