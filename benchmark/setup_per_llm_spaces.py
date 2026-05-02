@@ -159,6 +159,41 @@ async def create_support_token(client: httpx.AsyncClient, space_id: str) -> str:
     return token
 
 
+async def get_current_user_id(client: httpx.AsyncClient) -> str:
+    """Return the userId of the user the calling token represents."""
+    body = await _onezone_get(client, "/user")
+    uid = body.get("userId")
+    if not isinstance(uid, str):
+        raise RuntimeError(f"get_current_user_id: unexpected response: {body!r}")
+    return uid
+
+
+async def add_user_to_space(
+    client: httpx.AsyncClient, space_id: str, user_id: str
+) -> None:
+    """PUT the user as a member of the space (admin endpoint).
+
+    Spaces created via the admin POST /spaces endpoint do NOT auto-add
+    the calling user as a member, which means the user can't see the
+    space in /user/spaces and (more importantly) can't access files
+    inside it. This call adds membership with default privileges.
+    Idempotent: HTTP 201 on first add, 204 on already-member.
+    """
+    r = await client.put(
+        f"{ONEZONE_HOST}/api/v3/onezone/spaces/{space_id}/users/{user_id}",
+        headers={
+            "X-Auth-Token": ONEZONE_TOKEN,
+            "accept": "application/json",
+            "content-type": "application/json",
+        },
+        json={},
+    )
+    if r.status_code >= 400:
+        raise RuntimeError(
+            f"add_user_to_space failed (HTTP {r.status_code}): {r.text[:300]}"
+        )
+
+
 async def main() -> int:
     panel, skipped = build_panel()
     if skipped:
@@ -179,7 +214,9 @@ async def main() -> int:
     verify = not ALLOW_INSECURE
     async with httpx.AsyncClient(verify=verify, timeout=30.0) as client:
         existing = await list_existing_spaces(client)
+        user_id = await get_current_user_id(client)
         print(f"[setup] {len(existing)} existing space(s) visible to the current user")
+        print(f"[setup] current user id: {user_id}")
 
         created: list[tuple[str, str, str]] = []  # (llm, space_name, space_id)
         reused: list[tuple[str, str, str]] = []
@@ -194,6 +231,14 @@ async def main() -> int:
             print(f"[setup] creating space `{target}` for LLM `{entry.name}`...")
             new_sid = await create_space(client, target)
             created.append((entry.name, target, new_sid))
+            # Admin POST /spaces does NOT auto-add the user as member.
+            # Without membership, the user can't access files inside the
+            # space — even with admin token. PUT them in explicitly.
+            try:
+                await add_user_to_space(client, new_sid, user_id)
+                print(f"  added user as space member ({user_id[:12]}...)")
+            except RuntimeError as e:
+                print(f"  WARN: could not add user to space: {e}")
             try:
                 token = await create_support_token(client, new_sid)
                 support_tokens.append((target, token))

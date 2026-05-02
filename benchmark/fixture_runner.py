@@ -36,14 +36,37 @@ SPACE = "ppam_2026_mcp_tests"
 # ---------------------------------------------------------------------------
 
 
-async def prepare_trial(scenario: Scenario) -> RunContext:
+async def prepare_trial(
+    scenario: Scenario,
+    *,
+    space_name: str = SPACE,
+    space_id: str | None = None,
+) -> RunContext:
     """Wipe + materialise + pre-stage + converge for one trial of `scenario`.
+
+    `space_name` selects which Onedata space the fixture targets. Default
+    is the original shared `ppam_2026_mcp_tests`; per-LLM-space mode
+    passes the LLM's dedicated space (see `benchmark/_per_llm_spaces.py`).
+
+    `space_id` short-circuits the name-to-id lookup. Useful for spaces
+    that aren't visible via `list_user_spaces` (e.g. the per-LLM spaces
+    were created via the admin endpoint without auto-membership). When
+    None, the code falls back to scanning `list_user_spaces` by name.
+
+    The caller MUST pass scenario already specialised to `space_name`
+    (so fixture paths match the target space) — see
+    `benchmark/_scenario_specialise.py`.
 
     Raises FixtureResetTimeout if convergence doesn't complete within the
     hard cap; the harness catches this and marks the trial RESET_FAIL.
     """
     started_at = time.time()
-    subtree_path = f"/{SPACE}/{scenario.id.lower()}"
+    subtree_path = f"/{space_name}/{scenario.id.lower()}"
+
+    # Pre-populate space-id cache if caller knew it. Saves a roundtrip
+    # AND works for spaces invisible via list_user_spaces.
+    if space_id is not None:
+        _SPACE_ID_CACHE[space_name] = space_id
 
     # Phase 1 — Wipe
     await _wipe_subtree(subtree_path)
@@ -54,15 +77,17 @@ async def prepare_trial(scenario: Scenario) -> RunContext:
     # Phase 3 — Pre-stage transfers (P4 only at present)
     captured_transfer_id: str | None = None
     for hint in scenario.fixture.transfers:
-        captured_transfer_id = await _prestage_transfer(hint)
+        captured_transfer_id = await _prestage_transfer(hint, space_name)
 
     # Phase 4 — Convergence wait
-    await _wait_for_convergence(scenario, started_at)
+    await _wait_for_convergence(scenario, started_at, space_name)
 
     # Snapshot federation state right before handing off to the harness.
     # See research/empirical-findings #18: re-querying at oracle time
     # produces flaky results when the federation has many spaces churning.
     spaces_snapshot = tuple(await spaces_api.list_user_spaces())
+
+    resolved_space_id = _SPACE_ID_CACHE.get(space_name)
 
     return RunContext(
         scenario_id=scenario.id,
@@ -71,6 +96,8 @@ async def prepare_trial(scenario: Scenario) -> RunContext:
         fixture_started_at=started_at,
         fixture_ready_at=time.time(),
         spaces_snapshot=spaces_snapshot,
+        space_name=space_name,
+        space_id=resolved_space_id,
     )
 
 
@@ -129,7 +156,7 @@ async def _materialise_files(
 # ---------------------------------------------------------------------------
 
 
-async def _prestage_transfer(hint: TransferFixtureHint) -> str:
+async def _prestage_transfer(hint: TransferFixtureHint, space_name: str) -> str:
     """Schedule a transfer directly via POST /transfers and return the
     transferId.
 
@@ -149,11 +176,11 @@ async def _prestage_transfer(hint: TransferFixtureHint) -> str:
     the space (where it currently is and gets removed from). This
     mirrors paper-canonical 'migration' semantics: replicate then evict.
     """
-    target_pid = await _resolve_provider_id(hint.target_provider_name)
+    target_pid = await _resolve_provider_id(hint.target_provider_name, space_name)
 
     # Pick the OTHER bound provider as the eviction source (works because
     # this benchmark space has exactly 2 providers).
-    space_id = await _resolve_space_id_async()
+    space_id = await _resolve_space_id_async(space_name)
     detail = await spaces_api.get_space_providers(space_id)
     bound_pids = [
         e["providerId"]
@@ -190,43 +217,58 @@ async def _prestage_transfer(hint: TransferFixtureHint) -> str:
     return transfer_id
 
 
-async def _resolve_provider_id(provider_name: str) -> str:
-    """Look up providerId by providerName in the benchmark space."""
-    space_id = await _resolve_space_id_async()
+async def _resolve_provider_id(provider_name: str, space_name: str) -> str:
+    """Look up providerId by providerName in the given space."""
+    space_id = await _resolve_space_id_async(space_name)
     detail = await spaces_api.get_space_providers(space_id)
     for entry in detail.get("providers", []):
         if isinstance(entry, dict) and entry.get("providerName") == provider_name:
             pid = entry.get("providerId")
             if isinstance(pid, str):
                 return pid
-    raise RuntimeError(f"Provider {provider_name!r} not found in space {SPACE!r}")
+    raise RuntimeError(f"Provider {provider_name!r} not found in space {space_name!r}")
 
 
-async def _resolve_space_id_async() -> str:
-    """Look up SPACE name → spaceId via list_user_spaces. Cached per process."""
-    global _CACHED_SPACE_ID
-    if _CACHED_SPACE_ID is not None:
-        return _CACHED_SPACE_ID
+async def _resolve_space_id_async(space_name: str = SPACE) -> str:
+    """Look up `space_name` → spaceId via list_user_spaces. Cached per name.
+
+    Per-LLM spaces created via the admin endpoint don't appear in
+    list_user_spaces (the calling user isn't a member). For those,
+    `prepare_trial` pre-populates `_SPACE_ID_CACHE` from the
+    `_per_llm_spaces.PER_LLM_SPACE_ID` registry. This function then
+    returns the cached value without re-querying.
+    """
+    cached = _SPACE_ID_CACHE.get(space_name)
+    if cached is not None:
+        return cached
     spaces = await spaces_api.list_user_spaces()
     for s in spaces:
-        if s.get("name") == SPACE:
+        if s.get("name") == space_name:
             sid = s.get("spaceId")
             if isinstance(sid, str):
-                _CACHED_SPACE_ID = sid
+                _SPACE_ID_CACHE[space_name] = sid
                 return sid
-    raise RuntimeError(f"Benchmark space {SPACE!r} not found")
+    raise RuntimeError(
+        f"Space {space_name!r} not found via list_user_spaces; for "
+        "per-LLM spaces, pass space_id= to prepare_trial() to bypass "
+        "this lookup."
+    )
 
 
-_CACHED_SPACE_ID: str | None = None
+# Per-name space-id cache. Populated lazily by _resolve_space_id_async or
+# eagerly by prepare_trial() when it knows the id from the registry.
+_SPACE_ID_CACHE: dict[str, str] = {}
 
 
 def _resolve_space_id_sync() -> str:
     """Convenience for callers that already cached the id; fails if not yet
     populated (always run async _resolve_space_id_async() first via
-    prepare_trial)."""
-    if _CACHED_SPACE_ID is None:
+    prepare_trial). Returns the most recently used space id (or any one
+    cached); ambiguous in per-LLM-space mode where multiple are cached.
+    """
+    if not _SPACE_ID_CACHE:
         raise RuntimeError("space id cache not populated — call prepare_trial first")
-    return _CACHED_SPACE_ID
+    return next(iter(_SPACE_ID_CACHE.values()))
 
 
 async def _find_transfer_for_file(transfer_ids: list[str], file_id: str) -> str | None:
@@ -246,7 +288,7 @@ async def _find_transfer_for_file(transfer_ids: list[str], file_id: str) -> str 
 # ---------------------------------------------------------------------------
 
 
-async def _wait_for_convergence(scenario: Scenario, started_at: float) -> None:
+async def _wait_for_convergence(scenario: Scenario, started_at: float, space_name: str) -> None:
     """Poll until fixture state observable for 2 consecutive intervals OR
     hard-cap timeout."""
     soft_deadline = started_at + RESET_SOFT_CAP_SECONDS
@@ -254,7 +296,7 @@ async def _wait_for_convergence(scenario: Scenario, started_at: float) -> None:
 
     consecutive_matches = 0
     while time.time() < hard_deadline:
-        if await _check_convergence(scenario):
+        if await _check_convergence(scenario, space_name):
             consecutive_matches += 1
             if consecutive_matches >= 2:
                 return
@@ -276,7 +318,7 @@ async def _wait_for_convergence(scenario: Scenario, started_at: float) -> None:
     )
 
 
-async def _check_convergence(scenario: Scenario) -> bool:
+async def _check_convergence(scenario: Scenario, space_name: str) -> bool:
     """Single convergence check. True iff every fixture file is observable
     with expected metadata + non-pending QoS."""
     for f in scenario.fixture.files:
@@ -319,7 +361,7 @@ async def _check_convergence(scenario: Scenario) -> bool:
             statuses = list(requirements.values())
             if statuses and all(s == "impossible" for s in statuses):
                 continue  # this file converged: rule is terminally impossible
-            if not await _qos_data_satisfied(file_id, f.qos_expressions):
+            if not await _qos_data_satisfied(file_id, f.qos_expressions, space_name):
                 return False
 
     return True
@@ -328,6 +370,7 @@ async def _check_convergence(scenario: Scenario) -> bool:
 async def _qos_data_satisfied(
     file_id: str,
     qos_expressions: tuple[tuple[str, int], ...],
+    space_name: str,
 ) -> bool:
     """True if the file's data is replicated to satisfy each QoS expression.
 
@@ -359,7 +402,7 @@ async def _qos_data_satisfied(
         if logical > 0 and physical >= logical:
             fully_replicated_pids.add(pid)
 
-    space_id = await _resolve_space_id_async()
+    space_id = await _resolve_space_id_async(space_name)
     for expression, replicas_num in qos_expressions:
         try:
             matching = await _evaluate_qos_expression_provider_ids(space_id, expression)
@@ -399,6 +442,5 @@ async def _evaluate_qos_expression_provider_ids(space_id: str, expression: str) 
 
 def _reset_space_id_cache_for_tests() -> None:
     """Tests that use pytest-httpx don't share global state; reset between
-    tests so a stale cached id from a prior test doesn't bleed in."""
-    global _CACHED_SPACE_ID
-    _CACHED_SPACE_ID = None
+    tests so stale cached ids from a prior test don't bleed in."""
+    _SPACE_ID_CACHE.clear()

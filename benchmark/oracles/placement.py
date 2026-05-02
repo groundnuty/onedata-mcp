@@ -23,7 +23,6 @@ from onedata_mcp.api import transfers as transfers_api
 from onedata_mcp.utils import OnedataApiError
 
 SPACE = "ppam_2026_mcp_tests"
-SPACE_PATH_PREFIX = f"/{SPACE}/"
 DYNAMIC_DEADLINE_SECONDS = 60.0
 DYNAMIC_POLL_INTERVAL = 5.0
 # EU placement signals — accept paper-canonical user-attribute tokens
@@ -54,7 +53,7 @@ SK_TOKENS = ("country=SK", PROVIDER_ID_CLOUD_SK)
 
 
 async def verify_p1(ctx: RunContext, trace: AgentTrace) -> OracleResult:
-    target_path = f"{SPACE_PATH_PREFIX}p1/model_v1.pt"
+    target_path = f"/{ctx.space_name}/p1/model_v1.pt"
     file_id = ctx.fixture_paths.get(target_path)
     if not file_id:
         return OracleResult(False, False, diagnosis="fixture path missing")
@@ -115,7 +114,7 @@ async def verify_p1(ctx: RunContext, trace: AgentTrace) -> OracleResult:
 
 
 async def verify_p2(ctx: RunContext, trace: AgentTrace) -> OracleResult:
-    violator_path = f"{SPACE_PATH_PREFIX}p2/critical/violator.bin"
+    violator_path = f"/{ctx.space_name}/p2/critical/violator.bin"
     file_id = ctx.fixture_paths.get(violator_path)
     if not file_id:
         return OracleResult(False, False, diagnosis="fixture path missing")
@@ -167,7 +166,7 @@ async def verify_p2(ctx: RunContext, trace: AgentTrace) -> OracleResult:
 
 
 async def verify_p3(ctx: RunContext, trace: AgentTrace) -> OracleResult:
-    target_path = f"{SPACE_PATH_PREFIX}p3/result.bin"
+    target_path = f"/{ctx.space_name}/p3/result.bin"
     file_id = ctx.fixture_paths.get(target_path)
     if not file_id:
         return OracleResult(False, False, diagnosis="fixture path missing")
@@ -284,7 +283,7 @@ async def verify_p4(ctx: RunContext, trace: AgentTrace) -> OracleResult:
 
 
 async def verify_p5(ctx: RunContext, trace: AgentTrace) -> OracleResult:
-    target_path = f"{SPACE_PATH_PREFIX}p5/conflicted.bin"
+    target_path = f"/{ctx.space_name}/p5/conflicted.bin"
     file_id = ctx.fixture_paths.get(target_path)
     if not file_id:
         return OracleResult(False, False, diagnosis="fixture path missing")
@@ -360,7 +359,7 @@ async def verify_p5(ctx: RunContext, trace: AgentTrace) -> OracleResult:
 
 async def verify_p6(ctx: RunContext, trace: AgentTrace) -> OracleResult:
     candidates = [
-        p for p in ctx.fixture_paths if p.startswith(f"{SPACE_PATH_PREFIX}p6/single-copy/")
+        p for p in ctx.fixture_paths if p.startswith(f"/{ctx.space_name}/p6/single-copy/")
     ]
 
     # Compute the federation's expected single-replica set.
@@ -391,7 +390,7 @@ async def verify_p6(ctx: RunContext, trace: AgentTrace) -> OracleResult:
     called = bool(find_calls(trace, "get_file_qos_summary")) or bool(
         find_calls(trace, "list_files_recursively")
     )
-    reported = extract_paths(trace.final_answer, anchor=SPACE_PATH_PREFIX)
+    reported = extract_paths(trace.final_answer, anchor=f"/{ctx.space_name}/")
     answer_ok = reported == expected
     mcp_pass = called and answer_ok
 

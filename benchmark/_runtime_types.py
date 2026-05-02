@@ -50,6 +50,14 @@ class RunContext:
     # of re-querying (the federation can churn between the agent's call
     # and the oracle's call). See research/empirical-findings #18.
     spaces_snapshot: tuple[dict, ...] = ()
+    # Per-LLM space the trial actually ran in. Defaults to the original
+    # shared `ppam_2026_mcp_tests` for back-compat with any code paths
+    # that don't thread per-LLM space yet. Oracles use this to derive
+    # the path prefix for set-equality comparisons. See
+    # research/empirical-mcp-server-findings.md M-2 + per-LLM-space
+    # architecture (2026-05-02).
+    space_name: str = "ppam_2026_mcp_tests"
+    space_id: str | None = None
 
 
 @dataclass(frozen=True)

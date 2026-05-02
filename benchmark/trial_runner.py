@@ -21,17 +21,32 @@ import time
 import traceback
 from pathlib import Path
 
+from benchmark._per_llm_spaces import (
+    PER_LLM_SPACE,
+    PER_LLM_SPACE_ID,
+)
 from benchmark._runtime_types import (
     AgentTrace,
     FixtureResetTimeout,
     OracleResult,
     RunContext,
 )
+from benchmark._scenario_specialise import DEFAULT_SPACE, specialise_for_space
 from benchmark._scenario_types import Scenario
 from benchmark._trial_artefact import TrialArtefact, TrialOutcome, write_artefact
 from benchmark.fixture_runner import prepare_trial
 from benchmark.llm_adapters import LLMAdapter
 from benchmark.oracles import get_oracle
+
+
+def _resolve_space_for(llm_name: str) -> tuple[str, str | None]:
+    """Look up (space_name, space_id) for an LLM. Falls back to the
+    shared default if the LLM isn't registered.
+    """
+    name = PER_LLM_SPACE.get(llm_name, DEFAULT_SPACE)
+    sid = PER_LLM_SPACE_ID.get(llm_name)
+    return name, sid
+
 
 SYSTEM_PROMPT = (
     "You are an assistant for the SPICE federated data platform. The user "
@@ -59,13 +74,24 @@ async def run_trial(
     produce an artefact with outcome=ADAPTER_ERROR.
     """
     started_at = time.time()
-    ctx, reset_error = await _prepare_with_retry(scenario, reset_retries)
+
+    # Specialise the scenario to this LLM's dedicated Onedata space.
+    # The brief, fixture paths, oracle_check are rewritten so the agent
+    # operates entirely within its own space and other LLMs running
+    # the same scenario in parallel can't corrupt each other's
+    # fixtures. See research/empirical-mcp-server-findings.md M-2.
+    space_name, space_id = _resolve_space_for(adapter.config.name)
+    specialised = specialise_for_space(scenario, space_name)
+
+    ctx, reset_error = await _prepare_with_retry(
+        specialised, reset_retries, space_name=space_name, space_id=space_id
+    )
 
     if ctx is None:
         return _persist(
             _build_reset_fail(
                 adapter=adapter,
-                scenario=scenario,
+                scenario=specialised,
                 run_id=run_id,
                 trial_ix=trial_ix,
                 started_at=started_at,
@@ -77,15 +103,15 @@ async def run_trial(
     try:
         dispatch = await adapter.dispatch(
             system_prompt=SYSTEM_PROMPT,
-            user_prompt=scenario.brief,
+            user_prompt=specialised.brief,
             mcp_app=mcp_app,
-            allowed_tools=scenario.allowed_tools_minimal,
+            allowed_tools=specialised.allowed_tools_minimal,
         )
     except Exception as e:  # noqa: BLE001
         return _persist(
             _build_adapter_error(
                 adapter=adapter,
-                scenario=scenario,
+                scenario=specialised,
                 ctx=ctx,
                 run_id=run_id,
                 trial_ix=trial_ix,
@@ -99,7 +125,7 @@ async def run_trial(
         final_answer=dispatch.final_answer,
         tool_calls=dispatch.tool_calls,
     )
-    oracle = get_oracle(scenario.id)
+    oracle = get_oracle(specialised.id)
     oracle_result: OracleResult = await oracle(ctx, trace)
 
     outcome: TrialOutcome = "PASS" if oracle_result.mcp_pass else "FAIL"
@@ -108,7 +134,7 @@ async def run_trial(
         run_id=run_id,
         llm_name=adapter.config.name,
         llm_model_id=adapter.config.model_id,
-        scenario_id=scenario.id,
+        scenario_id=specialised.id,
         trial_ix=trial_ix,
         started_at=started_at,
         ended_at=time.time(),
@@ -132,13 +158,17 @@ async def run_trial(
 
 
 async def _prepare_with_retry(
-    scenario: Scenario, reset_retries: int
+    scenario: Scenario,
+    reset_retries: int,
+    *,
+    space_name: str,
+    space_id: str | None,
 ) -> tuple[RunContext | None, str | None]:
     """Run prepare_trial up to (1 + reset_retries) times; return last error."""
     last_error: str | None = None
     for attempt in range(reset_retries + 1):
         try:
-            ctx = await prepare_trial(scenario)
+            ctx = await prepare_trial(scenario, space_name=space_name, space_id=space_id)
             return ctx, None
         except FixtureResetTimeout as e:
             last_error = f"FixtureResetTimeout (attempt {attempt + 1}): {e}"

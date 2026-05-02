@@ -16,7 +16,6 @@ from benchmark.oracles._helpers import (
 from onedata_mcp.api import spaces as spaces_api
 
 SPACE = "ppam_2026_mcp_tests"
-SPACE_PATH_PREFIX = f"/{SPACE}/"
 
 
 async def verify_d1(ctx: RunContext, trace: AgentTrace) -> OracleResult:
@@ -66,8 +65,8 @@ async def verify_d2(ctx: RunContext, trace: AgentTrace) -> OracleResult:
 
     Ground truth = the fixture spec (paths we materialised in Phase 2).
     """
-    expected = {p for p in ctx.fixture_paths if p.startswith(f"{SPACE_PATH_PREFIX}d2/datasets/")}
-    reported = extract_paths(trace.final_answer, anchor=SPACE_PATH_PREFIX)
+    expected = {p for p in ctx.fixture_paths if p.startswith(f"/{ctx.space_name}/d2/datasets/")}
+    reported = extract_paths(trace.final_answer, anchor=f"/{ctx.space_name}/")
     if reported == expected:
         return OracleResult.format_only(mcp_pass=True)
     return OracleResult.format_only(
@@ -86,7 +85,7 @@ async def verify_d3(ctx: RunContext, trace: AgentTrace) -> OracleResult:
     re-derive expected size from the spec, not by reading the federation,
     so an Onedata read-failure mid-trial doesn't corrupt the oracle.
     """
-    manifest_path = f"{SPACE_PATH_PREFIX}d3/manifest.txt"
+    manifest_path = f"/{ctx.space_name}/d3/manifest.txt"
     file_id = ctx.fixture_paths.get(manifest_path)
     if not file_id:
         return OracleResult.format_only(

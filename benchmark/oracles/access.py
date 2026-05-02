@@ -22,7 +22,6 @@ from onedata_mcp.api import qos as qos_api
 from onedata_mcp.utils import OnedataApiError
 
 SPACE = "ppam_2026_mcp_tests"
-SPACE_PATH_PREFIX = f"/{SPACE}/"
 
 
 # ---------------------------------------------------------------------------
@@ -31,7 +30,7 @@ SPACE_PATH_PREFIX = f"/{SPACE}/"
 
 
 async def verify_a1(ctx: RunContext, trace: AgentTrace) -> OracleResult:
-    expected_n = sum(1 for p in ctx.fixture_paths if p.startswith(f"{SPACE_PATH_PREFIX}a1/raw/"))
+    expected_n = sum(1 for p in ctx.fixture_paths if p.startswith(f"/{ctx.space_name}/a1/raw/"))
     got = extract_int(trace.final_answer, "tagged")
     if got == expected_n:
         return OracleResult.format_only(mcp_pass=True)
@@ -46,7 +45,7 @@ async def verify_a1(ctx: RunContext, trace: AgentTrace) -> OracleResult:
 
 
 async def verify_a2(ctx: RunContext, trace: AgentTrace) -> OracleResult:
-    targets = [p for p in ctx.fixture_paths if p.startswith(f"{SPACE_PATH_PREFIX}a2/inbox/")]
+    targets = [p for p in ctx.fixture_paths if p.startswith(f"/{ctx.space_name}/a2/inbox/")]
     if not targets:
         return OracleResult(False, False, diagnosis="no fixture files under /a2/inbox/")
 
@@ -89,8 +88,8 @@ async def verify_a2(ctx: RunContext, trace: AgentTrace) -> OracleResult:
 
 
 async def verify_a3(ctx: RunContext, trace: AgentTrace) -> OracleResult:
-    draft_path = f"{SPACE_PATH_PREFIX}a3/staging/draft.txt"
-    pub_path = f"{SPACE_PATH_PREFIX}a3/staging/published.txt"
+    draft_path = f"/{ctx.space_name}/a3/staging/draft.txt"
+    pub_path = f"/{ctx.space_name}/a3/staging/published.txt"
 
     # mcp_pass: agent called move_file from draft to published, then
     # set_file_metadata on published with status=published.
@@ -148,8 +147,8 @@ async def verify_a3(ctx: RunContext, trace: AgentTrace) -> OracleResult:
 
 
 async def verify_a4(ctx: RunContext, trace: AgentTrace) -> OracleResult:
-    src_path = f"{SPACE_PATH_PREFIX}a4/source/data.csv"
-    dst_path = f"{SPACE_PATH_PREFIX}a4/archive/data.csv"
+    src_path = f"/{ctx.space_name}/a4/source/data.csv"
+    dst_path = f"/{ctx.space_name}/a4/archive/data.csv"
 
     # mcp_pass: agent download_file(src) + create_file(dst) + set_file_metadata(dst).
     downloaded = has_successful_call(
@@ -219,7 +218,7 @@ async def verify_a4(ctx: RunContext, trace: AgentTrace) -> OracleResult:
 
 
 async def verify_a5(ctx: RunContext, trace: AgentTrace) -> OracleResult:
-    target_path = f"{SPACE_PATH_PREFIX}a5/important/checkpoint.bin"
+    target_path = f"/{ctx.space_name}/a5/important/checkpoint.bin"
     # Accept either user-attribute tokens (paper-canonical) or providerId
     # tokens (SPICE-empirical) per research/empirical-findings #14.
     from benchmark._federation_constants import (
@@ -300,10 +299,10 @@ async def verify_a5(ctx: RunContext, trace: AgentTrace) -> OracleResult:
 
 async def verify_a6(ctx: RunContext, trace: AgentTrace) -> OracleResult:
     expected = {
-        f"{SPACE_PATH_PREFIX}a6/batch01/f1.txt",
-        f"{SPACE_PATH_PREFIX}a6/batch01/f2.txt",
+        f"/{ctx.space_name}/a6/batch01/f1.txt",
+        f"/{ctx.space_name}/a6/batch01/f2.txt",
     }
-    reported = extract_paths(trace.final_answer, anchor=SPACE_PATH_PREFIX)
+    reported = extract_paths(trace.final_answer, anchor=f"/{ctx.space_name}/")
     if reported == expected:
         return OracleResult.format_only(mcp_pass=True)
     return OracleResult.format_only(

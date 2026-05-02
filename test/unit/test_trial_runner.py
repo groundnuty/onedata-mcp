@@ -150,7 +150,7 @@ async def test_runner_pass_outcome(tmp_path, monkeypatch):
     from benchmark import trial_runner
     from benchmark.oracles import __init__ as oracles_init  # noqa: F401
 
-    async def fake_prepare(scenario):
+    async def fake_prepare(scenario, **_kwargs):
         return RunContext(
             scenario_id=scenario.id,
             fixture_started_at=100.0,
@@ -192,7 +192,7 @@ async def test_runner_reset_fail_outcome(tmp_path, monkeypatch):
     """RESET_FAIL: prepare_trial keeps timing out beyond reset_retries."""
     from benchmark import trial_runner
 
-    async def fake_prepare(scenario):
+    async def fake_prepare(scenario, **_kwargs):
         raise FixtureResetTimeout("simulated timeout")
 
     monkeypatch.setattr(trial_runner, "prepare_trial", fake_prepare)
@@ -227,7 +227,7 @@ async def test_runner_adapter_error_outcome(tmp_path, monkeypatch):
     """ADAPTER_ERROR: adapter.dispatch raises; trial still produces an artefact."""
     from benchmark import trial_runner
 
-    async def fake_prepare(scenario):
+    async def fake_prepare(scenario, **_kwargs):
         return RunContext(scenario_id=scenario.id, fixture_started_at=0.0, fixture_ready_at=1.0)
 
     monkeypatch.setattr(trial_runner, "prepare_trial", fake_prepare)
@@ -262,7 +262,7 @@ async def test_runner_fail_outcome_when_oracle_says_no(tmp_path, monkeypatch):
     """FAIL: dispatch succeeded but oracle.mcp_pass is False."""
     from benchmark import trial_runner
 
-    async def fake_prepare(scenario):
+    async def fake_prepare(scenario, **_kwargs):
         return RunContext(scenario_id=scenario.id, fixture_started_at=0.0, fixture_ready_at=1.0)
 
     async def fake_oracle(ctx, trace):

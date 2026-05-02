@@ -222,7 +222,7 @@ async def test_check_convergence_returns_true_when_data_replicated(
         json={"requirements": {"q1": "fulfilled"}, "status": "fulfilled"},
     )
 
-    assert await fixture_runner._check_convergence(sc) is True
+    assert await fixture_runner._check_convergence(sc, "ppam_2026_mcp_tests") is True
 
 
 @pytest.mark.asyncio
@@ -290,7 +290,7 @@ async def test_check_convergence_returns_true_even_when_rule_status_pending(
         json={"requirements": {"q1": "pending"}, "status": "pending"},
     )
 
-    assert await fixture_runner._check_convergence(sc) is True
+    assert await fixture_runner._check_convergence(sc, "ppam_2026_mcp_tests") is True
 
 
 @pytest.mark.asyncio
@@ -355,7 +355,7 @@ async def test_check_convergence_returns_false_when_data_not_yet_replicated(
         json={"matchingStorageBackends": [{"id": "s1", "name": "posix-local", "providerId": "p1"}]},
     )
 
-    assert await fixture_runner._check_convergence(sc) is False
+    assert await fixture_runner._check_convergence(sc, "ppam_2026_mcp_tests") is False
 
 
 @pytest.mark.asyncio
@@ -390,7 +390,7 @@ async def test_check_convergence_returns_true_when_all_rules_terminal_impossible
         json={"requirements": {"q1": "impossible"}, "status": "impossible"},
     )
 
-    assert await fixture_runner._check_convergence(sc) is True
+    assert await fixture_runner._check_convergence(sc, "ppam_2026_mcp_tests") is True
 
 
 @pytest.mark.asyncio
@@ -408,7 +408,7 @@ async def test_check_convergence_returns_false_on_missing_file(
         status_code=400,
         json={"error": {"details": {"errno": "enoent"}}},
     )
-    assert await fixture_runner._check_convergence(sc) is False
+    assert await fixture_runner._check_convergence(sc, "ppam_2026_mcp_tests") is False
 
 
 @pytest.mark.asyncio
@@ -418,4 +418,4 @@ async def test_check_convergence_returns_true_when_no_files(
     """Scenarios without fixture files (D1, D4, D6) trivially converge."""
     _set_env(monkeypatch)
     sc = _scenario("D6")
-    assert await fixture_runner._check_convergence(sc) is True
+    assert await fixture_runner._check_convergence(sc, "ppam_2026_mcp_tests") is True
