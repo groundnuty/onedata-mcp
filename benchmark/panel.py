@@ -155,47 +155,60 @@ def build_panel() -> tuple[tuple[PanelEntry, ...], tuple[str, ...]]:
     else:
         skipped.append("OpenRouter legs (DeepSeek-V3): OPENROUTER_API_KEY missing in .env")
 
-    # Local vLLM endpoint — for OSS models served on the operator's machine
-    # rather than via Cyfronet Forge / OpenRouter. Activates iff
-    # LOCAL_VLLM_BASE_URL is set in .env (e.g. http://localhost:8002/v1).
-    # Currently used to probe Gemma-4-31B-it (Google's open-weight model
-    # released 2026-04-02, Apache-2.0, 256K context, native function
-    # calling). The model id is whatever the local server advertises via
-    # its /v1/models endpoint — pass it via LOCAL_VLLM_MODEL_ID.
-    local_vllm_base = os.getenv("LOCAL_VLLM_BASE_URL", "").strip().rstrip("/")
-    local_vllm_model_id = os.getenv("LOCAL_VLLM_MODEL_ID", "").strip()
-    local_vllm_name = os.getenv("LOCAL_VLLM_NAME", "").strip() or local_vllm_model_id
-    if local_vllm_base and local_vllm_model_id:
-        # vLLM enforces `prompt_tokens + max_tokens <= max_model_len`. The
-        # default LLMConfig max_tokens (32768) collides with Gemma-4-31B's
-        # 32K context: every request requesting 32k output tokens fails 400
-        # before any prompt is processed. Cap at 4096 — the historical
-        # K=1 sweeps used ~86 output tokens per trial on average, so 4k is
-        # ample headroom and leaves the full 28k for the prompt+tools.
-        # Operator can override via LOCAL_VLLM_MAX_TOKENS.
-        local_vllm_max_tokens = int(
-            os.getenv("LOCAL_VLLM_MAX_TOKENS", "").strip() or "4096"
-        )
+    # Local vLLM endpoints — for OSS models served on the operator's
+    # machine rather than via Cyfronet Forge / OpenRouter. Multi-tenant:
+    # each leg is configured by an indexed env-var block. The legacy
+    # un-indexed form (LOCAL_VLLM_BASE_URL etc.) is treated as index 1
+    # for backward compat.
+    #
+    #   LOCAL_VLLM_<N>_BASE_URL   e.g. http://localhost:8002/v1
+    #   LOCAL_VLLM_<N>_MODEL_ID   e.g. gemma  (alias the server returns)
+    #   LOCAL_VLLM_<N>_NAME       panel-side display name
+    #                              (default: MODEL_ID)
+    #   LOCAL_VLLM_<N>_API_KEY    optional; defaults to "vllm-local"
+    #   LOCAL_VLLM_<N>_MAX_TOKENS optional; defaults to 4096 (vLLM
+    #                              enforces prompt+max_tokens<=ctx, and
+    #                              the LLMConfig 32k default collides
+    #                              with 32K-context models like Gemma-4
+    #                              and Granite-4.1)
+    #
+    # Currently configured: Gemma-4-31B-it (1, port 8002) and
+    # Granite-4.1-30B-bf16 (2, port 8003). Both Apache-2.0, both
+    # released April 2026.
+    def _local_vllm_leg(idx: str, *, legacy: bool = False) -> None:
+        prefix = "LOCAL_VLLM" if legacy else f"LOCAL_VLLM_{idx}"
+        base = os.getenv(f"{prefix}_BASE_URL", "").strip().rstrip("/")
+        model_id = os.getenv(f"{prefix}_MODEL_ID", "").strip()
+        if not base and not model_id:
+            return
+        if not (base and model_id):
+            skipped.append(
+                f"Local vLLM leg {prefix}: need BOTH _BASE_URL and "
+                f"_MODEL_ID set in .env"
+            )
+            return
+        name = os.getenv(f"{prefix}_NAME", "").strip() or model_id
+        max_tokens = int(os.getenv(f"{prefix}_MAX_TOKENS", "").strip() or "4096")
+        api_key = os.getenv(f"{prefix}_API_KEY", "").strip() or "vllm-local"
         panel.append(
             PanelEntry(
-                name=local_vllm_name,
+                name=name,
                 config=LLMConfig(
-                    name=local_vllm_name,
-                    api_base=local_vllm_base,
-                    # vLLM doesn't enforce auth by default; pass a dummy
-                    # token to satisfy the OpenAI client constructor.
-                    api_key=os.getenv("LOCAL_VLLM_API_KEY", "").strip() or "vllm-local",
-                    model_id=local_vllm_model_id,
-                    max_tokens=local_vllm_max_tokens,
+                    name=name,
+                    api_base=base,
+                    api_key=api_key,
+                    model_id=model_id,
+                    max_tokens=max_tokens,
                 ),
                 adapter_factory=OpenAICompatAdapter,
             )
         )
-    elif local_vllm_base or local_vllm_model_id:
-        skipped.append(
-            "Local vLLM leg: need BOTH LOCAL_VLLM_BASE_URL and "
-            "LOCAL_VLLM_MODEL_ID set in .env"
-        )
+
+    # Legacy un-indexed form, still honoured.
+    _local_vllm_leg("1", legacy=True)
+    # Indexed forms — extend as more local LLMs come online.
+    for idx in ("1", "2", "3", "4"):
+        _local_vllm_leg(idx)
 
     if os.getenv("BENCHMARK_DISABLE_CLAUDE", "").strip():
         skipped.append("Claude leg: disabled via BENCHMARK_DISABLE_CLAUDE")
