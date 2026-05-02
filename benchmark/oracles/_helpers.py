@@ -153,17 +153,30 @@ def extract_int(text: str, key: str) -> int | None:
     found or not parseable as int.
 
     Tolerates several output shapes agents typically use:
-      'tagged=5'                — kv equals
-      'count: 5'                — kv colon
-      '| CloudSKTest | 3 |'     — markdown table row
-      'CloudSKTest 3 providers' — name-then-number
-      '`Cloud-SK`: 3'           — backticked key + colon
+      'tagged=5'                          — kv equals
+      'count: 5'                          — kv colon
+      '| CloudSKTest | 3 |'               — markdown table row
+      '| StefansSpace (duplicate) | 2 |'  — markdown row with disambig annotation
+      'CloudSKTest 3 providers'           — name-then-number
+      '`Cloud-SK`: 3'                     — backticked key + colon
 
-    Strategy: locate `key` (literal, case-sensitive), then scan forward
-    on the same line for the first non-negative integer that's not part
-    of a longer alphanumeric token (e.g. ignore '46-g14b5bda7' digits).
+    Strategy: locate `key` (literal, case-sensitive), tolerate an optional
+    parenthetical annotation immediately after (e.g. ' (duplicate)',
+    ' (first)' — Granite uses these to disambiguate Onedata's
+    duplicate-allowed space names), then scan forward on the same line
+    for the first non-negative integer that's not part of a longer
+    alphanumeric token (e.g. ignore '46-g14b5bda7' digits).
+
+    The parenthetical-annotation tolerance was added 2026-05-03 (run
+    T232042 Granite v2 D1) when the agent thoughtfully labelled two
+    federation spaces named 'StefansSpace' as 'StefansSpace (first)'
+    and 'StefansSpace (duplicate)'. The previous pattern's separator
+    class did not include `(`, so the annotation broke the lookup.
     """
-    pattern = rf"{re.escape(key)}\s*[=:|\-`*\s]*(\d+)(?!\w)"
+    # Optional parenthetical annotation after key: tolerates one level
+    # of `(...)`. Doesn't recurse into nested parens — those would be
+    # bizarre in this context.
+    pattern = rf"{re.escape(key)}\s*(?:\([^)]*\)\s*)?[=:|\-`*\s]*(\d+)(?!\w)"
     m = re.search(pattern, text)
     return int(m.group(1)) if m else None
 
