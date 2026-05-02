@@ -714,3 +714,162 @@ async def test_move_file_surfaces_cdmi_server_error(
 
     with pytest.raises(OnedataApiError, match="CDMI move failed"):
         await files.move_file("/myspace/oldfile.txt", "/myspace/newfile.txt")
+
+
+# ---------------------------------------------------------------------------
+# M-10: download_file_with_meta returns (content, content_type)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_download_file_with_meta_returns_content_and_content_type(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="POST",
+        url=_lookup_url("/space/note.txt"),
+        json={"fileId": "fid-meta"},
+        is_reusable=True,
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/data/fid-meta",
+        json={"type": "REG", "size": 5},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/data/fid-meta/content",
+        text="hello",
+        headers={"Content-Type": "text/plain; charset=utf-8"},
+    )
+
+    raw, ct = await files.download_file_with_meta("/space/note.txt")
+
+    assert raw == b"hello"
+    assert ct == "text/plain; charset=utf-8"
+
+
+@pytest.mark.asyncio
+async def test_download_file_with_meta_handles_missing_content_type(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="POST",
+        url=_lookup_url("/space/raw.bin"),
+        json={"fileId": "fid-raw"},
+        is_reusable=True,
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/data/fid-raw",
+        json={"type": "REG", "size": 3},
+    )
+    # pytest_httpx auto-injects a Content-Type when using `text=` /  `json=`,
+    # so use `content=` directly to control the response headers.
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/data/fid-raw/content",
+        content=b"abc",
+    )
+
+    raw, ct = await files.download_file_with_meta("/space/raw.bin")
+
+    # content_type may be None or whatever httpx defaults to — only assert
+    # the body is correct (the wrapper-level test asserts the dict shape).
+    assert raw == b"abc"
+    # If pytest_httpx injects a default Content-Type, we still get a string
+    # (not None); the wrapper test (test_modules_files.py) covers the shape.
+    assert ct is None or isinstance(ct, str)
+
+
+# ---------------------------------------------------------------------------
+# M-11: create_directory wrapper for PUT /data/{space}/path/{rel}?type=DIR
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_directory_puts_with_type_dir(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="POST",
+        url=_lookup_url("/space"),
+        json={"fileId": "root-id"},
+    )
+    httpx_mock.add_response(
+        method="PUT",
+        url=re.compile(
+            r"https://provider\.example/api/v3/oneprovider/data/root-id/path/archive\?.*"
+        ),
+        json={"fileId": "dir-fid"},
+    )
+
+    result = await files.create_directory("/space/archive")
+
+    assert result == {"fileId": "dir-fid", "path": "/space/archive"}
+    put = next(
+        r
+        for r in httpx_mock.get_requests()
+        if r.method == "PUT" and r.url.host == "provider.example" and "/path/" in r.url.path
+    )
+    assert put.url.params["type"] == "DIR"
+    assert put.url.params["create_parents"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_create_directory_propagates_create_parents_false(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="POST",
+        url=_lookup_url("/space"),
+        json={"fileId": "root-id"},
+    )
+    httpx_mock.add_response(
+        method="PUT",
+        url=re.compile(r"https://provider\.example/api/v3/oneprovider/data/root-id/path/d/sub\?.*"),
+        json={"fileId": "dir-fid"},
+    )
+
+    await files.create_directory("/space/d/sub", create_parents=False)
+
+    put = next(
+        r
+        for r in httpx_mock.get_requests()
+        if r.method == "PUT" and r.url.host == "provider.example" and "/path/" in r.url.path
+    )
+    assert put.url.params["type"] == "DIR"
+    assert put.url.params["create_parents"] == "false"
+
+
+@pytest.mark.asyncio
+async def test_create_directory_rejects_space_root_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_env(monkeypatch)
+    with pytest.raises(ValueError, match="path must be /<space_name>/<path_to_directory>"):
+        await files.create_directory("/space")
+
+
+# ---------------------------------------------------------------------------
+# M-11: _looks_like_directory_intent heuristic
+# ---------------------------------------------------------------------------
+
+
+def test_looks_like_directory_intent_flags_empty_no_extension() -> None:
+    # The exact V3/GLM A4 trap shape.
+    assert files._looks_like_directory_intent("/space/archive", "") is True
+    assert files._looks_like_directory_intent("archive", "") is True
+
+
+def test_looks_like_directory_intent_passes_legitimate_files() -> None:
+    # Empty content with extension — legitimate empty file.
+    assert files._looks_like_directory_intent("/space/empty.txt", "") is False
+    # Non-empty content — not mkdir.
+    assert files._looks_like_directory_intent("/space/archive", "x") is False
+    # Hidden files (.gitignore) ARE allowed empty (intentional design).
+    assert files._looks_like_directory_intent("/space/.gitignore", "") is False

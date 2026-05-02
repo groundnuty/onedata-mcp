@@ -100,6 +100,12 @@ to land 14-17/18 in priors but actual TBD.
    `--aggregate-k` mode for K=8 headline table with pass^k columns.
 5. **#23 -spice-v1 onezone patch verification** (open).
 6. **#24 federation health** — 2/5 OPs unreachable (informational).
+7. **M-10 / M-11 / M-12 fleet-wide pass-rate fixes** — APPLIED 2026-05-02
+   (see `research/empirical-mcp-server-findings.md`). Three low-LOC
+   wrapper changes lift fleet pass rate on D3 (size out-of-band),
+   A4 (`create_directory` tool + `create_parents=True` default),
+   D2 (relative-prefix docstring). Surfaced by V3 K=1 diagnostic;
+   net-new vs M-1..M-9. Re-run V4-pro K=1 to measure post-fix delta.
 
 ## Cost notes (DeepSeek via OpenRouter)
 

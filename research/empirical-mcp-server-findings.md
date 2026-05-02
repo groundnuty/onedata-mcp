@@ -369,6 +369,181 @@ toward weaker-model usability — paper §7 should note this.
 
 ---
 
+## M-10. `download_file` returns size out-of-band
+
+**Surface:** `onedata_mcp/modules/files.py::mcp_download_file`
+
+**Behaviour:** the wrapper returned the raw file content as bytes /
+string. Agents asked for "byte count of file X" then called
+`len(content)` on the returned string — which counts characters after
+UTF-8 decode, not bytes. Multi-byte text gives a wrong answer; even
+ASCII content gives a wrong answer when the content has trailing
+whitespace the model truncates.
+
+**Why this matters:** D3 ("get exact byte size of /d3/file.txt") is
+specifically a size-arithmetic scenario. Three of four panel LLMs
+(Sonnet 4.5, V3, GLM-4.7) returned wrong byte counts in run
+`20260502T145805` despite reading the right file. Only Qwen3.6
+got it right (independent `get_file_attributes` call to read `size`).
+Fleet-wide pass rate 1/4. The tool returned the data; the data shape
+forced the failure.
+
+**Evidence:** D3 across panel in run `20260502T145805`. Diagnostic on
+DeepSeek-V3's K=1 failures (13/18) showed D3 as the
+arithmetic-on-content-string failure mode that was preventing fleet-
+wide convergence.
+
+**Root cause:** `download_file` returned a single value (bytes /
+string). Counting bytes from the string requires the agent to remember
+to encode-then-len, and OSS panel models don't reliably do this. The
+authoritative size is server-side; surfacing it inline removes the
+arithmetic-on-content-string trap.
+
+**Fix:** the wrapper now returns
+`{"content": str, "size_bytes": int, "content_type": str | None}`.
+`size_bytes` is the authoritative byte count (`len(raw_bytes)`).
+`content_type` is the upstream HTTP `Content-Type` header verbatim if
+known, else `None`. Backwards-compat: agents that destructure
+`.content` keep working; new agents read `.size_bytes` directly.
+Implementation: `onedata_mcp/api/files.py::download_file_with_meta`
+(new) returns the tuple form; the legacy `download_file` thin-wraps
+it for `grep_file_content` callers. `onedata_mcp/modules/files.py:240`
+surfaces the dict envelope.
+
+**Test:** `test/unit/api/test_files.py::test_download_file_with_meta_*`
+(2 tests) + `test/unit/modules/test_files_wrapper.py::test_download_file_wrapper_*`
+(2 tests, including a UTF-8 multi-byte fixture asserting
+`size_bytes != len(content)`).
+
+**Status:** applied — see commit at the bottom of this file.
+
+---
+
+## M-11. `create_parents` default of False + no explicit `create_directory`
+
+**Surface:** `onedata_mcp/modules/files.py::mcp_create_file` plus the
+absence of a directory-creation tool.
+
+**Behaviour:** A4 (cross-directory file move + verify) requires the
+agent to set up a target directory before placing a file inside it.
+With no explicit `create_directory` tool, V3 and GLM both invented:
+
+    create_file(path="archive", content="", create_parents=True)
+
+This silently creates a REGULAR FILE at `archive`. Every subsequent
+`archive/<x>` op then fails with `enotdir`, and the agent — having
+gotten a `fileId` back — believes the directory exists. Multi-step
+cascade: file-move "fails" not because of the move but because the
+target "directory" is actually a file.
+
+**Why this matters:** V3 and GLM both fell into this on A4 in run
+`20260502T145805` — fleet-wide 2/4 affected. The trap is structural:
+without `create_directory`, the agent has no clean way to express
+"I want a directory here." Setting `create_parents=True` and writing
+empty content is a reasonable inference from the available surface
+that produces the wrong result.
+
+**Evidence:** A4 traces in run `20260502T145805` — V3 and GLM both
+attempted `create_file(path="archive", content="", create_parents=True)`
+followed by file-create ops under `archive/` that 400'd with
+`enotdir`. Sonnet+Qwen3.6 used different patterns and avoided the
+trap.
+
+**Root cause:** the wrapper exposed `create_file` with
+`create_parents=False` as the default — agents had to remember to
+opt in to the parent-creation behavior. Combined with no
+`create_directory` tool, agents who DID enable `create_parents`
+ended up using it on the wrong shape.
+
+**Fix:** three coordinated changes:
+
+1. **Default flip:** `create_parents` now defaults to `True`. Missing
+   intermediate directories along the path are auto-created without
+   the agent needing to know about the flag.
+
+2. **New tool `create_directory`** added at
+   `onedata_mcp/modules/files.py:343`. Returns `{fileId, path}`. Maps
+   to `PUT /data/{space_id}/path/{rel}?type=DIR&create_parents=...`
+   — see `oneprovider-swagger:paths/data/id/path.yaml` (operationId
+   `create_file_at_path`, the canonical type-DIR primitive).
+   Implementation at `onedata_mcp/api/files.py::create_directory`.
+   Added to ABLATION_EXTRAS (not HEADLINE — the headline 16-tool
+   contract is preserved; the defensive error in `create_file` is
+   what catches the trap on the headline surface).
+
+3. **Defensive error in `create_file`:** when content is empty AND
+   the basename has no recognizable file extension, raise ValueError
+   pointing at `create_directory`. This is belt-and-braces — the
+   default-True flip + the new tool together solve the trap, but the
+   defensive error catches any agent that doesn't read the new
+   docstring carefully. Heuristic at
+   `onedata_mcp/api/files.py::_looks_like_directory_intent`. Hidden
+   files (`.gitignore`) are explicitly allowed empty.
+
+**Test:** `test/unit/api/test_files.py::test_create_directory_*` (3) +
+`test/unit/api/test_files.py::test_looks_like_directory_intent_*` (2) +
+`test/unit/modules/test_files_wrapper.py::test_create_file_*` (3) +
+`test_create_directory_*` (2). The `test_create_directory_then_create_file_under_it`
+test exercises the full A4 shape (mkdir → file-under-mkdir).
+
+**Status:** applied — see commit at the bottom of this file.
+
+---
+
+## M-12. `list_files_recursively` `prefix` ambiguity (relative-only)
+
+**Surface:** `onedata_mcp/modules/files.py::mcp_list_files_recursively`
+
+**Behaviour:** the `prefix` parameter on `list_files_recursively`
+matches Onedata's *relative* path scheme — when listing
+`/space/d2/datasets/`, valid prefixes are `alpha` (matches
+`alpha.txt`), not `/space/d2/datasets/alpha`. The original docstring
+read "Only files with paths starting with this value are listed,"
+which doesn't say WHICH path scheme. V3 (and likely future agents)
+reasonably inferred the absolute form, passed
+`prefix="/space/d2/datasets/alpha"`, and got back `{"files": []}` —
+silent zero-match.
+
+**Why this matters:** D2 ("find files matching prefix `/d2/datasets/alpha`")
+intermittently failed for V3 in run `20260502T145805` because the
+absolute prefix returned no matches and the agent had no signal that
+the prefix shape was wrong (vs the brief expecting different
+matches). Silent-zero-match is a worse failure mode than a 400 — no
+error to backtrack from.
+
+**Evidence:** V3 D2 trace in run `20260502T145805`. Tool call has
+`prefix=/d2/datasets/alpha` (absolute), tool response is
+`{files: []}`. Compare to runs where V3 used a relative prefix and
+got the correct match set.
+
+**Root cause:** Onedata's REST `prefix` is server-side relative —
+that's a known Onedata-25.0 quirk (sibling to the M-1 / M-6
+relative-path family). The wrapper didn't translate; the docstring
+didn't disambiguate.
+
+**Fix:** docstring tightening at
+`onedata_mcp/modules/files.py:170`. New text:
+
+> Filter by relative path prefix under parent_id_or_path. Onedata's
+> recursive listing returns RELATIVE paths (e.g. 'alpha.txt' under
+> '/space/d2/datasets/'), so the prefix MUST be relative too — pass
+> 'alpha' to match 'alpha.txt'. Absolute paths are NOT supported and
+> silently return zero matches.
+
+Server-side stripping (the optional improvement) is not implemented —
+the wrapper-side parse ambiguity (the path under-which the prefix
+should match could be either the listed parent or its space-relative
+form) makes that more invasive than the docstring-only fix.
+
+**Test:** `test/unit/modules/test_files_wrapper.py::test_list_files_recursively_prefix_param_doc_relative_only`
+asserts the schema-level description includes both "relative" and
+"absolute". Plus a functional test that a relative prefix
+filters correctly.
+
+**Status:** applied — see commit at the bottom of this file.
+
+---
+
 ## Future findings
 
 This file accretes as the benchmark expands. New findings get a new

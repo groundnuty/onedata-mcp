@@ -209,6 +209,19 @@ async def list_files_recursively(
 
 
 async def download_file(file_id_or_path: str) -> bytes:
+    """Return raw file content as bytes (legacy single-return form)."""
+    content, _ = await download_file_with_meta(file_id_or_path)
+    return content
+
+
+async def download_file_with_meta(file_id_or_path: str) -> tuple[bytes, str | None]:
+    """Return ``(raw_bytes, content_type_or_None)``.
+
+    Used by the MCP wrapper (M-10) to surface ``content_type`` alongside
+    the body without forcing every caller of ``download_file`` to handle
+    the tuple form. ``content_type`` is the upstream HTTP
+    ``Content-Type`` header verbatim, or ``None`` if absent.
+    """
     config = get_oneprovider_config()
     file_id = await _normalize_path_to_file_id(file_id_or_path)
 
@@ -237,7 +250,8 @@ async def download_file(file_id_or_path: str) -> bytes:
             f"(status={response.status_code}) - {response.text}"
         )
 
-    return response.content
+    content_type = response.headers.get("Content-Type")
+    return response.content, content_type
 
 
 async def grep_file_content(
@@ -300,6 +314,72 @@ async def create_file(path: str, content: str, *, create_parents: bool = False) 
 
         logger.error(f"Error creating file {path}: {e}")
         raise e
+
+
+async def create_directory(path: str, *, create_parents: bool = True) -> dict[str, Any]:
+    """Create a directory at the given /<space>/<path> location.
+
+    Wraps ``PUT /data/{space_id}/path/{relative}?type=DIR&create_parents=...``
+    (Oneprovider 25.0 — see oneprovider-swagger paths/data/id/path.yaml,
+    operationId ``create_file_at_path``). Returns ``{fileId, path}``.
+
+    Raises ``FileExistsError`` if the path already exists. Raises
+    ``ValueError`` if ``path`` does not include a relative path under a
+    space root (i.e. the form must be ``/<space>/<dir...>``).
+
+    See research/empirical-mcp-server-findings.md M-11.
+    """
+    config = get_oneprovider_config()
+    normalized = path.strip("/")
+    if "/" not in normalized:
+        raise ValueError(
+            "path must be /<space_name>/<path_to_directory>; got: "
+            f"{path!r}. To target the space root, use the existing "
+            f"namespace tools instead — the root always exists."
+        )
+    space_name, relative_path = normalized.split("/", 1)
+    if not relative_path:
+        raise ValueError("path must include a directory path under the space")
+    root_id = await get_file_id(f"/{space_name}")
+    encoded_path = quote(relative_path, safe="/")
+    try:
+        response = await request(
+            config,
+            "PUT",
+            f"/data/{root_id}/path/{encoded_path}",
+            params={"type": "DIR", "create_parents": create_parents},
+        )
+    except OnedataApiError as e:
+        if e.errno == "eexist":
+            raise FileExistsError(f"Directory {path} already exists") from e
+        logger.error(f"Error creating directory {path}: {e}")
+        raise
+    file_id = response["body"]["fileId"]
+    return {"fileId": file_id, "path": path}
+
+
+def _looks_like_directory_intent(path: str, content: str) -> bool:
+    """Return True if a create_file call looks like a mis-aimed mkdir.
+
+    Heuristic: empty content AND the basename has no recognizable file
+    extension. Covers the V3/GLM A4 trap of
+    ``create_file(path="archive", content="", create_parents=True)`` —
+    which would silently create a regular file at that path and then
+    every subsequent ``archive/x`` op fails with ``enotdir``.
+
+    See research/empirical-mcp-server-findings.md M-11.
+    """
+    if content != "":
+        return False
+    basename = path.rstrip("/").rsplit("/", 1)[-1]
+    if not basename:
+        return False
+    # Common no-extension files (Makefile, README, Dockerfile etc.) are
+    # legitimate empty-file creations. We're conservative — only flag when
+    # there's NO dot at all in the basename. Hidden files (.gitignore)
+    # have a leading dot and pass this check; that's deliberate (an empty
+    # .gitignore is a valid intentional file).
+    return "." not in basename
 
 
 async def delete_file(file_id_or_path: str) -> None:

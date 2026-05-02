@@ -7,9 +7,10 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from onedata_mcp.api.files import (
+    _looks_like_directory_intent,
     create_file,
     delete_file,
-    download_file,
+    download_file_with_meta,
     get_file_attributes,
     get_file_distribution,
     get_file_id,
@@ -19,6 +20,9 @@ from onedata_mcp.api.files import (
     list_files_recursively,
     move_file,
     set_file_metadata,
+)
+from onedata_mcp.api.files import (
+    create_directory as api_create_directory,
 )
 
 ONEDATA_FILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{20,}$")
@@ -175,7 +179,15 @@ def register_module(mcp: FastMCP) -> None:
         ),
         prefix: Optional[str] = Field(
             default=None,
-            description="Only files with paths starting with this value are listed",
+            description=(
+                "Filter by relative path prefix under parent_id_or_path. "
+                "Onedata's recursive listing returns RELATIVE paths "
+                "(e.g. 'alpha.txt' under '/space/d2/datasets/'), so the "
+                "prefix MUST be relative too — pass 'alpha' to match "
+                "'alpha.txt'. Absolute paths are NOT supported and "
+                "silently return zero matches. "
+                "See research/empirical-mcp-server-findings.md M-12."
+            ),
         ),
         ctx: Optional[Context] = None,
     ) -> dict[str, Any]:
@@ -226,12 +238,30 @@ def register_module(mcp: FastMCP) -> None:
             description="File id or path to the file in format /<space_name>/<path_to_file>"
         ),
         ctx: Optional[Context] = None,
-    ) -> bytes:
+    ) -> dict[str, Any]:
         """
         Download the content of a given file id or path.
+
+        Returns ``{content, size_bytes, content_type}``. ``size_bytes`` is the
+        authoritative byte length of the file — prefer it over
+        ``len(content)`` because the latter measures characters (after UTF-8
+        decoding) not bytes, and for multi-byte text the two differ.
+
+        ``content`` is the file content decoded as UTF-8 (with replacement
+        on invalid sequences). ``content_type`` is the upstream
+        ``Content-Type`` if known by the server, otherwise ``None``.
+
+        See research/empirical-mcp-server-findings.md M-10.
         """
         file_id_or_path = await _resolve_with_mcp_root(file_id_or_path, ctx)
-        return await download_file(file_id_or_path)
+        raw, content_type = await download_file_with_meta(file_id_or_path)
+        size_bytes = len(raw)
+        content = raw.decode("utf-8", errors="replace")
+        return {
+            "content": content,
+            "size_bytes": size_bytes,
+            "content_type": content_type,
+        }
 
     @mcp.tool(name="grep_file_content", annotations=ToolAnnotations(readOnlyHint=True))
     async def mcp_grep_file_content(
@@ -256,18 +286,74 @@ def register_module(mcp: FastMCP) -> None:
             description="Content of the file as a string",
         ),
         create_parents: bool = Field(
-            default=False,
-            description="Create missing directories under the space root via Oneprovider path API",
+            default=True,
+            description=(
+                "Create missing intermediate directories along the path. "
+                "Defaults to True — set to False only if you explicitly want "
+                "the call to fail when a parent directory is missing."
+            ),
         ),
         ctx: Optional[Context] = None,
     ) -> str:
         """
-        Create a new file with the given content.
+        Create a new REGULAR FILE with the given content.
 
         Returns the file id of the created file.
+
+        ## Defaults
+        ``create_parents`` defaults to True — missing intermediate
+        directories along the path are auto-created. Set to False only
+        if you explicitly want a fail-if-parent-missing semantic.
+
+        ## Do NOT use this to create a directory
+        Calling ``create_file(path="archive", content="")`` creates a
+        regular EMPTY FILE at ``archive`` — every subsequent
+        ``archive/<child>`` op then fails with ``enotdir``. Use
+        ``create_directory`` instead.
+
+        See research/empirical-mcp-server-findings.md M-11.
         """
         path = await _resolve_with_mcp_root(path, ctx)
+        if _looks_like_directory_intent(path, content):
+            raise ValueError(
+                f"create_file(path={path!r}, content='') with no file "
+                f"extension on the basename looks like a mkdir intent. "
+                f"Use create_directory({path!r}) instead — calling "
+                f"create_file with empty content creates a regular file, "
+                f"not a directory, and every subsequent op under that "
+                f"path will fail with enotdir."
+            )
         return await create_file(path, content, create_parents=create_parents)
+
+    @mcp.tool(name="create_directory", annotations=ToolAnnotations(destructiveHint=True))
+    async def mcp_create_directory(
+        path: str = Field(
+            description="Path to the directory in format /<space_name>/<path_to_directory>"
+        ),
+        create_parents: bool = Field(
+            default=True,
+            description=(
+                "Create missing intermediate directories along the path. Defaults to True."
+            ),
+        ),
+        ctx: Optional[Context] = None,
+    ) -> dict[str, Any]:
+        """
+        Create a new DIRECTORY at the given path.
+
+        Returns ``{fileId, path}`` of the created directory.
+
+        Maps to ``PUT /data/{space_id}/path/{relative}?type=DIR``
+        (Oneprovider 25.0). Raises ``FileExistsError`` if the path
+        already exists.
+
+        Use this whenever you need a directory — never call
+        ``create_file`` with empty content for that purpose.
+
+        See research/empirical-mcp-server-findings.md M-11.
+        """
+        path = await _resolve_with_mcp_root(path, ctx)
+        return await api_create_directory(path, create_parents=create_parents)
 
     @mcp.tool(name="delete_file", annotations=ToolAnnotations(destructiveHint=True))
     async def mcp_delete_file(

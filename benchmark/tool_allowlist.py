@@ -105,6 +105,13 @@ ABLATION_EXTRAS: frozenset[str] = frozenset(
         "get_file_attributes",
         "grep_file_content",
         "remove_qos_requirement",
+        # Added 2026-05-02 (M-11): explicit mkdir for the
+        # create_file-with-empty-content trap. Headline contract preserved
+        # (the create_file defensive error already prevents the trap on
+        # the headline surface); create_directory is the canonical
+        # alternative and is exposed in the ablation surface so the
+        # explicit-mkdir path can be measured separately.
+        "create_directory",
     }
 )
 
