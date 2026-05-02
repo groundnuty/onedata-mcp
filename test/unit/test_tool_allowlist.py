@@ -1,8 +1,11 @@
-"""Verify that the curated 14-tool allowlist matches what the MCP server actually exposes.
+"""Verify that the curated headline allowlist matches what the MCP server actually exposes.
 
 Catches drift in either direction:
 - a tool listed in HEADLINE / ABLATION_EXTRAS that the server doesn't expose
 - a tool the server exposes that's not classified in any of the three sets
+
+Headline cardinality is 16 as of 2026-05-02 (was 15; `get_qos_requirement`
+promoted from ABLATION_EXTRAS for P6 — see tool_allowlist.py docstring).
 """
 
 from __future__ import annotations
@@ -19,8 +22,8 @@ from onedata_mcp.main import mcp
 
 
 @pytest.mark.asyncio
-async def test_headline_has_exactly_15_tools() -> None:
-    assert len(HEADLINE) == 15
+async def test_headline_has_expected_cardinality() -> None:
+    assert len(HEADLINE) == 16
 
 
 @pytest.mark.asyncio

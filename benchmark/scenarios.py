@@ -624,12 +624,19 @@ P6 = Scenario(
         "list."
     ),
     oracle_tier="static",
-    required_tools=frozenset({"list_files_recursively", "get_file_qos_summary"}),
+    # `get_file_qos_summary` returns rule-id → status; `replicas_num` per
+    # rule requires `get_qos_requirement(qos_id)` to fetch. Both required
+    # to answer the brief — added 2026-05-02 after K=1 panel exposed the
+    # gap (all 3 LLMs converged on filename-heuristic wrong answers).
+    required_tools=frozenset(
+        {"list_files_recursively", "get_file_qos_summary", "get_qos_requirement"}
+    ),
     allowed_tools_minimal=frozenset(
         {
             "list_user_spaces",
             "list_files_recursively",
             "get_file_qos_summary",
+            "get_qos_requirement",
         }
     ),
     fixture=Fixture(

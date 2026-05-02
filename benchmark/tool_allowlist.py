@@ -1,7 +1,7 @@
 """Curated tool allowlist for the PPAM 2026 headline benchmark sweep.
 
 The full MCP server exposes ~21 tools (M0rgho's 14 + 7 we added). For the
-**headline** benchmark the harness restricts the agent to a curated 15-tool
+**headline** benchmark the harness restricts the agent to a curated 16-tool
 surface; the **ablation** sweep uses the full surface to test the curation
 contribution. See:
 
@@ -23,14 +23,26 @@ Mapping back to paper Table 1 (paper-name → M0rgho name):
   list_providers          →  list_space_providers
   get_file_distribution   →  get_file_distribution
   get_qos_rules           →  get_file_qos_summary
+  get_qos_rule_detail     →  get_qos_requirement    (added 2026-05-02 — P6)
   set_qos_rule            →  add_file_qos_requirement
   list_transfers          →  list_space_transfers
   (added)                 →  get_transfer          (needed for P4: list returns IDs only)
+
+## 2026-05-02 — promotion of get_qos_requirement from ABLATION_EXTRAS
+
+P6 ("find files whose effective QoS requires only 1 replica") cannot be
+answered with `get_file_qos_summary` alone — its response shape is
+`{requirements: {qosId: status}}`, with NO `replicas_num` field. The
+per-rule details (replicas_num, expression) require
+`get_qos_requirement(qosId)`. Without it in HEADLINE, all three K=1
+panel LLMs converged on the same wrong answer (filename heuristics
+returning `redundant.bin` only). Promoted to HEADLINE; len now 16.
+Round-number reduction is acceptable trade for measurement validity.
 """
 
 from __future__ import annotations
 
-# The headline 15-tool benchmark allowlist. Order is presentation-only; the
+# The headline 16-tool benchmark allowlist. Order is presentation-only; the
 # harness consumes this as a frozenset for tools/list filtering.
 HEADLINE: frozenset[str] = frozenset(
     {
@@ -49,8 +61,9 @@ HEADLINE: frozenset[str] = frozenset(
         "list_space_providers",
         # R4 — block-level distribution (1)
         "get_file_distribution",
-        # R5 — QoS expressions (2)
+        # R5 — QoS expressions (3 — get_qos_requirement promoted 2026-05-02 for P6)
         "get_file_qos_summary",
+        "get_qos_requirement",
         "add_file_qos_requirement",
         # R6 — transfers (2)
         "list_space_transfers",
@@ -58,7 +71,7 @@ HEADLINE: frozenset[str] = frozenset(
     }
 )
 
-assert len(HEADLINE) == 15, f"HEADLINE must have exactly 15 tools, got {len(HEADLINE)}"
+assert len(HEADLINE) == 16, f"HEADLINE must have exactly 16 tools, got {len(HEADLINE)}"
 
 
 # Tools registered by the MCP server but **excluded** from the headline:
@@ -91,7 +104,6 @@ ABLATION_EXTRAS: frozenset[str] = frozenset(
         "get_file_id",
         "get_file_attributes",
         "grep_file_content",
-        "get_qos_requirement",
         "remove_qos_requirement",
     }
 )

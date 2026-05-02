@@ -19,7 +19,12 @@ class LLMConfig:
     model_id: str = ""  # the specific model identifier passed to the SDK
     temperature: float = 1.0
     max_tokens: int = 4096
-    max_tool_rounds: int = 15
+    # Bumped 2026-05-02 (was 15): Claude was hitting `error_max_turns` on P3
+    # before it could narrate a final answer (rule-add + multi-poll work
+    # genuinely needs more turns than terse scenarios). See artefact
+    # 20260502T033713 for the worked example. 40 turns gives slack for
+    # multi-tool scenarios without enabling indefinite loops.
+    max_tool_rounds: int = 40
     extra: dict[str, Any] = field(default_factory=dict)
 
 
