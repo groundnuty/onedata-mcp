@@ -65,7 +65,7 @@ async def run_trial(
     run_id: str,
     trial_ix: int,
     artefact_dir: Path,
-    reset_retries: int = 1,
+    reset_retries: int = 3,
 ) -> TrialArtefact:
     """Run one (LLM, scenario, trial) cycle and persist the artefact.
 
@@ -164,7 +164,19 @@ async def _prepare_with_retry(
     space_name: str,
     space_id: str | None,
 ) -> tuple[RunContext | None, str | None]:
-    """Run prepare_trial up to (1 + reset_retries) times; return last error."""
+    """Run prepare_trial up to (1 + reset_retries) times; return last error.
+
+    Retries on transient federation errors (`OnedataApiError`,
+    `FixtureResetTimeout`) with exponential backoff (1s, 2s, 4s, ...).
+    Non-transient errors (programming bugs, missing fixtures) propagate
+    immediately as `prepare_trial error: ...`. See research/empirical-mcp-
+    server-findings.md for the federation transient pattern that motivates
+    this retry layer.
+    """
+    import asyncio as _asyncio
+
+    from onedata_mcp.utils import OnedataApiError
+
     last_error: str | None = None
     for attempt in range(reset_retries + 1):
         try:
@@ -172,8 +184,14 @@ async def _prepare_with_retry(
             return ctx, None
         except FixtureResetTimeout as e:
             last_error = f"FixtureResetTimeout (attempt {attempt + 1}): {e}"
+        except OnedataApiError as e:
+            last_error = f"OnedataApiError (attempt {attempt + 1}): {e}"
         except Exception as e:  # noqa: BLE001
             return None, f"prepare_trial error: {type(e).__name__}: {e}"
+        # Backoff before next attempt — federation HTTP transients usually
+        # clear in a few seconds.
+        if attempt < reset_retries:
+            await _asyncio.sleep(2**attempt)
     return None, last_error
 
 

@@ -150,6 +150,16 @@ async def _main_async(args: argparse.Namespace) -> int:
         print("[panel] Skipped legs:")
         for reason in skipped:
             print(f"  - {reason}")
+    if args.llms:
+        wanted = {n.strip() for n in args.llms.split(",") if n.strip()}
+        panel = tuple(e for e in panel if e.name in wanted)
+        unknown = wanted - {e.name for e in panel}
+        if unknown:
+            print(
+                f"[panel] WARN: --llms requested {sorted(unknown)} but those "
+                "weren't in the activated panel.",
+                file=sys.stderr,
+            )
     if not panel:
         print("[panel] No LLMs activated; nothing to run.", file=sys.stderr)
         return 2
@@ -211,6 +221,18 @@ def main() -> None:
         type=str,
         default="",
         help="Comma-separated scenario ids (e.g. 'D1,A1,P1'); empty = all 18.",
+    )
+    parser.add_argument(
+        "--llms",
+        type=str,
+        default="",
+        help=(
+            "Comma-separated LLM names to include (e.g. "
+            "'claude-sonnet-4-5,qwen3.6-35b,glm-4.7-flash' for the Cyfronet/"
+            "Anthropic group; 'deepseek-v3' for the OpenRouter group). "
+            "Empty = all activated. Useful for splitting parallel-safe vs "
+            "serial groups when costs matter."
+        ),
     )
     parser.add_argument(
         "--scenario-parallelism",

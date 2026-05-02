@@ -105,11 +105,34 @@ async def verify_d3(ctx: RunContext, trace: AgentTrace) -> OracleResult:
             mcp_pass=False,
             diagnosis=f"size mismatch: expected {expected_size}, got {size}",
         )
-    if not contains_token(trace.final_answer, expected_head):
+    # Normalise newlines + escaped-newline sequences before substring match.
+    # Agents commonly render newlines as the literal two-character sequence
+    # `\n` (backslash + n) when echoing file content into prose; the fixture
+    # content has actual LF bytes. Both forms are equally valid renderings
+    # of the head — collapse whitespace + escape variants to a single space
+    # on both sides before comparing.
+    answer_norm = _normalise_whitespace(trace.final_answer)
+    expected_norm = _normalise_whitespace(expected_head)
+    if expected_norm.lower() not in answer_norm.lower():
         return OracleResult.format_only(
             mcp_pass=False, diagnosis="head substring not present in answer"
         )
     return OracleResult.format_only(mcp_pass=True)
+
+
+def _normalise_whitespace(s: str) -> str:
+    """Treat literal '\\n', '\\r', '\\t' (escape-sequence renderings) and
+    real LF / CR / TAB bytes as a single space. Lets the substring match be
+    robust to agents that print escape sequences vs raw control bytes.
+    """
+    out = s
+    for esc in ("\\n", "\\r", "\\t"):
+        out = out.replace(esc, " ")
+    for ws in ("\n", "\r", "\t"):
+        out = out.replace(ws, " ")
+    while "  " in out:
+        out = out.replace("  ", " ")
+    return out
 
 
 async def verify_d4(ctx: RunContext, trace: AgentTrace) -> OracleResult:
