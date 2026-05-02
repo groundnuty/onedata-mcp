@@ -1,13 +1,25 @@
 # PPAM 2026 benchmark — operations entry points.
 #
 # All commands assume `uv` is on PATH. Run `make help` for the full list.
+#
+# Conventions:
+# - `make` is THE interface to this project. If a workflow can't be done
+#   via a make target, add the target. Don't run raw `uv run python -m
+#   benchmark...` — those are implementation details that should live
+#   inside Makefile recipes.
+# - Variables (LLMS, SCENARIOS, K, RID, FILE, etc.) are passed via the
+#   command line: `make sweep LLMS=qwen3.6-35b SCENARIOS=D1,D2 K=1`.
+# - Targets that need a run_id default to creating a fresh one; pass
+#   RID=<existing-id> to attach to an existing run for cross-llm
+#   merging or re-runs.
 
-.PHONY: help install test lint format check \
+.PHONY: help install test test-file test-verbose lint format check \
         spaces-create spaces-support spaces-status \
         smoke smoke-d1 smoke-fast \
-        sweep-cyfronet sweep-deepseek sweep-claude sweep-all \
+        sweep sweep-cyfronet sweep-deepseek sweep-claude sweep-all \
         sweep-headline sweep-k8 \
         report report-latest \
+        show-grid show-headline show-trial inspect-fail list-runs \
         clean clean-artefacts
 
 # Default target prints the command list.
@@ -15,41 +27,55 @@ help:
 	@echo "PPAM 2026 benchmark — Make targets"
 	@echo ""
 	@echo "  Setup"
-	@echo "    install         pip install the MCP server in editable mode"
-	@echo "    test            run unit tests (109/109 expected)"
-	@echo "    lint            ruff check (auto-fix)"
-	@echo "    format          ruff format"
-	@echo "    check           lint + format + test (pre-commit gate)"
+	@echo "    install            pip install the MCP server in editable mode"
+	@echo "    test               run unit tests"
+	@echo "    test-verbose       run tests with -v"
+	@echo "    test-file FILE=... run a single test file (FILE=test/unit/foo.py)"
+	@echo "    lint               ruff check (auto-fix)"
+	@echo "    format             ruff format"
+	@echo "    check              lint + format + test (pre-commit gate)"
 	@echo ""
 	@echo "  Federation provisioning  (run once per panel-LLM addition)"
-	@echo "    spaces-create   create per-LLM Onedata spaces (idempotent)"
-	@echo "    spaces-support  attach providers to per-LLM spaces (idempotent)"
-	@echo "    spaces-status   list current spaces + their support state"
+	@echo "    spaces-create      create per-LLM Onedata spaces (idempotent)"
+	@echo "    spaces-support     attach providers to per-LLM spaces (idempotent)"
+	@echo "    spaces-status      list current spaces + their support state"
 	@echo ""
 	@echo "  Smokes  (cheap, single-trial verification)"
-	@echo "    smoke-d1        D1 only across the panel (~1 min)"
-	@echo "    smoke           D1+P1 across the panel (~3 min)"
-	@echo "    smoke-fast      D-band only across the panel (~6 min)"
+	@echo "    smoke-d1           D1 only across the panel (~1 min)"
+	@echo "    smoke              D1+P1 across the panel (~3 min)"
+	@echo "    smoke-fast         D-band only across the panel (~6 min)"
 	@echo ""
 	@echo "  K=1 sweeps  (full 18 scenarios, single trial)"
-	@echo "    sweep-cyfronet  Cyfronet+Anthropic legs in parallel (~25 min)"
-	@echo "    sweep-deepseek  DeepSeek leg serial via OpenRouter (~10 min)"
-	@echo "    sweep-claude    Claude only (~25 min)"
-	@echo "    sweep-all       Two-phase: Cyfronet+Anthropic parallel,"
-	@echo "                    DeepSeek serial (~35 min, single run-id)"
+	@echo "    sweep-cyfronet     Cyfronet+Anthropic legs in parallel (~25 min)"
+	@echo "    sweep-deepseek     DeepSeek leg serial via OpenRouter (~10 min)"
+	@echo "    sweep-claude       Claude only (~25 min)"
+	@echo "    sweep-all          Two-phase: Cyfronet+Anthropic parallel,"
+	@echo "                       DeepSeek serial (~35 min, single run-id)"
+	@echo ""
+	@echo "  Custom sweep (variable LLMs / scenarios / trials / run-id)"
+	@echo "    sweep              fully parametrised. Examples:"
+	@echo "      make sweep LLMS=qwen3.6-35b"
+	@echo "      make sweep LLMS=claude-sonnet-4-5,qwen3.6-35b SCENARIOS=D1,D2,A4"
+	@echo "      make sweep LLMS=deepseek-v4-pro K=8 PARALLEL=1"
+	@echo "      make sweep LLMS=glm-4.7-flash RID=20260502T204921_postfix_v3"
 	@echo ""
 	@echo "  Headline runs"
-	@echo "    sweep-k8        K=8 across the full panel (~3-4 hours)"
-	@echo "    sweep-headline  alias for sweep-k8"
+	@echo "    sweep-k8           K=8 across the full panel (~3-4 hours)"
+	@echo "    sweep-headline     alias for sweep-k8"
 	@echo ""
-	@echo "  Reporting"
-	@echo "    report-latest   regenerate REPORT_paper.md + REPORT_cyfronet.md"
-	@echo "                    for the most recent artefact run"
-	@echo "    report          alias for report-latest"
+	@echo "  Reporting + inspection"
+	@echo "    report-latest      regenerate REPORT_paper.md + REPORT_cyfronet.md"
+	@echo "                       for the most recent artefact run"
+	@echo "    report             alias for report-latest"
+	@echo "    list-runs          list artefact directories newest-first"
+	@echo "    show-headline RID=...  per-LLM pass-rate + fail list"
+	@echo "    show-grid RID=...      per-cell pass/fail grid (D1..D6 A1..A6 P1..P6)"
+	@echo "    show-trial RID=... LLM=... SCEN=... — full JSONL summary"
+	@echo "    inspect-fail RID=... LLM=... SCEN=... — diag + final_answer + tools"
 	@echo ""
 	@echo "  Housekeeping"
-	@echo "    clean           remove pyc, __pycache__, build artefacts"
-	@echo "    clean-artefacts remove all run artefacts (DESTRUCTIVE)"
+	@echo "    clean              remove pyc, __pycache__, build artefacts"
+	@echo "    clean-artefacts    remove all run artefacts (DESTRUCTIVE)"
 
 # ---------------------------------------------------------------------------
 # Setup
@@ -60,6 +86,18 @@ install:
 
 test:
 	uv run pytest test/unit -q
+
+test-verbose:
+	uv run pytest test/unit -v
+
+# Run a single test file. Example:
+#   make test-file FILE=test/unit/test_oracle_p3_loosened.py
+test-file:
+	@if [ -z "$(FILE)" ]; then \
+	  echo "ERROR: pass FILE=<path>. e.g. make test-file FILE=test/unit/test_oracle_p3_loosened.py"; \
+	  exit 1; \
+	fi
+	uv run pytest $(FILE) -v
 
 lint:
 	uv run ruff check benchmark/ onedata_mcp/ test/ --fix
@@ -160,13 +198,145 @@ sweep-k8:
 sweep-headline: sweep-k8
 
 # ---------------------------------------------------------------------------
-# Reporting
+# Custom sweep (parametrised)
+# ---------------------------------------------------------------------------
+#
+# Variables (all optional; defaults shown):
+#   LLMS=<comma-list>      panel LLM names. Default: full panel
+#   SCENARIOS=<comma-list> scenario IDs (D1..P6). Default: all 18
+#   K=<int>                trials per cell. Default: 1
+#   PARALLEL=<int>         scenario_parallelism. Default: 2
+#   RID=<run-id>           reuse an existing run-id. Default: fresh timestamp
+#                          + descriptive suffix derived from LLMS
+#   LABEL=<suffix>         override the descriptive suffix on a fresh RID
+#
+# Tees the live log to artefacts/<RID>/sweep.log so the run is auditable
+# even if the foreground process dies.
+
+LLMS ?=
+SCENARIOS ?=
+K ?= 1
+PARALLEL ?= 2
+RID ?=
+LABEL ?=
+
+sweep:
+	@RID="$(RID)"; \
+	if [ -z "$$RID" ]; then \
+	  STAMP=$$(date -u +%Y%m%dT%H%M%S); \
+	  if [ -n "$(LABEL)" ]; then SUFFIX="$(LABEL)"; \
+	  elif [ -n "$(LLMS)" ]; then SUFFIX="$$(echo '$(LLMS)' | tr ',' '_' | tr -d ' .')"; \
+	  else SUFFIX="all"; fi; \
+	  RID="$${STAMP}_$${SUFFIX}"; \
+	fi; \
+	mkdir -p "artefacts/$${RID}"; \
+	echo "Run ID: $${RID}"; \
+	LLMS_ARG=""; \
+	if [ -n "$(LLMS)" ]; then LLMS_ARG="--llms $(LLMS)"; fi; \
+	SCEN_ARG=""; \
+	if [ -n "$(SCENARIOS)" ]; then SCEN_ARG="--scenarios $(SCENARIOS)"; fi; \
+	uv run python -m benchmark.run_panel \
+	  --trials $(K) \
+	  $$LLMS_ARG $$SCEN_ARG \
+	  --scenario-parallelism $(PARALLEL) \
+	  --run-id "$${RID}" 2>&1 \
+	  | tee "artefacts/$${RID}/sweep.log"
+
+# ---------------------------------------------------------------------------
+# Reporting + inspection
 # ---------------------------------------------------------------------------
 
 report-latest:
 	uv run python -m benchmark.report
 
 report: report-latest
+
+# List artefact directories newest-first with their JSONL count.
+list-runs:
+	@for d in $$(ls -1d artefacts/2026* 2>/dev/null | sort -r | head -20); do \
+	  cnt=$$(ls $$d/*.jsonl 2>/dev/null | wc -l | tr -d ' '); \
+	  printf "%s  %3s trials\n" "$$d" "$$cnt"; \
+	done
+
+# Per-LLM pass-rate headline + fail list. Uses the latest run if RID
+# isn't passed.
+show-headline:
+	@RID="$(RID)"; \
+	if [ -z "$$RID" ]; then \
+	  RID=$$(ls -1d artefacts/2026* 2>/dev/null | sort -r | head -1); \
+	  echo "(latest run: $${RID})"; \
+	else \
+	  RID="artefacts/$${RID}"; \
+	fi; \
+	for f in $$RID/*.jsonl; do \
+	  basename "$$f" .jsonl; \
+	done | sed 's/__.*//' | sort -u | while read llm; do \
+	  pass=$$(for f in $$RID/$${llm}__*.jsonl; do jq -r '.outcome' "$$f"; done | grep -c PASS); \
+	  total=$$(ls $$RID/$${llm}__*.jsonl 2>/dev/null | wc -l | tr -d ' '); \
+	  fails=""; \
+	  for f in $$RID/$${llm}__*.jsonl; do \
+	    o=$$(jq -r '.outcome' "$$f"); \
+	    if [ "$$o" != "PASS" ]; then \
+	      fails="$$fails $$(basename $$f .jsonl | sed "s/$${llm}__//")($$o)"; \
+	    fi; \
+	  done; \
+	  printf "%-22s  %2d/%-2d  fails:%s\n" "$$llm" "$$pass" "$$total" "$$fails"; \
+	done
+
+# Per-cell grid: rows = LLMs, cols = scenarios D1..D6 A1..A6 P1..P6.
+show-grid:
+	@RID="$(RID)"; \
+	if [ -z "$$RID" ]; then \
+	  RID=$$(ls -1d artefacts/2026* 2>/dev/null | sort -r | head -1); \
+	  echo "(latest run: $${RID})"; \
+	else \
+	  RID="artefacts/$${RID}"; \
+	fi; \
+	printf "%-22s D1 D2 D3 D4 D5 D6 A1 A2 A3 A4 A5 A6 P1 P2 P3 P4 P5 P6\n" ""; \
+	for f in $$RID/*.jsonl; do basename "$$f" .jsonl; done \
+	  | sed 's/__.*//' | sort -u | while read llm; do \
+	  printf "%-22s " "$$llm"; \
+	  for scen in D1 D2 D3 D4 D5 D6 A1 A2 A3 A4 A5 A6 P1 P2 P3 P4 P5 P6; do \
+	    o=$$(jq -r '.outcome' "$$RID/$${llm}__$${scen}.jsonl" 2>/dev/null); \
+	    case "$$o" in \
+	      PASS) printf "✓  ";; \
+	      FAIL) printf "✗  ";; \
+	      RESET_FAIL) printf "R  ";; \
+	      ADAPTER_ERROR) printf "A  ";; \
+	      *) printf "?  ";; \
+	    esac; \
+	  done; \
+	  echo ""; \
+	done
+
+# Show one trial's complete JSONL summary.
+# Example: make show-trial RID=20260502T204921_postfix_v3 LLM=glm-4.7-flash SCEN=A5
+show-trial:
+	@if [ -z "$(RID)" ] || [ -z "$(LLM)" ] || [ -z "$(SCEN)" ]; then \
+	  echo "ERROR: need RID=<run-id> LLM=<llm-name> SCEN=<scenario-id>"; \
+	  echo "Example: make show-trial RID=20260502T204921_postfix_v3 LLM=glm-4.7-flash SCEN=A5"; \
+	  exit 1; \
+	fi
+	@jq '{outcome, oracle_diagnosis, oracle_mcp_pass, oracle_federation_pass, \
+	      rounds_used, finish_reason, error: (.error // "none"), \
+	      tool_calls_summary: [.tool_calls[] | {tool_name, succeeded, error: (.error // "ok")}], \
+	      final_answer: (.final_answer // "" | tostring)}' \
+	  "artefacts/$(RID)/$(LLM)__$(SCEN).jsonl"
+
+# Quick failure inspection: outcome + diag + truncated final_answer.
+# Example: make inspect-fail RID=... LLM=glm-4.7-flash SCEN=A5
+inspect-fail:
+	@if [ -z "$(RID)" ] || [ -z "$(LLM)" ] || [ -z "$(SCEN)" ]; then \
+	  echo "ERROR: need RID=<run-id> LLM=<llm-name> SCEN=<scenario-id>"; \
+	  exit 1; \
+	fi
+	@jq -r ' \
+	  "outcome: " + .outcome, \
+	  "diag:    " + (.oracle_diagnosis // ""), \
+	  "rounds:  " + (.rounds_used | tostring), \
+	  "tools:   " + ([.tool_calls[].tool_name] | join(",")), \
+	  "ans:     " + ((.final_answer // "") | .[0:500]) \
+	' "artefacts/$(RID)/$(LLM)__$(SCEN).jsonl"
 
 # ---------------------------------------------------------------------------
 # Housekeeping
