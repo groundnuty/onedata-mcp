@@ -8,6 +8,7 @@ from onedata_mcp.api.spaces import (
     get_space_providers,
     list_marketplace_spaces,
     list_user_spaces,
+    resolve_space_id_or_name,
 )
 
 
@@ -54,9 +55,13 @@ def register_module(mcp: FastMCP) -> None:
 
     @mcp.tool(name="list_space_providers", annotations=ToolAnnotations(readOnlyHint=True))
     async def mcp_list_space_providers(
-        space_id: str = Field(description="Space id"),
+        space_id: str = Field(description="Space id OR human-readable name"),
     ) -> dict[str, Any]:
         """List providers supporting a space, queried from Oneprovider.
+
+        `space_id` accepts either the hex spaceId or the space name; an
+        internal lookup resolves names. See research/empirical-mcp-server-
+        findings.md M-3.
 
         Returns the canonical (providerId, providerName) pairs as the
         oneprovider sees them. For richer per-provider attributes
@@ -64,4 +69,5 @@ def register_module(mcp: FastMCP) -> None:
         with an onezone /providers/{providerId} call per id — the agent
         chains the two calls when needed.
         """
-        return await get_space_providers(space_id)
+        resolved = await resolve_space_id_or_name(space_id)
+        return await get_space_providers(resolved)

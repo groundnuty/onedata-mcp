@@ -20,6 +20,46 @@ class MarketplaceListResponse(TypedDict):
     nextPageToken: str | None
 
 
+async def resolve_space_id_or_name(value: str) -> str:
+    """Polymorphic resolver: return a hex spaceId for either a hex
+    spaceId or a human-readable space name.
+
+    Per research/empirical-mcp-server-findings.md M-3, MCP tools that
+    take `space_id` previously rejected names with a 403 from the
+    Onedata REST. Accepting either preserves the simpler-surface
+    principle without forcing the agent to chain a name→id lookup.
+
+    Resolution rules:
+    1. If `value` looks like a hex spaceId (≥30 hex chars + a `ch`
+       suffix marker, the Onedata 25.0 ID shape), return as-is.
+    2. Otherwise, list user spaces and match by `name` (preferred) or
+       `spaceId` field equality.
+    3. Raise ValueError listing the available names if no match.
+    """
+    if not isinstance(value, str) or not value:
+        raise ValueError("space identifier must be a non-empty string")
+    # Heuristic: hex spaceId in Onedata 25.0 is ~38 chars with a `ch`
+    # separator near the tail (e.g. '9742830720c0ef94496dad1d96595736ch776e').
+    is_likely_id = (
+        len(value) >= 30
+        and "ch" in value
+        and all(c in "0123456789abcdef" for c in value.replace("ch", ""))
+    )
+    if is_likely_id:
+        return value
+
+    spaces = await list_user_spaces()
+    for s in spaces:
+        if s.get("name") == value or s.get("spaceId") == value:
+            sid = s.get("spaceId")
+            if isinstance(sid, str):
+                return sid
+    available = sorted(s.get("name", "?") for s in spaces if s.get("name"))
+    raise ValueError(
+        f"Space {value!r} not found. Available names: {available}"
+    )
+
+
 async def list_user_spaces() -> list[dict[str, Any]]:
     config = get_onezone_config()
     response = await request(config, "GET", "/spaces")

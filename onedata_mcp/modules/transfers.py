@@ -6,6 +6,7 @@ from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
+from onedata_mcp.api.spaces import resolve_space_id_or_name
 from onedata_mcp.api.transfers import get_transfer, list_space_transfers
 
 
@@ -14,7 +15,7 @@ def register_module(mcp: FastMCP) -> None:
 
     @mcp.tool(name="list_space_transfers", annotations=ToolAnnotations(readOnlyHint=True))
     async def mcp_list_space_transfers(
-        space_id: str = Field(description="Space id to list transfers for"),
+        space_id: str = Field(description="Space id OR human-readable name"),
         state: Literal["waiting", "ongoing", "ended"] = Field(
             default="ongoing",
             description="Transfer state filter. Defaults to 'ongoing'.",
@@ -32,12 +33,17 @@ def register_module(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         """List transfer ids in a space.
 
+        `space_id` accepts either the hex spaceId or the space name; an
+        internal lookup resolves names. See research/empirical-mcp-server-
+        findings.md M-3.
+
         The response contains transfer ids only; for source / destination /
         bytes / state detail, follow up with get_transfer per id.
 
         Note: requires the `space_view_transfers` privilege on the calling token.
         """
-        return await list_space_transfers(space_id, state=state, limit=limit, page_token=page_token)
+        resolved = await resolve_space_id_or_name(space_id)
+        return await list_space_transfers(resolved, state=state, limit=limit, page_token=page_token)
 
     @mcp.tool(name="get_transfer", annotations=ToolAnnotations(readOnlyHint=True))
     async def mcp_get_transfer(

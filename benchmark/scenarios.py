@@ -327,8 +327,15 @@ A5 = Scenario(
 A6 = Scenario(
     id="A6",
     band="access",
+    # Subtree-scoped (path=/a6/) per research/empirical-mcp-server-findings.md
+    # M-2. Space-wide form was unstable: D5's fixture also tags
+    # `pipeline_stage=raw` and the per-trial federation reset is subtree-
+    # scoped, so leftover state from prior D5 trials polluted A6's
+    # results. Re-authoring to ask for the subtree preserves the
+    # measurement intent (does the agent scope a metadata query?) and
+    # avoids cross-scenario fixture interference.
     brief=(
-        f"Find every file in space `{SPACE}` whose JSON metadata key "
+        f"Find every file under `/{SPACE}/a6/` whose JSON metadata key "
         "`pipeline_stage` equals `raw`. Report the full paths as a bullet "
         "list, one per line."
     ),

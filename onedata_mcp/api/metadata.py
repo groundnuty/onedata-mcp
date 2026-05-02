@@ -148,9 +148,20 @@ async def query_by_metadata(
             json_meta = metadata_payload.get("json")
             ok, matched_keys = _matches(json_meta, clauses)
             if ok:
+                # Onedata's list_files_recursively returns paths relative
+                # to the search root (e.g. 'batch01/f1.txt' when called
+                # from `/<space>/a6`, or 'a6/batch01/f1.txt' when called
+                # from `/<space>`). Normalize to absolute by prepending
+                # `root_path` so the response is consistent regardless of
+                # the `path` argument. See research/empirical-mcp-server-
+                # findings.md M-1.
+                if file_path.startswith("/"):
+                    abs_path = file_path
+                else:
+                    abs_path = f"{root_path.rstrip('/')}/{file_path.lstrip('/')}"
                 matches.append(
                     {
-                        "path": file_path,
+                        "path": abs_path,
                         "fileId": file_id,
                         "matched_keys": matched_keys,
                     }
