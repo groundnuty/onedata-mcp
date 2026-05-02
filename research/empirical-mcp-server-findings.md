@@ -12,6 +12,9 @@ Scope distinction:
   (REST API quirks, federation eventual-consistency behaviour).
 - This file — onedata-mcp wrapper-side observations (tool design,
   response shapes, cross-call consistency).
+- `llm-output-stability-findings.md` — LLM-side output-emission
+  quirks (model behaviour, not server design — e.g., Qwen empty
+  final content after long tool chains).
 - `papers/ppam-2026/research/28-empirical-spec-corrections.md` —
   paper-text corrections.
 

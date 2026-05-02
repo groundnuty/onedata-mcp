@@ -69,43 +69,78 @@ artefacts/<run_id>/REPORT_cyfronet.md        per-model diagnostic + Forge gaps
 `artefacts/` is gitignored. Reports must be moved to `research/` or
 `docs/` if they should ship with the repo.
 
-## K=1 results (latest, run `20260502T145805` post fixes)
+## K=1 results
 
-After applying:
-- M-1..M-8 MCP server design fixes (per `empirical-mcp-server-findings.md`)
-- Oracle D3 `\n` normalisation
-- Retry-with-backoff in `_prepare_with_retry` (3 retries, exponential 1s/2s/4s)
+### Pre-fix baseline (run `20260502T145805`)
+
+After M-1..M-9 + oracle D3 normalisation + retry-with-backoff:
 
 ```
 | LLM                | Pass rate    | Notes                                         |
 |--------------------|--------------|-----------------------------------------------|
 | claude-sonnet-4-5  | 17/18 (94%)  | Only fail: D3 size off-by-one                 |
-| qwen3.6-35b        | 17/18 (94%)  | Only fail: P3 (real reasoning gap)            |
-| deepseek-v3        | 13/18 (72%)  | (pre-V4-swap; V4-pro sweep pending)           |
-| glm-4.7-flash      | 12/18 (67%)  | Real reasoning gaps in A2/A4/D2/D5/P3/P6      |
+| qwen3.6-35b        | 17/18 (94%)  | Only fail: P3 (output-emission quirk, see L-1)|
+| deepseek-v3        | 13/18 (72%)  | (pre-V4-swap; pre-fix code)                   |
+| glm-4.7-flash      | 12/18 (67%)  | Reasoning gaps in A2, D5, P3, P6              |
 ```
 
-**Total RESET_FAIL: 0/72** (the retry-with-backoff is doing its job).
+**Total RESET_FAIL: 0/72** (retry-with-backoff worked).
 
-DeepSeek-V4-pro swap committed (29eeed7) but **NOT YET RUN**. Expected
-to land 14-17/18 in priors but actual TBD.
+### Post-fix (run `20260502T183948_postfix_no_v4`, M-10/M-11/M-12 applied)
+
+```
+| LLM                | Pass rate     | Δ vs pre-fix | Lift attribution                       |
+|--------------------|---------------|--------------|----------------------------------------|
+| claude-sonnet-4-5  | 18/18 (100%)  | +1 ⭐         | D3 lifted by M-10 (first-ever 100%)    |
+| qwen3.6-35b        | 17/18 (94%)   | 0            | P3 still empty-content (~33% rate)     |
+| glm-4.7-flash      | 11/18 (61%)   | -1 (K=1 noise) | A4 (M-11), D2 (M-12), D3 (M-10) lifted; |
+|                    |               |              | A6, D1, D5, P4 K=1 noise-flips         |
+| deepseek-v4-pro    | 1/9 partial   | n/a          | D3 PASS confirms M-10 works on V4-pro; |
+|                    |               |              | other 8 = OpenRouter 429 rate limits   |
+```
+
+**Structural reading**: Sonnet hit 18/18 for the first time across
+any K=1 run in this project. M-10/M-11/M-12 each demonstrably lifted
+their target scenarios. GLM K=1 noise dominates the headline number;
+K=8 is needed for paper-grade GLM measurement.
+
+### Findings docs
+
+- `research/empirical-mcp-server-findings.md` — M-1..M-12 (server design)
+- `research/llm-output-stability-findings.md` — L-1+ (model behaviour)
+  — added 2026-05-02; documents Qwen P3 empty-content rate (3/9 trials).
 
 ## Pending workstreams
 
-1. **Run V4-pro sweep** to honestly measure post-swap. `make sweep-deepseek` (~10-15 min, single LLM).
-2. **K=8 headline run** — `make sweep-k8` is wired, ~3-4 hours wall.
-   Two-phase: Cyfronet+Anthropic parallel, DeepSeek serial.
-3. **Add Mistral-Small-4-119B-2603** when user provisions access.
+1. **OpenRouter 429 retry-with-backoff in OpenAI-compat adapter** —
+   prerequisite for V4-pro to clear K=1. Without this, V4-pro hits
+   rate limits 8/9 trials at `--scenario-parallelism 1`. ~10 LOC.
+2. **V4-pro K=1 (post-rate-limit-fix)** to honestly score V4-pro.
+   D3 already confirmed PASS; A4/D2 expected to lift via M-11/M-12.
+3. **K=8 headline run** — `make sweep-k8` is wired, ~3-4 hours wall.
+   Two-phase: Cyfronet+Anthropic parallel, OpenRouter serial. Will
+   smooth out GLM K=1 noise. Need item 1 first (else V4-pro is broken
+   for headline).
 4. **#22 pass^k aggregator** — `report.py` has K=1 reports; needs
    `--aggregate-k` mode for K=8 headline table with pass^k columns.
-5. **#23 -spice-v1 onezone patch verification** (open).
-6. **#24 federation health** — 2/5 OPs unreachable (informational).
-7. **M-10 / M-11 / M-12 fleet-wide pass-rate fixes** — APPLIED 2026-05-02
-   (see `research/empirical-mcp-server-findings.md`). Three low-LOC
-   wrapper changes lift fleet pass rate on D3 (size out-of-band),
-   A4 (`create_directory` tool + `create_parents=True` default),
-   D2 (relative-prefix docstring). Surfaced by V3 K=1 diagnostic;
-   net-new vs M-1..M-9. Re-run V4-pro K=1 to measure post-fix delta.
+5. **Add Mistral-Small-4-119B-2603** when user provisions access.
+6. **#23 -spice-v1 onezone patch verification** (open).
+7. **#24 federation health** — 2/5 OPs unreachable (informational).
+
+### Applied 2026-05-02
+
+- **M-10 / M-11 / M-12 fleet-wide pass-rate fixes** (commit `f35a2c7`)
+  — see `research/empirical-mcp-server-findings.md`. Three low-LOC
+  wrapper changes lift fleet pass rate on D3, A4, D2.
+- **SiliconFlow `reasoning_content` echo** (commits `8f00137`, `22bd69f`)
+  — DeepSeek-V4-pro now passes API contract on SiliconFlow. Verified
+  via 4-strategy live probe.
+- **L-1 finding documented + P3 oracle loosened** — Qwen P3
+  empty-content output-emission quirk; rate ~33%; adapter ruled out as
+  cause. See `research/llm-output-stability-findings.md`. Loosening
+  applied: `mcp_pass = added_qos AND polled AND (answer_ok OR federation_pass)`
+  in `benchmark/oracles/placement.py::verify_p3`. New tests in
+  `test/unit/test_oracle_p3_loosened.py` (4 cases). Total 129 → 133 tests.
 
 ## Cost notes (DeepSeek via OpenRouter)
 

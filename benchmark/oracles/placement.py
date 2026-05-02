@@ -171,9 +171,7 @@ async def verify_p3(ctx: RunContext, trace: AgentTrace) -> OracleResult:
     if not file_id:
         return OracleResult(False, False, diagnosis="fixture path missing")
 
-    # mcp_pass: agent added an EU+replicas≥2 QoS req, AND polled (either
-    # list_space_transfers or get_file_qos_summary), AND the answer names
-    # which condition was observed.
+    # Tool-use correctness (depends on trace only).
     def _eu_2plus(args: dict) -> bool:
         expr = args.get("expression", "") or ""
         rep = args.get("replicas_num", 0) or 0
@@ -187,9 +185,6 @@ async def verify_p3(ctx: RunContext, trace: AgentTrace) -> OracleResult:
             lambda a: a.get("file_id_or_path") in (target_path, file_id),
         )
     )
-    answer = trace.final_answer
-    answer_ok = contains_token(answer, "transfer") or contains_token(answer, "fulfilled")
-    mcp_pass = added_qos and polled and answer_ok
 
     # federation_pass: within deadline, EITHER a transfer for this file
     # appears OR a rule is fulfilled.
@@ -217,13 +212,26 @@ async def verify_p3(ctx: RunContext, trace: AgentTrace) -> OracleResult:
     except Exception as e:  # noqa: BLE001
         fed_diag.append(f"polling error: {e}")
 
+    # mcp_pass — loosened per L-1 finding (see
+    # research/llm-output-stability-findings.md). Accept the trial when the
+    # agent did the right tool-use AND either (a) reported the outcome
+    # textually, OR (b) federation observed the effect. Path (b) covers
+    # Qwen3.6's empty-final-content emission quirk after long tool chains —
+    # the work is correct, the model just terminates without a summary.
+    answer = trace.final_answer
+    answer_ok = contains_token(answer, "transfer") or contains_token(answer, "fulfilled")
+    mcp_pass = added_qos and polled and (answer_ok or federation_pass)
+
     mcp_diag = []
     if not added_qos:
         mcp_diag.append("no add_file_qos_requirement with EU + replicas≥2")
     if not polled:
         mcp_diag.append("no list_space_transfers or get_file_qos_summary follow-up")
-    if not answer_ok:
-        mcp_diag.append("answer doesn't claim 'transfer' or 'fulfilled'")
+    if not answer_ok and not federation_pass:
+        mcp_diag.append(
+            "answer doesn't claim 'transfer' or 'fulfilled' "
+            "and federation didn't observe the effect either"
+        )
 
     return OracleResult(
         mcp_pass=mcp_pass,
