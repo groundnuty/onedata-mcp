@@ -112,7 +112,25 @@ def build_panel() -> tuple[tuple[PanelEntry, ...], tuple[str, ...]]:
     openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
     openrouter_base = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
     if openrouter_key:
-        for name, model_id in (("deepseek-v3", "deepseek/deepseek-chat-v3-0324"),):
+        # OpenRouter enforces per-request `max_tokens` against the user's
+        # credit balance — requesting our 32k default returns HTTP 402
+        # ("This request requires more credits, or fewer max_tokens"). We
+        # cap OpenRouter-served LLMs at 4096; the working K=1 sweep used
+        # ~86 output tokens per trial on average, so 4k is ample headroom.
+        #
+        # Provider routing: probed 2026-05-02, OpenRouter does NOT serve
+        # DeepSeek's own infra for `deepseek-chat-v3-0324` — only 3rd-
+        # party resellers (DeepInfra, AtlasCloud, ModelRun, SiliconFlow,
+        # Novita, GMICloud). One D5 trial at sweep 20260502T145805
+        # returned French gibberish (almost certainly Novita or similar
+        # low-end provider). Pin to DeepInfra: most-mature reseller,
+        # stable quality, supports tool_choice="auto" cleanly.
+        # `allow_fallbacks=false` makes the leg fail loud if DeepInfra
+        # is briefly unavailable rather than silently routing to a
+        # lower-quality alternative.
+        for name, model_id, provider in (
+            ("deepseek-v3", "deepseek/deepseek-chat-v3-0324", "DeepInfra"),
+        ):
             panel.append(
                 PanelEntry(
                     name=name,
@@ -121,6 +139,13 @@ def build_panel() -> tuple[tuple[PanelEntry, ...], tuple[str, ...]]:
                         api_base=openrouter_base,
                         api_key=openrouter_key,
                         model_id=model_id,
+                        max_tokens=4096,
+                        extra={
+                            "provider": {
+                                "order": [provider],
+                                "allow_fallbacks": False,
+                            }
+                        },
                     ),
                     adapter_factory=OpenAICompatAdapter,
                 )

@@ -67,6 +67,12 @@ class OpenAICompatAdapter:
         final_text: str | None = None
         rounds_log: list[dict[str, Any]] = []
 
+        # Per-LLM extras forwarded to the OpenAI-compat endpoint as
+        # `extra_body`. Used for OpenRouter's `provider` routing block
+        # (pin to a specific upstream provider) and any other vendor-
+        # specific knobs configured per LLM via `LLMConfig.extra`.
+        extra_body = self.config.extra or None
+
         for round_ix in range(self.config.max_tool_rounds):
             messages_pre = copy.deepcopy(messages)
             try:
@@ -77,6 +83,7 @@ class OpenAICompatAdapter:
                     tool_choice="auto",
                     temperature=self.config.temperature,
                     max_tokens=self.config.max_tokens,
+                    extra_body=extra_body,
                 )
             except Exception as e:  # noqa: BLE001
                 return TrialDispatch(
