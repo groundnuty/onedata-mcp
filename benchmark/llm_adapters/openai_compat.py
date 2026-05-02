@@ -15,6 +15,7 @@ something the trial-runner can call uniformly across LLMs.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import time
@@ -22,7 +23,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
-from openai import AsyncOpenAI
+from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, RateLimitError
 
 from benchmark._runtime_types import ToolCall
 from benchmark.llm_adapters._protocol import LLMConfig, TrialDispatch
@@ -31,6 +32,54 @@ from benchmark.llm_adapters._protocol import LLMConfig, TrialDispatch
 # result still drives the agent's next turn; this cap is just for the
 # trace artefact so oracles + post-hoc analysis don't OOM on huge files.
 TOOL_RESULT_CAP_BYTES = 8 * 1024
+
+# Retry-with-backoff configuration for transient upstream failures
+# (HTTP 429 rate-limits, network timeouts, connection resets). Witnessed
+# 2026-05-02 on V4-pro via OpenRouter→SiliconFlow at
+# --scenario-parallelism 1: 8 of 9 trials hit RateLimitError mid-trial,
+# burning the budget without producing usable records. Exponential
+# backoff (2s, 4s, 8s) gives upstream rate-limit windows time to clear
+# without breaking the per-trial budget for non-rate-limited models.
+RETRY_MAX_ATTEMPTS = 4  # 1 initial + 3 retries
+RETRY_BASE_DELAY_SECONDS = 2.0
+
+
+async def _create_with_retry(
+    client: AsyncOpenAI,
+    *,
+    model: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    temperature: float,
+    max_tokens: int,
+    extra_body: dict[str, Any] | None,
+) -> Any:
+    """chat.completions.create with bounded exponential-backoff retry on
+    transient upstream failures. Non-transient errors (auth, malformed
+    request, 4xx other than 429) propagate immediately.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(RETRY_MAX_ATTEMPTS):
+        try:
+            return await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                temperature=temperature,
+                max_tokens=max_tokens,
+                extra_body=extra_body,
+            )
+        except (RateLimitError, APITimeoutError, APIConnectionError) as e:
+            last_exc = e
+            if attempt == RETRY_MAX_ATTEMPTS - 1:
+                raise
+            # Exponential backoff: 2s, 4s, 8s (capped at 16s).
+            delay = min(RETRY_BASE_DELAY_SECONDS * (2**attempt), 16.0)
+            await asyncio.sleep(delay)
+    # Defensive: loop always either returns or raises, but appease type-checkers.
+    assert last_exc is not None
+    raise last_exc
 
 
 class OpenAICompatAdapter:
@@ -76,11 +125,11 @@ class OpenAICompatAdapter:
         for round_ix in range(self.config.max_tool_rounds):
             messages_pre = copy.deepcopy(messages)
             try:
-                response = await self._client.chat.completions.create(
+                response = await _create_with_retry(
+                    self._client,
                     model=self.config.model_id,
                     messages=messages,
                     tools=openai_tools,
-                    tool_choice="auto",
                     temperature=self.config.temperature,
                     max_tokens=self.config.max_tokens,
                     extra_body=extra_body,

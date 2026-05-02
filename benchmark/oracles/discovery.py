@@ -97,7 +97,18 @@ async def verify_d3(ctx: RunContext, trace: AgentTrace) -> OracleResult:
 
     expected_content = D3_SCENARIO.fixture.files[0].content
     expected_size = len(expected_content.encode("utf-8"))
-    expected_head = expected_content[:50]
+    # Head check uses the first 30 source-content chars (covers ~2 lines of
+    # the manifest fixture). Shorter than the full file, deliberately:
+    # agents typically render newlines as the 2-char escape sequence `\\n`
+    # rather than real LF, then truncate to N visible chars. With a 50-char
+    # expected_head, every newline shifts the agent's emission boundary by
+    # 1 char relative to the source — at 2 newlines in the first 50 chars
+    # of D3, the agent's normalized answer can fall 2 chars short of the
+    # expected head boundary even when the agent read the file correctly.
+    # 30 chars covers MANIFEST v1\nbuild=46-g14b5bda7 — distinctive enough
+    # to verify the agent actually read content, robust to encoding/
+    # truncation slop.
+    expected_head = expected_content[:30]
 
     size = extract_int(trace.final_answer, "size")
     if size != expected_size:
