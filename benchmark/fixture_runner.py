@@ -247,35 +247,43 @@ TRANSFER_VISIBILITY_POLL_INTERVAL = 1.5
 
 
 async def _wait_for_transfer_visible(space_id: str, transfer_id: str) -> None:
-    """Poll list_space_transfers until `transfer_id` appears, OR timeout.
+    """Poll list_space_transfers(state="ended") until `transfer_id` is
+    present, OR raise on timeout.
 
-    Probes both ongoing and ended states (a freshly-created migration
-    can land in either depending on how fast it completes). Walks the
-    list_space_transfers result via paging tokens because Onedata caps
-    a single response at 1000 ids and per-LLM spaces accumulate trial
-    history.
+    Specifically waits for the ENDED state — that's what the P4 agent's
+    list_space_transfers query uses. An earlier version of this loop
+    accepted visibility in EITHER ongoing or ended state, which had a
+    race: wait-loop saw tid in ongoing (mid-migration), returned, then
+    the migration completed and moved to ended AFTER the agent's
+    listing query — so the agent missed it entirely. Witnessed
+    2026-05-02 in run T195311 on Sonnet's per-LLM space (Sonnet listing
+    returned 5 leftover transfers, but a 6th — the just-pre-staged tid —
+    was in ended state at side-channel query time, just not at agent
+    time).
+
+    Walks pages because per-LLM spaces accumulate trial history (transfer
+    logs are immutable in Onedata) and a single page caps at 1000 ids.
     """
     deadline = time.time() + TRANSFER_VISIBILITY_TIMEOUT_SECONDS
     while time.time() < deadline:
-        for state in ("ongoing", "ended"):
-            page_token: str | None = None
-            while True:
-                try:
-                    page = await transfers_api.list_space_transfers(
-                        space_id, state=state, limit=1000, page_token=page_token
-                    )
-                except OnedataApiError:
-                    break
-                if transfer_id in (page.get("transfers") or []):
-                    return
-                page_token = page.get("nextPageToken")
-                if not page_token:
-                    break
+        page_token: str | None = None
+        while True:
+            try:
+                page = await transfers_api.list_space_transfers(
+                    space_id, state="ended", limit=1000, page_token=page_token
+                )
+            except OnedataApiError:
+                break
+            if transfer_id in (page.get("transfers") or []):
+                return
+            page_token = page.get("nextPageToken")
+            if not page_token:
+                break
         await asyncio.sleep(TRANSFER_VISIBILITY_POLL_INTERVAL)
     raise RuntimeError(
         f"Pre-staged transfer {transfer_id} did not appear in "
-        f"list_space_transfers within {TRANSFER_VISIBILITY_TIMEOUT_SECONDS}s "
-        f"on space {space_id}"
+        f'list_space_transfers(state="ended") within '
+        f"{TRANSFER_VISIBILITY_TIMEOUT_SECONDS}s on space {space_id}"
     )
 
 

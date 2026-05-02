@@ -45,22 +45,37 @@ async def test_returns_immediately_when_tid_visible_on_first_poll(
 
 
 @pytest.mark.asyncio
-async def test_polls_both_states_until_tid_appears(
+async def test_only_polls_ended_state_not_ongoing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The tid lives in 'ended' state (migration completed quickly)."""
+    """Wait-loop must specifically wait for ENDED state, not ongoing.
+    An ongoing-then-ended race caused P4 fails on 2026-05-02 (run T195311)
+    when the loop accepted visibility in ongoing and returned before the
+    transfer migrated to ended — missing the agent's later
+    list_space_transfers(state="ended") query."""
     import benchmark.fixture_runner as f
 
+    states_queried: list[str] = []
+
     async def _fake_list(_space_id: str, *, state: str, limit: int, page_token: str | None) -> dict:
+        states_queried.append(state)
+        # tid is "ongoing" forever — the wait-loop must NOT return.
         if state == "ongoing":
-            return {"transfers": [], "nextPageToken": None}
-        # state == "ended"
-        return {"transfers": ["target-tid"], "nextPageToken": None}
+            return {"transfers": ["target-tid"], "nextPageToken": None}
+        # ENDED never has it — wait-loop should time out
+        return {"transfers": [], "nextPageToken": None}
 
     monkeypatch.setattr(f.transfers_api, "list_space_transfers", _fake_list)
     monkeypatch.setattr(f.asyncio, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(f, "TRANSFER_VISIBILITY_TIMEOUT_SECONDS", 0.1)
 
-    await _wait_for_transfer_visible("space-id", "target-tid")
+    with pytest.raises(RuntimeError, match="did not appear"):
+        await _wait_for_transfer_visible("space-id", "target-tid")
+    # Wait-loop should ONLY query ended state, never ongoing.
+    assert "ongoing" not in states_queried, (
+        f"Wait-loop should query only 'ended' state, but queried: {set(states_queried)}"
+    )
+    assert "ended" in states_queried
 
 
 @pytest.mark.asyncio
@@ -71,8 +86,8 @@ async def test_walks_pages_when_tid_is_on_a_later_page(
     import benchmark.fixture_runner as f
 
     pages = {
-        ("space-id", "ongoing", None): {"transfers": ["other1"], "nextPageToken": "page2"},
-        ("space-id", "ongoing", "page2"): {
+        ("space-id", "ended", None): {"transfers": ["other1"], "nextPageToken": "page2"},
+        ("space-id", "ended", "page2"): {
             "transfers": ["target-tid", "other2"],
             "nextPageToken": None,
         },
@@ -102,10 +117,9 @@ async def test_returns_after_eventual_consistency_settles(
 
     async def _fake_list(_space_id: str, *, state: str, limit: int, page_token: str | None) -> dict:
         nonlocal call_count
-        if state == "ongoing":
+        if state == "ended":
             call_count += 1
-        # ongoing-state polls are what we count for "iterations"
-        if call_count >= poll_when_visible and state == "ongoing":
+        if call_count >= poll_when_visible and state == "ended":
             return {"transfers": ["target-tid"], "nextPageToken": None}
         return {"transfers": [], "nextPageToken": None}
 
