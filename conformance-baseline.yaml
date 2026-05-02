@@ -1,0 +1,64 @@
+# MCP-conformance baseline — onedata-mcp expected-failures.
+#
+# The conformance suite runs every test scenario it knows about. This
+# server only implements the *tools* + *ping* + *logging-set-level*
+# capability surface; the rest of MCP's optional capabilities
+# (resources, prompts, completion, sampling, elicitation, progress
+# notifications) are intentionally out-of-scope for this domain.
+#
+# This file lists scenarios we expect to fail because the relevant
+# capability isn't implemented. Passing the baseline means the scope-
+# applicable scenarios all pass.
+#
+# Format: top-level `server:` (and optionally `client:`) keys with a
+# list of scenario IDs (matches `npx @modelcontextprotocol/conformance
+# list --server` output). Schema documented in
+# https://github.com/modelcontextprotocol/conformance README.
+#
+# Reviewed 2026-05-03 against suite v0.1.16. Re-review when bumping
+# suite version or expanding the server's capability surface.
+
+server:
+  # ---- Out-of-scope capabilities (server doesn't implement) ----
+
+  # Completion API — text-completion endpoint we don't expose
+  - completion-complete
+
+  # Tool-call response shapes we don't return (text only):
+  - tools-call-image
+  - tools-call-audio
+  - tools-call-embedded-resource
+  - tools-call-mixed-content
+
+  # Tool-call observability features we don't emit:
+  - tools-call-with-logging
+  - tools-call-with-progress
+
+  # Tool-call patterns that require client-side cooperation we don't request:
+  - tools-call-sampling
+  - tools-call-elicitation
+  - elicitation-sep1034-defaults
+  - elicitation-sep1330-enums
+
+  # Resources API — we expose tools, not browseable resources
+  - resources-read-text
+  - resources-read-binary
+  - resources-templates-read
+  - resources-subscribe
+  - resources-unsubscribe
+
+  # Prompts API — we expose tools, not stored prompts
+  - prompts-get-simple
+  - prompts-get-with-args
+  - prompts-get-embedded-resource
+  - prompts-get-with-image
+
+  # ---- Real findings, expected-fail until fixed ----
+  #
+  # M-13 candidate: HTTP transport accepts non-localhost Host/Origin
+  # headers. Per MCP-2025-11-25 security spec, local servers MUST
+  # reject these to prevent DNS-rebinding attacks. FastMCP's HTTP
+  # transport doesn't enforce this by default; needs middleware or
+  # FastMCP config.  Tracked separately; will be removed from
+  # baseline once fixed.
+  - dns-rebinding-protection

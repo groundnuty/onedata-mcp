@@ -220,3 +220,6 @@ __marimo__/
 
 # Benchmark per-run artefacts (per-trial JSONL)
 artefacts/
+
+# MCP-conformance per-run results
+conformance-results/

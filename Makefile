@@ -18,6 +18,7 @@
         smoke smoke-d1 smoke-fast \
         sweep sweep-cyfronet sweep-deepseek sweep-claude sweep-all \
         sweep-headline sweep-k8 \
+        conformance inspect-smoke \
         report report-latest \
         show-grid show-headline show-trial inspect-fail list-runs \
         clean clean-artefacts
@@ -62,6 +63,13 @@ help:
 	@echo "  Headline runs"
 	@echo "    sweep-k8           K=8 across the full panel (~3-4 hours)"
 	@echo "    sweep-headline     alias for sweep-k8"
+	@echo ""
+	@echo "  MCP-protocol validation  (paper-grade artifacts)"
+	@echo "    conformance        run modelcontextprotocol/conformance suite v0.1.16+"
+	@echo "                       against onedata-mcp on a temp HTTP transport;"
+	@echo "                       output → conformance-results/<timestamp>/"
+	@echo "    inspect-smoke      run modelcontextprotocol/inspector --cli"
+	@echo "                       and assert the 14 tools are listed"
 	@echo ""
 	@echo "  Reporting + inspection"
 	@echo "    report-latest      regenerate REPORT_paper.md + REPORT_cyfronet.md"
@@ -241,6 +249,64 @@ sweep:
 	  --scenario-parallelism $(PARALLEL) \
 	  --run-id "$${RID}" 2>&1 \
 	  | tee "artefacts/$${RID}/sweep.log"
+
+# ---------------------------------------------------------------------------
+# MCP-protocol validation
+# ---------------------------------------------------------------------------
+#
+# These targets spawn onedata-mcp on a temporary HTTP transport (via
+# scripts/with-http-server.sh), run an external validator against it,
+# and tear the server down. Both produce paper-citable artifacts:
+#
+#   conformance     — modelcontextprotocol/conformance v0.1.16+
+#                     (March 2026, Anthropic-canonical protocol suite).
+#                     Validates JSON-RPC, capability negotiation,
+#                     spec compliance. Output: conformance-results/.
+#
+#   inspect-smoke   — modelcontextprotocol/inspector --cli mode.
+#                     Calls tools/list and asserts the expected
+#                     14-tool surface is present. Cheap CI-style check.
+#
+# Both target localhost; no federation traffic. Safe to run alongside
+# concurrent benchmark sweeps.
+
+# Conformance port — overridable for parallel runs.
+MCP_CONFORMANCE_PORT ?= 3037
+
+conformance:
+	@RID=$$(date -u +%Y%m%dT%H%M%SZ); \
+	OUTDIR="conformance-results/$${RID}"; \
+	mkdir -p "$${OUTDIR}"; \
+	echo "Conformance run → $${OUTDIR}"; \
+	scripts/with-http-server.sh --port $(MCP_CONFORMANCE_PORT) -- \
+	  npx -y @modelcontextprotocol/conformance@latest server \
+	    --url __MCP_URL__ \
+	    --expected-failures conformance-baseline.yaml \
+	    --output-dir "$${OUTDIR}" 2>&1 | tee "$${OUTDIR}/run.log"; \
+	echo ""; \
+	echo "Conformance results saved to $${OUTDIR}"
+
+# Inspector smoke — one-shot tools/list assertion.
+MCP_INSPECT_PORT ?= 3038
+
+inspect-smoke:
+	@scripts/with-http-server.sh --port $(MCP_INSPECT_PORT) -- \
+	  bash -c '\
+	    set -e; \
+	    echo "Calling tools/list via inspector --cli..."; \
+	    OUT=$$(npx -y @modelcontextprotocol/inspector@latest --cli __MCP_URL__ \
+	      --method tools/list 2>&1); \
+	    echo "$$OUT"; \
+	    COUNT=$$(echo "$$OUT" | grep -cE "\"name\":\\s*\"" || true); \
+	    EXPECTED_MIN=14; \
+	    if [ "$$COUNT" -ge "$$EXPECTED_MIN" ]; then \
+	      echo ""; \
+	      echo "✓ inspect-smoke OK — found $$COUNT tools (>= $$EXPECTED_MIN expected)"; \
+	    else \
+	      echo ""; \
+	      echo "✗ inspect-smoke FAIL — found $$COUNT tools (< $$EXPECTED_MIN expected)" >&2; \
+	      exit 1; \
+	    fi'
 
 # ---------------------------------------------------------------------------
 # Reporting + inspection

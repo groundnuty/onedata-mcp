@@ -64,10 +64,31 @@ mcp = _create_onedata_mcp_server()
 
 
 def main() -> None:
-    """Main entry point for the Onedata MCP Server."""
+    """Main entry point for the Onedata MCP Server.
+
+    Transport selection (env var MCP_TRANSPORT, default ``stdio``):
+
+    - ``stdio``  — subprocess transport. Used by claude-agent-sdk and
+      the benchmark harness. Default for backward compat.
+    - ``http``   — streamable-http transport. Used by the
+      modelcontextprotocol/conformance suite and the
+      modelcontextprotocol/inspector CLI smoke. Listens on
+      ``MCP_HOST:MCP_PORT`` (defaults: ``127.0.0.1:3037``).
+
+    Example HTTP launch:
+
+        MCP_TRANSPORT=http MCP_PORT=3037 uv run onedata-mcp
+    """
+    transport = os.environ.get("MCP_TRANSPORT", "stdio").lower().strip()
     try:
-        logger.info("Server started")
-        mcp.run()
+        if transport == "http":
+            host = os.environ.get("MCP_HOST", "127.0.0.1")
+            port = int(os.environ.get("MCP_PORT", "3037"))
+            logger.info("Server started, transport=http host=%s port=%d", host, port)
+            mcp.run(transport="http", host=host, port=port)
+        else:
+            logger.info("Server started, transport=stdio")
+            mcp.run()
 
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received, shutting down...")  # type: ignore

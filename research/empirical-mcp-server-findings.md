@@ -547,6 +547,91 @@ filters correctly.
 
 ---
 
+---
+
+## M-13. HTTP transport accepts arbitrary Host/Origin headers (DNS-rebinding vulnerability)
+
+**Surface:** `onedata-mcp` HTTP transport (added 2026-05-03 to support
+the conformance + Inspector tooling). FastMCP-default behaviour;
+exposed by running the modelcontextprotocol/conformance suite v0.1.16
+`dns-rebinding-protection` scenario (suite reference:
+[MCP-DNS-Rebinding-Protection spec](https://modelcontextprotocol.io/specification/2025-11-25/basic/security_best_practices#local-mcp-server-compromise)).
+
+**Behaviour:** when launched with `MCP_TRANSPORT=http MCP_PORT=3037`,
+the server accepts requests with `Host: evil.example.com` and `Origin:
+http://evil.example.com` headers and responds with HTTP 200, including
+on `tools/call` requests. The MCP-2025-11-25 security spec mandates
+that local servers MUST reject non-localhost Host/Origin headers to
+prevent DNS-rebinding attacks (where a malicious website resolves a
+domain to 127.0.0.1, then issues fetch() requests to it).
+
+Specifically:
+
+```
+- localhost-host-rebinding-rejected: FAILURE
+  Expected HTTP 4xx for invalid Host/Origin headers, got 200
+  hostHeader: evil.example.com
+  originHeader: http://evil.example.com
+- localhost-host-valid-accepted: SUCCESS
+  Server correctly accepts valid 127.0.0.1 origins
+```
+
+The valid-localhost case passes; only the malicious-Host case fails.
+
+**Why this matters:** the stdio-transport mode (used by the benchmark
++ claude-agent-sdk) is unaffected — that path doesn't accept HTTP
+headers at all. But operators running onedata-mcp via HTTP for
+Inspector/conformance/external-client integration are vulnerable: a
+user with a browser tab open to a malicious site can have their local
+MCP server enumerated and arbitrarily invoked from JavaScript.
+
+The risk profile depends on how operators deploy:
+
+- Pure stdio (benchmark-style, claude-agent-sdk subprocess): NOT affected
+- HTTP on `127.0.0.1` only, no public port: low risk (still
+  vulnerable to DNS-rebinding from the user's own browser)
+- HTTP on `0.0.0.0` or public IP: HIGH risk
+
+**Fix (proposed, not yet applied 2026-05-03):**
+
+FastMCP 3.x's HTTP transport accepts a `host_validation` middleware
+or equivalent. The right fix is to register middleware that:
+
+1. Validates `Host` header is exactly `127.0.0.1:<port>`,
+   `localhost:<port>`, or empty (server-relative).
+2. Validates `Origin` header is `http://127.0.0.1:<port>` or
+   `http://localhost:<port>` when present.
+3. Rejects with HTTP 403 otherwise.
+
+Pseudocode for the middleware (concrete impl TBD when applied):
+
+```python
+ALLOWED_HOSTS = {f"127.0.0.1:{port}", f"localhost:{port}"}
+ALLOWED_ORIGINS = {f"http://{h}" for h in ALLOWED_HOSTS}
+
+async def reject_dns_rebinding(request, call_next):
+    host = request.headers.get("host", "")
+    origin = request.headers.get("origin")
+    if host not in ALLOWED_HOSTS:
+        return Response(status_code=403, content="Invalid Host header")
+    if origin and origin not in ALLOWED_ORIGINS:
+        return Response(status_code=403, content="Invalid Origin header")
+    return await call_next(request)
+```
+
+**Status:** documented, fix deferred. Tracked via:
+
+- `conformance-baseline.yaml` — `dns-rebinding-protection` listed in
+  the baseline's `server:` array as expected-fail (so `make
+  conformance` exits 0 with the issue documented).
+- This M-13 entry — when fix lands, remove from baseline.
+
+**Test after fix:** `make conformance` — `dns-rebinding-protection`
+moves from FAILURE to SUCCESS in the suite output. Remove from
+`conformance-baseline.yaml`.
+
+---
+
 ## Future findings
 
 This file accretes as the benchmark expands. New findings get a new
