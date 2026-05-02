@@ -112,7 +112,7 @@ sweep-cyfronet:
 
 sweep-deepseek:
 	uv run python -m benchmark.run_panel --trials 1 \
-	  --llms deepseek-v3 \
+	  --llms deepseek-v4-pro \
 	  --scenario-parallelism 1
 
 sweep-claude:
@@ -133,7 +133,7 @@ sweep-all:
 	echo ""; \
 	echo "===PHASE 2: OpenRouter (serial)==="; \
 	uv run python -m benchmark.run_panel --trials 1 \
-	  --llms deepseek-v3 \
+	  --llms deepseek-v4-pro \
 	  --scenario-parallelism 1 --run-id "$$RID"; \
 	echo ""; \
 	echo "===Generating reports==="; \
@@ -151,7 +151,7 @@ sweep-k8:
 	echo ""; \
 	echo "===PHASE 2: OpenRouter (serial)==="; \
 	uv run python -m benchmark.run_panel --trials 8 \
-	  --llms deepseek-v3 \
+	  --llms deepseek-v4-pro \
 	  --scenario-parallelism 1 --run-id "$$RID"; \
 	echo ""; \
 	echo "===Generating reports==="; \

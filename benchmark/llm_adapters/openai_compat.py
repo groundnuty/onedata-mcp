@@ -112,6 +112,19 @@ class OpenAICompatAdapter:
                 "role": "assistant",
                 "content": msg.content or None,
             }
+            # SiliconFlow / DeepSeek thinking-mode contract: when the
+            # response carries `reasoning_content` (the model's chain-of-
+            # thought), the field MUST be echoed back on the prior-turn
+            # assistant message in the next request, or SiliconFlow returns
+            # HTTP 400 (code 20015). Conditional: most providers / models
+            # don't emit this field and the no-op path preserves backward
+            # compatibility. The OpenAI SDK exposes unknown fields via
+            # ChatCompletionMessage.model_extra (Pydantic `extra='allow'`),
+            # but they're also reachable via `getattr` — using getattr keeps
+            # the access uniform across SDK versions.
+            reasoning_content = getattr(msg, "reasoning_content", None)
+            if reasoning_content:
+                assistant_entry["reasoning_content"] = reasoning_content
             if tool_calls:
                 assistant_entry["tool_calls"] = [
                     {
