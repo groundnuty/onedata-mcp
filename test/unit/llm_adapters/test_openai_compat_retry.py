@@ -86,7 +86,7 @@ async def test_retry_succeeds_after_one_429(monkeypatch: pytest.MonkeyPatch) -> 
 
 @pytest.mark.asyncio
 async def test_retry_eventually_exhausts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """All 4 attempts 429 — final RateLimitError propagates."""
+    """All RETRY_MAX_ATTEMPTS attempts 429 — final RateLimitError propagates."""
     import benchmark.llm_adapters.openai_compat as mod
 
     monkeypatch.setattr(mod.asyncio, "sleep", AsyncMock(return_value=None))
@@ -111,7 +111,9 @@ async def test_retry_eventually_exhausts(monkeypatch: pytest.MonkeyPatch) -> Non
             max_tokens=100,
             extra_body=None,
         )
-    assert call_count == 4  # 1 initial + 3 retries
+    # Reads the constant rather than hardcoding so future bumps
+    # don't break the test.
+    assert call_count == mod.RETRY_MAX_ATTEMPTS
 
 
 @pytest.mark.asyncio

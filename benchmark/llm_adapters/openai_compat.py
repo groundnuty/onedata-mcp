@@ -36,12 +36,14 @@ TOOL_RESULT_CAP_BYTES = 8 * 1024
 # Retry-with-backoff configuration for transient upstream failures
 # (HTTP 429 rate-limits, network timeouts, connection resets). Witnessed
 # 2026-05-02 on V4-pro via OpenRouter→SiliconFlow at
-# --scenario-parallelism 1: 8 of 9 trials hit RateLimitError mid-trial,
-# burning the budget without producing usable records. Exponential
-# backoff (2s, 4s, 8s) gives upstream rate-limit windows time to clear
-# without breaking the per-trial budget for non-rate-limited models.
-RETRY_MAX_ATTEMPTS = 4  # 1 initial + 3 retries
+# --scenario-parallelism 1: initial 4-attempt budget (2/4/8s, ~14s
+# total) wasn't enough — D3 trial in run T210825 hit a SiliconFlow
+# rate-limit window longer than 14s and exhausted retries. Bumped to
+# 6 attempts with cap 32s; total wait = 2+4+8+16+32 = 62s, covering
+# typical SiliconFlow rate-limit windows (~60s).
+RETRY_MAX_ATTEMPTS = 6  # 1 initial + 5 retries
 RETRY_BASE_DELAY_SECONDS = 2.0
+RETRY_MAX_DELAY_SECONDS = 32.0
 
 
 async def _create_with_retry(
@@ -74,8 +76,8 @@ async def _create_with_retry(
             last_exc = e
             if attempt == RETRY_MAX_ATTEMPTS - 1:
                 raise
-            # Exponential backoff: 2s, 4s, 8s (capped at 16s).
-            delay = min(RETRY_BASE_DELAY_SECONDS * (2**attempt), 16.0)
+            # Exponential backoff: 2s, 4s, 8s, 16s, 32s (capped).
+            delay = min(RETRY_BASE_DELAY_SECONDS * (2**attempt), RETRY_MAX_DELAY_SECONDS)
             await asyncio.sleep(delay)
     # Defensive: loop always either returns or raises, but appease type-checkers.
     assert last_exc is not None
