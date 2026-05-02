@@ -107,6 +107,80 @@ from 6/9 historical → effectively 9/9 (because all 9 had
 because they all already produce textual answers. V4-pro P3 TBD
 once the OpenRouter rate-limit fix lands.
 
+## L-2. Granite-4.1-30B inserts a stray underscore in long string identifiers
+
+**Surface**: IBM Granite-4.1-30B (BF16, served via local vLLM on port 8003) on
+scenario D1 ("List all visible spaces with provider counts as a markdown
+table"). Observed in run `20260502T230005_granite_k1` (probe and full K=1
+both reproduce the shape).
+
+**Failure shape**: `list_user_spaces` succeeds, returns 37 spaces with
+correct names. Granite renders them in a markdown table — and **inserts
+an extra underscore between `20` and `26`** in every single
+`ppam_2026_mcp_tests*` row, consistently:
+
+```
+ppam_2026_mcp_tests_granite_4_1_30b   ← real name from MCP response
+ppam_20_26_mcp_tests_granite_4_1_30b  ← what Granite emitted (every row)
+```
+
+The corruption is **systematic, not random** — every one of the 11
+ppam-prefixed rows has the same `_20_26_` mangling. Other space names
+(non-ppam-prefixed rows like `CloudSKTest`, `IagosSpace`, `UnprocessedData`,
+`UC1Storage`) render correctly without underscore insertion.
+
+**Empirical rate**: across 2 trials in run T230005 + the probe
+T225745: 2/2 D1 trials show this exact pattern. The probe also showed
+the model passing D3, A4, and P3 cleanly — so Granite's tool-call
+plumbing works correctly; the corruption only manifests when emitting
+long underscore-separated identifiers in `content`.
+
+**Root cause hypothesis**: Granite-4.1-30B's BPE tokenizer likely
+splits the prefix `ppam_2026_mcp_tests_` into a token sequence that
+includes `_20` and `_26` as separate tokens. When the model copies
+the literal string out of the `list_user_spaces` JSON response into
+its markdown answer, the boundary between the `_20` and `_26` tokens
+gets re-emitted as two separate tokens with an additional underscore
+delimiter. Other OSS models in the panel (Qwen, V4-pro, GLM, Gemma,
+Devstral) all reproduce the canonical `ppam_2026_mcp_tests_*` strings
+verbatim — making the corruption Granite-specific rather than
+prompt-induced.
+
+**Adapter ruled out**: the corrupted strings appear in the trial
+JSONL's `final_answer` field, which `openai_compat.py:167-169`
+captures faithfully from `msg.content`. Verified by reading the
+adapter source — there's no transform path between the OpenAI-compat
+response and the captured answer that would insert characters.
+
+**Why it matters for the paper**: this is a class of failure that
+synthetic benchmarks miss but federated-data agentic workflows can't
+tolerate. A user asking "where is my dataset?" gets back paths that
+look plausible but don't exist in the federation. The MCP/oracle
+both did everything correctly; the model's *rendering* of received
+data corrupted it. Worth surfacing as a paper data point alongside
+L-1: open-weight LLMs vary in **fidelity of received-data
+re-emission**, and that fidelity gap predicts production reliability.
+
+**Possible oracle-design response** (NOT recommended): we could
+loosen the D1 oracle to accept the corrupted form via fuzzy match
+(`ppam_20_26_*` → `ppam_2026_*` after dropping interior `_2N_2N_`
+patterns). Decision: do **not** apply. Unlike L-1 (Qwen empty content
+where federation_pass = true), there's no federation ground-truth
+hook for D1; the oracle's only signal IS the rendered answer. If the
+agent corrupts a space name it gives the user, the trial should fail
+— that's correctness in the user-facing dimension. K=1 and K=8 both
+keep the strict check.
+
+**Expected effect on K=1 numbers**: Granite D1 stays FAIL until IBM
+fixes the underlying tokenizer/decoding behaviour. Other panel LLMs
+unaffected (none reproduce this shape).
+
+**Sister observations** (not yet promoted to L-N):
+- *Devstral-2-123B D1 (probe T225745)*: dropped 7+ rows from a long
+  table. Different shape (truncation) — but same paper-relevant
+  axis: long lists are where weaker open-weight models stumble. Will
+  re-evaluate after the K=1 sweep completes.
+
 ## How to add to this file
 
 When a new LLM-side stability quirk is observed, add as L-N
