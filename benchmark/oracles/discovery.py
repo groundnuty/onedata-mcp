@@ -43,7 +43,14 @@ async def verify_d1(ctx: RunContext, trace: AgentTrace) -> OracleResult:
             return OracleResult.format_only(
                 mcp_pass=False, diagnosis=f"answer omits space {name!r}"
             )
-        count_int = extract_int(answer, name) or extract_int(answer, f"`{name}`")
+        # Try plain key first, then backticked. NOT `a or b` — that
+        # short-circuits when extract_int returns 0 (falsy), mis-FAILing
+        # every space with provider_count=0 (e.g. orphaned spaces like
+        # 'TestData'). Surfaced 2026-05-02 by 3-LLM K=1 slate where the
+        # diagnosis "expected 0, got None" was a defaulting bug.
+        count_int = extract_int(answer, name)
+        if count_int is None:
+            count_int = extract_int(answer, f"`{name}`")
         if count_int is None or count_int != provider_count:
             return OracleResult.format_only(
                 mcp_pass=False,
