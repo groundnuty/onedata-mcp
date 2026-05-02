@@ -22,6 +22,7 @@ PER_LLM_SPACE: dict[str, str] = {
     "qwen3.6-35b": "ppam_2026_mcp_tests_qwen3_6_35b",
     "glm-4.7-flash": "ppam_2026_mcp_tests_glm_4_7_flash",
     "deepseek-v4-pro": "ppam_2026_mcp_tests_deepseek_v4_pro",
+    "gemma-4-31b-it": "ppam_2026_mcp_tests_gemma_4_31b_it",
     # Retained for legacy artefacts but not in the active panel:
     "deepseek-v3": "ppam_2026_mcp_tests_deepseek_v3",
     "qwen3-coder-30b": "ppam_2026_mcp_tests_qwen3_coder_30b",
@@ -35,6 +36,7 @@ PER_LLM_SPACE_ID: dict[str, str] = {
     "qwen3.6-35b": "b724a1f754a37c38dc0615cb079f651fchf8b3",
     "glm-4.7-flash": "028ebe59f7d722b86ca61ac87810c6a4ch8964",
     "deepseek-v4-pro": "bf2994a889b94e6720415b758e478fc6chd084",
+    "gemma-4-31b-it": "8b02f6c0302dfd47dce04be8a1ec71b0ch174b",
     "deepseek-v3": "5196f39b18f52908db22b8c1cd95d830chb568",
     "qwen3-coder-30b": "c0cf837e95297582188e8f2a6b8e1105chb3a8",
     "qwq-32b": "63d2dbfa95d29e5c44da94caf1e90367cha755",
