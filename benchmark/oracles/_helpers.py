@@ -23,12 +23,69 @@ def extract_paths(text: str, anchor: str | None = None) -> set[str]:
     Surfaced 2026-05-02 by D2 live smoke: Claude correctly listed 3 file
     paths but the directory header in its intro line got picked up as a
     spurious 4th path. See research/empirical-onedata-25.0-findings.md.
+
+    Per-line exclusion-marker detection: skips paths on lines that
+    explicitly disclaim them. Surfaced 2026-05-02 by P6 (Qwen + GLM):
+    agents enumerated all candidate paths in a bullet structure with
+    inline annotations like "(so excluded)" or "should not be included",
+    and the naive extractor over-counted. Both agents correctly reasoned
+    about which paths fit the criterion; their final answers are valid
+    English. Oracle now respects the exclusion semantics.
+
+    Two-pass design:
+      Pass 1 — per-line: skip paths on lines that contain an exclusion
+        marker (catches GLM-style inline `(so excluded)`).
+      Pass 2 — cross-reference: drop any captured path whose basename
+        is mentioned on a self-correction line (catches Qwen-style
+        `Wait, redundant.bin...` follow-ups where the bullet line was
+        captured cleanly but a later line retracts).
     """
-    found = set(PATH_RE.findall(text))
-    found = {p for p in found if not p.endswith("/")}
-    if anchor:
-        found = {p for p in found if p.startswith(anchor)}
-    return found
+    candidate_paths: set[str] = set()
+    self_correction_lines: list[str] = []
+
+    for line in text.splitlines():
+        line_lower = line.lower()
+        is_exclusion = any(marker in line_lower for marker in _EXCLUSION_MARKERS)
+        if is_exclusion:
+            self_correction_lines.append(line_lower)
+            continue
+        for path in PATH_RE.findall(line):
+            if path.endswith("/"):
+                continue
+            if anchor and not path.startswith(anchor):
+                continue
+            candidate_paths.add(path)
+
+    # Pass 2: drop paths whose basename appears on a self-correction line.
+    if self_correction_lines:
+        retracted: set[str] = set()
+        for path in candidate_paths:
+            basename = path.rsplit("/", 1)[-1].lower()
+            if any(basename in sc for sc in self_correction_lines):
+                retracted.add(path)
+        candidate_paths -= retracted
+
+    return candidate_paths
+
+
+# Lines containing any of these markers (case-insensitive) are treated
+# as agent self-exclusions: paths on such lines are NOT counted as
+# part of the answer set. Conservative list — phrases that strongly
+# indicate "I'm listing this path but explicitly rejecting it from my
+# answer", not phrases that could appear in a positive description.
+_EXCLUSION_MARKERS = (
+    "exclud",        # "excluded", "exclude", "excluding"
+    "not include",   # "not included", "not include this"
+    "shouldn't",
+    "should not",
+    "do not match",
+    "doesn't match",
+    "wait,",         # mid-thought self-correction (Qwen pattern)
+    "however,",
+    "actually,",
+    "(distractor",
+    "is a distractor",
+)
 
 
 def extract_int(text: str, key: str) -> int | None:
