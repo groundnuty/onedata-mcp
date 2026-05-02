@@ -118,18 +118,20 @@ def build_panel() -> tuple[tuple[PanelEntry, ...], tuple[str, ...]]:
         # cap OpenRouter-served LLMs at 4096; the working K=1 sweep used
         # ~86 output tokens per trial on average, so 4k is ample headroom.
         #
-        # Provider routing: probed 2026-05-02, OpenRouter does NOT serve
-        # DeepSeek's own infra for `deepseek-chat-v3-0324` — only 3rd-
-        # party resellers (DeepInfra, AtlasCloud, ModelRun, SiliconFlow,
-        # Novita, GMICloud). One D5 trial at sweep 20260502T145805
-        # returned French gibberish (almost certainly Novita or similar
-        # low-end provider). Pin to DeepInfra: most-mature reseller,
-        # stable quality, supports tool_choice="auto" cleanly.
-        # `allow_fallbacks=false` makes the leg fail loud if DeepInfra
-        # is briefly unavailable rather than silently routing to a
-        # lower-quality alternative.
+        # Swapped V3 → V4-pro 2026-05-02. V4-pro is the current generation:
+        # 1.6T total / 49B active MoE, 1M context, plain MIT license.
+        # Same DeepSeek family + same open-weights story.
+        #
+        # Provider routing: V4-pro probe 2026-05-02 — DeepInfra does NOT
+        # host V4-pro yet (DeepInfra works for V4-flash only). Working
+        # providers for V4-pro: SiliconFlow, Novita, Together. Picked
+        # SiliconFlow (mature, serves DeepSeek's own China-region
+        # deployments). `allow_fallbacks=false` makes the leg fail loud
+        # if SiliconFlow is briefly unavailable rather than routing to
+        # a quality-variant provider (Novita gave French gibberish on a
+        # V3 trial earlier this session).
         for name, model_id, provider in (
-            ("deepseek-v3", "deepseek/deepseek-chat-v3-0324", "DeepInfra"),
+            ("deepseek-v4-pro", "deepseek/deepseek-v4-pro", "SiliconFlow"),
         ):
             panel.append(
                 PanelEntry(
