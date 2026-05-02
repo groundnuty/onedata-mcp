@@ -70,8 +70,13 @@ def build_panel() -> tuple[tuple[PanelEntry, ...], tuple[str, ...]]:
     forge_base = os.getenv("PLGRID_FORGE_BASE_URL", DEFAULT_FORGE_BASE_URL).rstrip("/")
 
     if forge_key:
+        # Forge model substitutions worth knowing (probed 2026-05-02):
+        #   meta-llama/Llama-3.3-70B-Instruct  →  inactive on Forge.
+        #     Closest substitute: CYFRAGOVPL/Llama-PLLuM-70B-chat-250801
+        #     (Llama-3 fork, Cyfronet-native, Polish-leaning).
+        # Current panel: GLM-4.7-Flash + Qwen3-Coder-30B as the OSS legs.
         for name, model_id in (
-            ("llama-3.3-70b", "meta-llama/Llama-3.3-70B-Instruct"),
+            ("glm-4.7-flash", "zai-org/GLM-4.7-Flash"),
             ("qwen3-coder-30b", "Qwen/Qwen3-Coder-30B-A3B-Instruct"),
         ):
             panel.append(
