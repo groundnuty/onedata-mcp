@@ -20,8 +20,10 @@ from __future__ import annotations
 PER_LLM_SPACE: dict[str, str] = {
     "claude-sonnet-4-5": "ppam_2026_mcp_tests_claude_sonnet_4_5",
     "qwen3.6-35b": "ppam_2026_mcp_tests_qwen3_6_35b",
-    "qwen3-coder-30b": "ppam_2026_mcp_tests_qwen3_coder_30b",
     "glm-4.7-flash": "ppam_2026_mcp_tests_glm_4_7_flash",
+    "deepseek-v3": "ppam_2026_mcp_tests_deepseek_v3",
+    # Retained for legacy artefacts but not in the active panel:
+    "qwen3-coder-30b": "ppam_2026_mcp_tests_qwen3_coder_30b",
     "qwq-32b": "ppam_2026_mcp_tests_qwq_32b",
 }
 
@@ -30,8 +32,9 @@ PER_LLM_SPACE: dict[str, str] = {
 PER_LLM_SPACE_ID: dict[str, str] = {
     "claude-sonnet-4-5": "d3a48a8d428c9a8ac1ffee471a2d8bb3ch0d5f",
     "qwen3.6-35b": "b724a1f754a37c38dc0615cb079f651fchf8b3",
-    "qwen3-coder-30b": "c0cf837e95297582188e8f2a6b8e1105chb3a8",
     "glm-4.7-flash": "028ebe59f7d722b86ca61ac87810c6a4ch8964",
+    "deepseek-v3": "5196f39b18f52908db22b8c1cd95d830chb568",
+    "qwen3-coder-30b": "c0cf837e95297582188e8f2a6b8e1105chb3a8",
     "qwq-32b": "63d2dbfa95d29e5c44da94caf1e90367cha755",
 }
 

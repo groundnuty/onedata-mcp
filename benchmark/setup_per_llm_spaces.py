@@ -168,9 +168,7 @@ async def get_current_user_id(client: httpx.AsyncClient) -> str:
     return uid
 
 
-async def add_user_to_space(
-    client: httpx.AsyncClient, space_id: str, user_id: str
-) -> None:
+async def add_user_to_space(client: httpx.AsyncClient, space_id: str, user_id: str) -> None:
     """PUT the user as a member of the space (admin endpoint).
 
     Spaces created via the admin POST /spaces endpoint do NOT auto-add
@@ -189,9 +187,7 @@ async def add_user_to_space(
         json={},
     )
     if r.status_code >= 400:
-        raise RuntimeError(
-            f"add_user_to_space failed (HTTP {r.status_code}): {r.text[:300]}"
-        )
+        raise RuntimeError(f"add_user_to_space failed (HTTP {r.status_code}): {r.text[:300]}")
 
 
 async def main() -> int:

@@ -85,7 +85,14 @@ async def prepare_trial(
     # Snapshot federation state right before handing off to the harness.
     # See research/empirical-findings #18: re-querying at oracle time
     # produces flaky results when the federation has many spaces churning.
-    spaces_snapshot = tuple(await spaces_api.list_user_spaces())
+    # Tolerate snapshot failure: any one stale/broken peer space (e.g.
+    # CloudSKTest going 502 transiently under concurrent load) shouldn't
+    # crash the trial — oracles fall back to a live re-query if the
+    # snapshot is empty.
+    try:
+        spaces_snapshot = tuple(await spaces_api.list_user_spaces())
+    except Exception:  # noqa: BLE001
+        spaces_snapshot = ()
 
     resolved_space_id = _SPACE_ID_CACHE.get(space_name)
 
