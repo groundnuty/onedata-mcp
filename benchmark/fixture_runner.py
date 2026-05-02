@@ -10,6 +10,7 @@ Public entry point: `prepare_trial(scenario)` → `RunContext`.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 
@@ -221,7 +222,61 @@ async def _prestage_transfer(hint: TransferFixtureHint, space_name: str) -> str:
     transfer_id = resp.get("transferId")
     if not isinstance(transfer_id, str):
         raise RuntimeError(f"create_transfer returned no transferId: {resp!r}")
+
+    # Wait until the new transferId is visible in `list_space_transfers`
+    # before returning. Onedata's transfer log has eventual-consistency
+    # lag (witnessed 2026-05-02 in run T190757: pre-staged tid was queryable
+    # via get_transfer immediately but absent from list_space_transfers
+    # for >30s). Without this wait, the agent's list_space_transfers
+    # query during the trial returns leftover transfers from earlier P4
+    # trials (transfer logs are immutable; each per-LLM space accumulates
+    # its trial history) and the agent picks one of those as "most
+    # recent", causing a mismatch with the captured tid.
+    await _wait_for_transfer_visible(space_id, transfer_id)
     return transfer_id
+
+
+# Bound on the eventual-consistency wait. Empirically the just-created
+# transfer became visible in list_space_transfers within ~5-15s on the
+# 2026-05-02 SPICE federation; 60s gives ample headroom for slower
+# federations / contended periods. Failing the wait leaves the trial
+# in a known-bad state (RuntimeError → trial marks RESET_FAIL), which
+# is preferable to silently producing a P4 oracle mismatch.
+TRANSFER_VISIBILITY_TIMEOUT_SECONDS = 60.0
+TRANSFER_VISIBILITY_POLL_INTERVAL = 1.5
+
+
+async def _wait_for_transfer_visible(space_id: str, transfer_id: str) -> None:
+    """Poll list_space_transfers until `transfer_id` appears, OR timeout.
+
+    Probes both ongoing and ended states (a freshly-created migration
+    can land in either depending on how fast it completes). Walks the
+    list_space_transfers result via paging tokens because Onedata caps
+    a single response at 1000 ids and per-LLM spaces accumulate trial
+    history.
+    """
+    deadline = time.time() + TRANSFER_VISIBILITY_TIMEOUT_SECONDS
+    while time.time() < deadline:
+        for state in ("ongoing", "ended"):
+            page_token: str | None = None
+            while True:
+                try:
+                    page = await transfers_api.list_space_transfers(
+                        space_id, state=state, limit=1000, page_token=page_token
+                    )
+                except OnedataApiError:
+                    break
+                if transfer_id in (page.get("transfers") or []):
+                    return
+                page_token = page.get("nextPageToken")
+                if not page_token:
+                    break
+        await asyncio.sleep(TRANSFER_VISIBILITY_POLL_INTERVAL)
+    raise RuntimeError(
+        f"Pre-staged transfer {transfer_id} did not appear in "
+        f"list_space_transfers within {TRANSFER_VISIBILITY_TIMEOUT_SECONDS}s "
+        f"on space {space_id}"
+    )
 
 
 async def _resolve_provider_id(provider_name: str, space_name: str) -> str:
