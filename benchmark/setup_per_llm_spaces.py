@@ -103,9 +103,7 @@ async def _onezone_post(
         json=json_body or {},
     )
     if r.status_code >= 400:
-        raise RuntimeError(
-            f"Onezone POST {path} failed (status={r.status_code}): {r.text[:300]}"
-        )
+        raise RuntimeError(f"Onezone POST {path} failed (status={r.status_code}): {r.text[:300]}")
     return r
 
 
@@ -225,9 +223,7 @@ async def main() -> int:
                 print(f"  Space: {name}")
                 print(f"    Token: {token}")
                 print()
-            curl_body = (
-                '{"token":"<TOKEN>","size":104857600,"storageId":"<STORAGE_ID>"}'
-            )
+            curl_body = '{"token":"<TOKEN>","size":104857600,"storageId":"<STORAGE_ID>"}'
             print(
                 "On each provider's onepanel:\n"
                 "  https://<provider-host>/onepanel  →  Spaces  →  Support space\n"
