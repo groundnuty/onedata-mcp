@@ -212,41 +212,21 @@ sweep-k8:
 	  echo "============================================================"; \
 	  echo "K=8 HEADLINE RUN  •  run_id=$$RID"; \
 	  echo "  Sequential across 7 panel LLMs, scenario_parallelism=1"; \
+	  echo "  Order: free legs first, V4-pro LAST (rate-limit-sensitive)"; \
 	  echo "  Started: $$(date -u +%FT%TZ)"; \
 	  echo "  Logs: $$LOG  +  $$PERSTEP/<step>.log"; \
 	  echo "============================================================"; \
 	  echo ""; \
 	  \
-	  echo "=== Step 1: V4-pro K=1 (rate-limit probe) ==="; \
-	  uv run python -m benchmark.run_panel --trials 1 \
-	    --llms deepseek-v4-pro \
-	    --scenario-parallelism 1 --run-id "$$RID" 2>&1 \
-	    | tee "$$PERSTEP/01-v4pro-probe.log"; \
-	  RL_HITS=$$(grep -lE "RateLimitError" artefacts/$$RID/deepseek-v4-pro__*.jsonl 2>/dev/null | wc -l | tr -d ' '); \
-	  if [ "$$RL_HITS" -gt 0 ]; then \
-	    echo ""; \
-	    echo "!!! V4-pro probe: $$RL_HITS cells hit RateLimitError after retry exhaustion."; \
-	    echo "    Investigate before proceeding to K=8. Other 6 LLMs NOT yet started."; \
-	    echo "    Use 'make show-grid RID=$$RID' to inspect."; \
-	    exit 1; \
-	  fi; \
-	  echo ""; \
-	  echo "=== Step 2: V4-pro K=7 more (target K=8) ==="; \
-	  uv run python -m benchmark.run_panel --trials 7 \
-	    --llms deepseek-v4-pro \
-	    --scenario-parallelism 1 --run-id "$$RID" 2>&1 \
-	    | tee "$$PERSTEP/02-v4pro-rest.log"; \
-	  echo ""; \
-	  \
-	  echo "=== Step 3: Sonnet K=8 (Anthropic, claude-agent-sdk) ==="; \
+	  echo "=== Step 1: Sonnet K=8 (Anthropic, claude-agent-sdk) ==="; \
 	  uv run python -m benchmark.run_panel --trials 8 \
 	    --llms claude-sonnet-4-5 \
 	    --scenario-parallelism 1 --run-id "$$RID" 2>&1 \
-	    | tee "$$PERSTEP/03-sonnet.log"; \
+	    | tee "$$PERSTEP/01-sonnet.log"; \
 	  echo ""; \
 	  \
-	  echo "=== Step 4: Cyfronet Forge K=8 (Qwen, GLM — sequential) ==="; \
-	  N=4; \
+	  echo "=== Step 2: Cyfronet Forge K=8 (Qwen, GLM — sequential) ==="; \
+	  N=2; \
 	  for llm in qwen3.6-35b glm-4.7-flash; do \
 	    echo "--- $$llm ---"; \
 	    uv run python -m benchmark.run_panel --trials 8 \
@@ -257,8 +237,8 @@ sweep-k8:
 	  done; \
 	  echo ""; \
 	  \
-	  echo "=== Step 5: Local vLLM K=8 (Gemma, Granite, Devstral — sequential) ==="; \
-	  N=6; \
+	  echo "=== Step 3: Local vLLM K=8 (Gemma, Granite, Devstral — sequential) ==="; \
+	  N=4; \
 	  for llm in gemma-4-31b-it granite-4.1-30b devstral-2-123b; do \
 	    echo "--- $$llm ---"; \
 	    uv run python -m benchmark.run_panel --trials 8 \
@@ -267,6 +247,27 @@ sweep-k8:
 	      | tee "$$PERSTEP/0$$N-$$llm.log"; \
 	    N=$$((N + 1)); \
 	  done; \
+	  echo ""; \
+	  \
+	  echo "=== Step 4: V4-pro K=1 (rate-limit probe) ==="; \
+	  uv run python -m benchmark.run_panel --trials 1 \
+	    --llms deepseek-v4-pro \
+	    --scenario-parallelism 1 --run-id "$$RID" 2>&1 \
+	    | tee "$$PERSTEP/07-v4pro-probe.log"; \
+	  RL_HITS=$$(grep -lE "RateLimitError" artefacts/$$RID/deepseek-v4-pro__*.jsonl 2>/dev/null | wc -l | tr -d ' '); \
+	  if [ "$$RL_HITS" -gt 0 ]; then \
+	    echo ""; \
+	    echo "!!! V4-pro probe: $$RL_HITS cells hit RateLimitError after retry exhaustion."; \
+	    echo "    Skipping V4-pro K=7 expansion. Other 6 LLMs already complete (K=8)."; \
+	    echo "    Generating reports for what we have."; \
+	  else \
+	    echo ""; \
+	    echo "=== Step 5: V4-pro K=7 more (target K=8) ==="; \
+	    uv run python -m benchmark.run_panel --trials 7 \
+	      --llms deepseek-v4-pro \
+	      --scenario-parallelism 1 --run-id "$$RID" 2>&1 \
+	      | tee "$$PERSTEP/08-v4pro-rest.log"; \
+	  fi; \
 	  echo ""; \
 	  \
 	  echo "=== Step 6: Generate reports ==="; \
