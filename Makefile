@@ -19,7 +19,7 @@
         sweep sweep-cyfronet sweep-deepseek sweep-claude sweep-all \
         sweep-headline sweep-k8 \
         conformance inspect-smoke \
-        report report-latest \
+        report report-latest rescore \
         show-grid show-grid-rate show-headline show-trial inspect-fail list-runs \
         clean clean-artefacts
 
@@ -392,6 +392,23 @@ report-latest:
 	uv run python -m benchmark.report
 
 report: report-latest
+
+# Re-evaluate mcp_pass for every trial in a saved run against the
+# CURRENT oracle code. Writes <llm>__<scenario>.rescored.jsonl
+# sidecars. Originals are preserved unchanged.
+#
+# Use case: parser bug fix lands AFTER a sweep — rescore lifts
+# false-negative trials (model was right, oracle missed it) to PASS
+# without re-running the LLMs. federation_pass is preserved from the
+# original (federation state is gone post-sweep).
+#
+# Example: make rescore RID=20260503T002305_k8
+rescore:
+	@if [ -z "$(RID)" ]; then \
+	  echo "ERROR: pass RID=<run-id>.  e.g. make rescore RID=20260503T002305_k8"; \
+	  exit 1; \
+	fi
+	uv run python -m benchmark.rescore --run-id $(RID)
 
 # List artefact directories newest-first with their JSONL count.
 list-runs:

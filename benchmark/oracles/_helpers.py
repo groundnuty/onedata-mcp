@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable
 
@@ -153,37 +154,100 @@ def extract_int(text: str, key: str) -> int | None:
     Tolerates several output shapes agents typically use:
       'tagged=5'                          — kv equals
       'count: 5'                          — kv colon
+      'Size: 57 bytes'                    — Capitalised key (case-insensitive)
       '| CloudSKTest | 3 |'               — markdown table row
       '| StefansSpace (duplicate) | 2 |'  — markdown row with disambig annotation
+      '| CloudSKTest | <hex-spaceId> | 3 |'  — 3-column markdown table
       'CloudSKTest 3 providers'           — name-then-number
       '`Cloud-SK`: 3'                     — backticked key + colon
 
-    Strategy: locate `key` (literal, case-sensitive), tolerate an optional
-    parenthetical annotation immediately after (e.g. ' (duplicate)',
-    ' (first)' — Granite uses these to disambiguate Onedata's
-    duplicate-allowed space names), then scan forward on the same line
-    for the first non-negative integer that's not part of a longer
-    alphanumeric token (e.g. ignore '46-g14b5bda7' digits).
+    Strategy: locate `key` (case-insensitive substring), tolerate
+    intermediate text (e.g. spaceId in a 3-column markdown row,
+    parenthetical annotations, Markdown formatting like `**`), then
+    capture the first non-negative integer on the same line that
+    isn't part of a longer alphanumeric token. Stops at line breaks
+    so that table cells in subsequent rows don't get pulled in.
 
-    The parenthetical-annotation tolerance was added 2026-05-03 (run
-    T232042 Granite v2 D1) when the agent thoughtfully labelled two
-    federation spaces named 'StefansSpace' as 'StefansSpace (first)'
-    and 'StefansSpace (duplicate)'. The previous pattern's separator
-    class did not include `(`, so the annotation broke the lookup.
+    Bug-fix history:
+      2026-05-03  case-insensitive (was case-sensitive — missed 'Size:')
+      2026-05-03  permissive intermediate text (was strict separator
+                  class [=:|\\-`*\\s] — broke on 3-column tables)
+      2026-05-03  parenthetical annotation tolerance (Granite duplicate
+                  names: 'StefansSpace (first)')
     """
-    # Optional parenthetical annotation after key: tolerates one level
-    # of `(...)`. Doesn't recurse into nested parens — those would be
-    # bizarre in this context.
-    pattern = rf"{re.escape(key)}\s*(?:\([^)]*\)\s*)?[=:|\-`*\s]*(\d+)(?!\w)"
-    m = re.search(pattern, text)
-    return int(m.group(1)) if m else None
+    # Two-step lookup:
+    #   1. Find the key (case-insensitive) on a line.
+    #   2. Within that line, AFTER the key, find the first integer
+    #      that is "standalone" — preceded by a non-word char (or
+    #      start) and followed by a non-word char (or end). This
+    #      skips digits embedded in alphanumeric tokens like hex
+    #      spaceIds (`ed529587d78...`) or build SHAs.
+    #
+    # The standalone-integer rule is what makes 3-column markdown
+    # tables work: between key and the count we may pass through
+    # arbitrary content (including a hex spaceId), and the regex
+    # naturally jumps past those because the hex digits are word-
+    # adjacent (preceded/followed by letters in the same word).
+    key_lower = key.lower()
+    text_lower = text.lower()
+    pos = 0
+    while True:
+        idx = text_lower.find(key_lower, pos)
+        if idx < 0:
+            return None
+        # Restrict the search to the rest of the same line — a number
+        # on a SUBSEQUENT line should not match, so a key with no
+        # value on its own line correctly returns None.
+        line_end = text.find("\n", idx)
+        if line_end < 0:
+            line_end = len(text)
+        chunk = text[idx + len(key) : line_end]
+        # Strip parenthetical annotations BEFORE looking for the value.
+        # Numbers inside `(3 things)` are descriptive, not the value
+        # the agent intended to communicate. Granite-style disambig
+        # `(first)`, `(duplicate)` is also handled by this strip.
+        chunk = re.sub(r"\([^)]*\)", "", chunk)
+        m = re.search(r"(?<!\w)(\d+)(?!\w)", chunk)
+        if m:
+            return int(m.group(1))
+        # Key found but no standalone integer on the line — try a later
+        # occurrence of the key, if any.
+        pos = idx + 1
 
 
 def extract_kv_lines(text: str) -> dict[str, str]:
-    """Pull 'key: value' lines into a dict (best-effort)."""
+    """Pull 'key: value' lines into a dict (best-effort).
+
+    Three forms supported:
+      - 'key: value' on its own line (markdown bullet prefixes stripped)
+      - 'json: {"k1": "v1", "k2": "v2"}' — inline-JSON shape some
+        models (e.g. Qwen3.6-35B on D5) emit when asked for metadata
+      - '{"k1": "v1", ...}' — bare JSON object on a line
+
+    Bug-fix history:
+      2026-05-03  inline-JSON parsing (Qwen D5 emitted `json: {...}`)
+    """
     out: dict[str, str] = {}
     for line in text.splitlines():
         line = line.strip().lstrip("-*•").strip()
+        if not line:
+            continue
+
+        # Try JSON-object on the line first. Some agents emit metadata
+        # as `json: {"key": "value"}` or just a bare `{...}`. The JSON
+        # parser handles both — find the first '{' and try to load.
+        brace_idx = line.find("{")
+        if brace_idx >= 0 and line.rstrip().endswith("}"):
+            try:
+                obj = json.loads(line[brace_idx:])
+                if isinstance(obj, dict):
+                    for k, v in obj.items():
+                        if isinstance(k, str):
+                            out[k] = str(v)
+                    continue  # JSON path consumed the line
+            except (json.JSONDecodeError, ValueError):
+                pass  # fall through to kv-line parsing
+
         if ":" in line:
             k, _, v = line.partition(":")
             k = k.strip().strip("`\"'")
