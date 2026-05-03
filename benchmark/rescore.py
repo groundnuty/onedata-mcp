@@ -259,40 +259,64 @@ def _rescore_record(rec: dict, oracle_result: OracleResult) -> dict:
     original_pass = bool(rec.get("oracle_mcp_pass"))
     rescored_pass = bool(oracle_result.mcp_pass)
 
-    # KEY DESIGN CHOICE: rescore is LIFT-ONLY.
-    # - Original PASS, rescored PASS  → final PASS (no change)
-    # - Original PASS, rescored FAIL  → final PASS (DEMOTION REJECTED)
-    # - Original FAIL, rescored PASS  → final PASS (LIFT applied — this
-    #                                   is the bug fix purpose)
-    # - Original FAIL, rescored FAIL  → final FAIL (no change)
+    # Two layers of lift, applied in order:
+    # 1. Parser-bug lift: rescore PASS overrides original FAIL.
+    #    Reason: original oracle had a parsing bug; new oracle gets the
+    #    answer right. Pure-text logic; offline-replay-safe.
+    # 2. Deployment-artefact lift: trials whose final_answer literally
+    #    contains the deployment-leak signature (e.g. <tool_call>
+    #    markup that vLLM's parser failed to route into the structured
+    #    field) are lifted because the question we're answering is
+    #    "MCP-server effectiveness" — the model attempted the right
+    #    MCP call, the serving layer dropped it. Tagged so we can
+    #    report MCP-effectiveness vs deployment-effectiveness numbers
+    #    separately.
     #
-    # Rationale: rescore runs offline with empty federation state.
-    # Several oracles (P3 with L-1 loosening, P4 with captured_transfer_id,
-    # cross-trial federation reads) use the federation-side state to
-    # compute mcp_pass. With the federation stubbed to empty, those
-    # oracles can spuriously demote a PASS to FAIL. We don't want that
-    # — the original oracle ran AT TRIAL TIME with real federation state,
-    # so its PASS verdict is more authoritative for those cases.
-    # Conversely, if the rescore says PASS, the new parser logic found
-    # something the old parser missed — that's a genuine lift.
-    final_pass = original_pass or rescored_pass
+    # We never DEMOTE a PASS to FAIL. The original oracle ran at trial
+    # time with real federation state and its PASS is authoritative.
+
+    parser_lift = (not original_pass) and rescored_pass
+
+    # Classify failure category BEFORE applying deployment lift, so we
+    # can detect deployment-shape failures even after they're lifted.
+    pre_lift_record = dict(rec)
+    pre_lift_record["outcome"] = "PASS" if (original_pass or rescored_pass) else "FAIL"
+    failure_category = _classify_failure(pre_lift_record)
+
+    # Layer 2: lift deployment-artefact failures.
+    # Detected by `failure_category` starting with `deployment-` —
+    # these are vLLM-serving-layer issues, not MCP-server failures.
+    deployment_lift = (
+        failure_category is not None
+        and failure_category.startswith("deployment-")
+    )
+
+    final_pass = original_pass or rescored_pass or deployment_lift
 
     out["oracle_mcp_pass_original"] = original_pass
     out["oracle_mcp_pass_v2"] = final_pass
-    out["oracle_mcp_pass_rescore_raw"] = rescored_pass  # what the rescore alone said
+    out["oracle_mcp_pass_rescore_raw"] = rescored_pass
     out["oracle_diagnosis_original"] = rec.get("oracle_diagnosis", "")
     out["oracle_diagnosis_v2"] = oracle_result.diagnosis if not final_pass else ""
     out["outcome_original"] = rec.get("outcome", "")
     out["outcome_v2"] = "PASS" if final_pass else "FAIL"
     out["rescore_version"] = RESCORE_VERSION
-    out["rescore_changed"] = original_pass != final_pass  # only lift counts as a change
+    out["rescore_changed"] = original_pass != final_pass
     out["rescore_demotion_rejected"] = original_pass and not rescored_pass
-    # Classify the v2 outcome (post-rescore). Trials that were lifted
-    # from FAIL→PASS by the parser fix are now PASS so they get None;
-    # only stable-FAIL trials get classified.
-    classification_record = dict(rec)
-    classification_record["outcome"] = out["outcome_v2"]
-    out["failure_category"] = _classify_failure(classification_record)
+    out["lift_kind"] = (
+        "parser-bug" if parser_lift and not deployment_lift
+        else "deployment-artefact" if deployment_lift and not parser_lift
+        else "parser+deployment" if parser_lift and deployment_lift
+        else None
+    )
+    # `failure_category` reflects the PRE-LIFT classification. Useful
+    # for forensics: which lifts were deployment-class vs model-class.
+    # If the post-lift outcome is PASS, this category answers "WHY did
+    # we lift" — for headlines that exclude deployment lifts, group on
+    # this field.
+    out["failure_category"] = failure_category if deployment_lift else (
+        _classify_failure({**rec, "outcome": out["outcome_v2"]})
+    )
     return out
 
 
@@ -361,41 +385,62 @@ def main() -> None:
     pct = (changed / total * 100) if total else 0.0
     print(f"Rescored {total} trials in {run_dir}")
     print(f"  changed:  {changed}  ({pct:.1f}%)")
-    print(f"  lifted:   {lifted}  (FAIL → PASS via oracle fix)")
+    print(f"  lifted:   {lifted}  (total FAIL → PASS lifts)")
     print(f"  version:  {RESCORE_VERSION}")
     print(f"  sidecars: {run_dir}/*.rescored.jsonl")
 
-    # Failure-category tally across the rescored data — useful for
-    # paper-grade "cleaned" data reporting.
+    # Lift-kind tally + failure-category tally + per-LLM breakdown.
+    by_lift: dict[str, int] = {}
     by_category: dict[str, int] = {}
     by_llm: dict[str, dict[str, int]] = {}
+    by_llm_lift: dict[str, dict[str, int]] = {}
     for f in sorted(run_dir.glob("*.rescored.jsonl")):
         for line in f.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line:
                 continue
             r = json.loads(line)
+            llm = r.get("llm_name", "?")
+            lift = r.get("lift_kind")
+            if lift is not None:
+                by_lift[lift] = by_lift.get(lift, 0) + 1
+                by_llm_lift.setdefault(llm, {})
+                by_llm_lift[llm][lift] = by_llm_lift[llm].get(lift, 0) + 1
+            if r.get("outcome_v2") == "PASS":
+                continue
             cat = r.get("failure_category")
             if cat is None:
-                continue  # PASS trial
+                continue
             by_category[cat] = by_category.get(cat, 0) + 1
-            llm = r.get("llm_name", "?")
             by_llm.setdefault(llm, {})
             by_llm[llm][cat] = by_llm[llm].get(cat, 0) + 1
 
+    if by_lift:
+        print()
+        print("Lift-kind tally (FAIL → PASS):")
+        for kind, n in sorted(by_lift.items(), key=lambda x: -x[1]):
+            print(f"  {n:4d}  {kind}")
+
+    if by_category:
+        print()
+        print("Remaining FAIL by category (post-all-lifts):")
+        for cat, n in sorted(by_category.items(), key=lambda x: -x[1]):
+            print(f"  {n:4d}  {cat}")
+
     print()
-    print("Failure-category tally (post-rescore):")
-    for cat, n in sorted(by_category.items(), key=lambda x: -x[1]):
-        print(f"  {n:4d}  {cat}")
-    print()
-    print("Per-LLM failure breakdown (post-rescore):")
-    for llm in sorted(by_llm.keys()):
-        cats = by_llm[llm]
-        total_fail = sum(cats.values())
-        breakdown = ", ".join(
-            f"{cat.split('-', 1)[0]}={n}" for cat, n in sorted(cats.items())
-        )
-        print(f"  {llm:24s}  fail={total_fail}  ({breakdown})")
+    print("Per-LLM lift + remaining-fail breakdown:")
+    all_llms = set(by_llm) | set(by_llm_lift)
+    for llm in sorted(all_llms):
+        lifts = by_llm_lift.get(llm, {})
+        cats = by_llm.get(llm, {})
+        n_lift = sum(lifts.values())
+        n_fail = sum(cats.values())
+        bits = []
+        if n_lift:
+            bits.append("lift={" + ", ".join(f"{k}={v}" for k, v in sorted(lifts.items())) + "}")
+        if n_fail:
+            bits.append("fail={" + ", ".join(f"{k.split('-', 1)[0]}={v}" for k, v in sorted(cats.items())) + "}")
+        print(f"  {llm:24s}  {' '.join(bits) if bits else '(no changes)'}")
 
 
 if __name__ == "__main__":
