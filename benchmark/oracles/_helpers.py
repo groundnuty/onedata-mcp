@@ -103,10 +103,8 @@ def _is_strong_header(line: str) -> bool:
     """
     if line.startswith("#"):
         return True
-    if line.startswith("**") and ("**" in line[2:] or line.endswith(":")):
-        # Catches `**text:**`, `**text**`, `**File NOT meeting:**`, etc.
-        return True
-    return False
+    # Catches `**text:**`, `**text**`, `**File NOT meeting:**`, etc.
+    return line.startswith("**") and ("**" in line[2:] or line.endswith(":"))
 
 
 # Lines containing any of these markers (case-insensitive) are treated
@@ -115,13 +113,13 @@ def _is_strong_header(line: str) -> bool:
 # indicate "I'm listing this path but explicitly rejecting it from my
 # answer", not phrases that could appear in a positive description.
 _EXCLUSION_MARKERS = (
-    "exclud",        # "excluded", "exclude", "excluding"
-    "not include",   # "not included", "not include this"
+    "exclud",  # "excluded", "exclude", "excluding"
+    "not include",  # "not included", "not include this"
     "shouldn't",
     "should not",
     "do not match",
     "doesn't match",
-    "wait,",         # mid-thought self-correction (Qwen pattern)
+    "wait,",  # mid-thought self-correction (Qwen pattern)
     "however,",
     "actually,",
     "(distractor",

@@ -21,25 +21,18 @@ def test_extract_int_basic_table_unchanged() -> None:
 
 def test_extract_int_disambig_annotation_first() -> None:
     """Granite's actual T232042 D1 output: `(first)` between name and pipe."""
-    assert (
-        extract_int("| StefansSpace (first) | 2 |", "StefansSpace") == 2
-    )
+    assert extract_int("| StefansSpace (first) | 2 |", "StefansSpace") == 2
 
 
 def test_extract_int_disambig_annotation_duplicate() -> None:
     """Same agent, second-row annotation."""
-    assert (
-        extract_int("| StefansSpace (duplicate) | 2 |", "StefansSpace") == 2
-    )
+    assert extract_int("| StefansSpace (duplicate) | 2 |", "StefansSpace") == 2
 
 
 def test_extract_int_disambig_annotation_other_space_name() -> None:
     """Granite v2 also produced `StefansSpace (OliversSpace) | 2 |`
     — annotation is itself a name."""
-    assert (
-        extract_int("| StefansSpace (OliversSpace) | 2 |", "StefansSpace")
-        == 2
-    )
+    assert extract_int("| StefansSpace (OliversSpace) | 2 |", "StefansSpace") == 2
 
 
 def test_extract_int_disambig_test_data_first() -> None:

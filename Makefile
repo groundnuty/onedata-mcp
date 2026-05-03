@@ -20,7 +20,7 @@
         sweep-headline sweep-k8 \
         conformance inspect-smoke \
         report report-latest \
-        show-grid show-headline show-trial inspect-fail list-runs \
+        show-grid show-grid-rate show-headline show-trial inspect-fail list-runs \
         clean clean-artefacts
 
 # Default target prints the command list.
@@ -77,7 +77,8 @@ help:
 	@echo "    report             alias for report-latest"
 	@echo "    list-runs          list artefact directories newest-first"
 	@echo "    show-headline RID=...  per-LLM pass-rate + fail list"
-	@echo "    show-grid RID=...      per-cell pass/fail grid (D1..D6 A1..A6 P1..P6)"
+	@echo "    show-grid RID=...      per-cell pass/fail grid (K=1, last-trial-wins)"
+	@echo "    show-grid-rate RID=... per-cell PASS-count/K (K>=1; for K=8 headline)"
 	@echo "    show-trial RID=... LLM=... SCEN=... — full JSONL summary"
 	@echo "    inspect-fail RID=... LLM=... SCEN=... — diag + final_answer + tools"
 	@echo ""
@@ -185,23 +186,97 @@ sweep-all:
 	echo "===Generating reports==="; \
 	uv run python -m benchmark.report --run-id "$$RID"
 
-# Headline K=8 run — same two-phase structure as sweep-all but K=8 trials
-# per cell. Estimated 3-4 hours wall. Re-run only after harness is locked.
+# Headline K=8 run — fully SEQUENTIAL across LLMs (one leg at a time)
+# to be kind to the federation (no concurrent space-resets across
+# different LLMs) and to local vLLM (single GPU box probably can't
+# serve 3 concurrent inferences). Within each LLM scenarios run
+# scenario_parallelism=1 (sequential).
+#
+# V4-pro is rate-limit-sensitive (OpenRouter → SiliconFlow). To avoid
+# burning a 4-hour run only to discover the rate-limit budget was
+# exhausted, V4-pro is gated: K=1 probe first, then 7 more if the
+# probe shows no RateLimitError exhaustion.
+#
+# Estimated wall (very rough):
+#   Each LLM K=8 = ~0.5-1.5h depending on tool-call rounds
+#   7 LLMs × 1h ≈ 7h serial. Acceptable for a one-time headline run.
+
 sweep-k8:
 	@RID=$$(date -u +%Y%m%dT%H%M%S)_k8; \
-	echo "Shared run_id: $$RID  (K=8 headline)"; \
-	echo "===PHASE 1: Cyfronet + Anthropic (parallel=2)==="; \
-	uv run python -m benchmark.run_panel --trials 8 \
-	  --llms claude-sonnet-4-5,qwen3.6-35b,glm-4.7-flash \
-	  --scenario-parallelism 2 --run-id "$$RID"; \
-	echo ""; \
-	echo "===PHASE 2: OpenRouter (serial)==="; \
-	uv run python -m benchmark.run_panel --trials 8 \
-	  --llms deepseek-v4-pro \
-	  --scenario-parallelism 1 --run-id "$$RID"; \
-	echo ""; \
-	echo "===Generating reports==="; \
-	uv run python -m benchmark.report --run-id "$$RID"
+	mkdir -p "artefacts/$$RID"; \
+	LOG="artefacts/$$RID/sweep-k8.log"; \
+	PERSTEP="artefacts/$$RID/_per-step-logs"; \
+	mkdir -p "$$PERSTEP"; \
+	{ \
+	  echo ""; \
+	  echo "============================================================"; \
+	  echo "K=8 HEADLINE RUN  •  run_id=$$RID"; \
+	  echo "  Sequential across 7 panel LLMs, scenario_parallelism=1"; \
+	  echo "  Started: $$(date -u +%FT%TZ)"; \
+	  echo "  Logs: $$LOG  +  $$PERSTEP/<step>.log"; \
+	  echo "============================================================"; \
+	  echo ""; \
+	  \
+	  echo "=== Step 1: V4-pro K=1 (rate-limit probe) ==="; \
+	  uv run python -m benchmark.run_panel --trials 1 \
+	    --llms deepseek-v4-pro \
+	    --scenario-parallelism 1 --run-id "$$RID" 2>&1 \
+	    | tee "$$PERSTEP/01-v4pro-probe.log"; \
+	  RL_HITS=$$(grep -lE "RateLimitError" artefacts/$$RID/deepseek-v4-pro__*.jsonl 2>/dev/null | wc -l | tr -d ' '); \
+	  if [ "$$RL_HITS" -gt 0 ]; then \
+	    echo ""; \
+	    echo "!!! V4-pro probe: $$RL_HITS cells hit RateLimitError after retry exhaustion."; \
+	    echo "    Investigate before proceeding to K=8. Other 6 LLMs NOT yet started."; \
+	    echo "    Use 'make show-grid RID=$$RID' to inspect."; \
+	    exit 1; \
+	  fi; \
+	  echo ""; \
+	  echo "=== Step 2: V4-pro K=7 more (target K=8) ==="; \
+	  uv run python -m benchmark.run_panel --trials 7 \
+	    --llms deepseek-v4-pro \
+	    --scenario-parallelism 1 --run-id "$$RID" 2>&1 \
+	    | tee "$$PERSTEP/02-v4pro-rest.log"; \
+	  echo ""; \
+	  \
+	  echo "=== Step 3: Sonnet K=8 (Anthropic, claude-agent-sdk) ==="; \
+	  uv run python -m benchmark.run_panel --trials 8 \
+	    --llms claude-sonnet-4-5 \
+	    --scenario-parallelism 1 --run-id "$$RID" 2>&1 \
+	    | tee "$$PERSTEP/03-sonnet.log"; \
+	  echo ""; \
+	  \
+	  echo "=== Step 4: Cyfronet Forge K=8 (Qwen, GLM — sequential) ==="; \
+	  N=4; \
+	  for llm in qwen3.6-35b glm-4.7-flash; do \
+	    echo "--- $$llm ---"; \
+	    uv run python -m benchmark.run_panel --trials 8 \
+	      --llms $$llm \
+	      --scenario-parallelism 1 --run-id "$$RID" 2>&1 \
+	      | tee "$$PERSTEP/0$$N-$$llm.log"; \
+	    N=$$((N + 1)); \
+	  done; \
+	  echo ""; \
+	  \
+	  echo "=== Step 5: Local vLLM K=8 (Gemma, Granite, Devstral — sequential) ==="; \
+	  N=6; \
+	  for llm in gemma-4-31b-it granite-4.1-30b devstral-2-123b; do \
+	    echo "--- $$llm ---"; \
+	    uv run python -m benchmark.run_panel --trials 8 \
+	      --llms $$llm \
+	      --scenario-parallelism 1 --run-id "$$RID" 2>&1 \
+	      | tee "$$PERSTEP/0$$N-$$llm.log"; \
+	    N=$$((N + 1)); \
+	  done; \
+	  echo ""; \
+	  \
+	  echo "=== Step 6: Generate reports ==="; \
+	  uv run python -m benchmark.report --run-id "$$RID" 2>&1 \
+	    | tee "$$PERSTEP/09-report.log"; \
+	  echo ""; \
+	  echo "  Finished: $$(date -u +%FT%TZ)"; \
+	  echo "  Total trials: $$(ls artefacts/$$RID/*.jsonl | xargs cat 2>/dev/null | wc -l) (across 7 LLMs)"; \
+	  echo "  K=8 headline complete  •  artefacts/$$RID/"; \
+	} 2>&1 | tee "$$LOG"
 
 sweep-headline: sweep-k8
 
@@ -377,6 +452,34 @@ show-grid:
 	      ADAPTER_ERROR) printf "A  ";; \
 	      *) printf "?  ";; \
 	    esac; \
+	  done; \
+	  echo ""; \
+	done
+
+# Per-cell pass-RATE grid: rows = LLMs, cols = scenarios, cell = P/K.
+# K-aware version of show-grid: for K>1 multi-line JSONLs (each line =
+# one trial), counts how many lines have outcome=PASS. Useful for the
+# K=8 headline.
+show-grid-rate:
+	@RID="$(RID)"; \
+	if [ -z "$$RID" ]; then \
+	  RID=$$(ls -1d artefacts/2026* 2>/dev/null | sort -r | head -1); \
+	  echo "(latest run: $${RID})"; \
+	else \
+	  RID="artefacts/$${RID}"; \
+	fi; \
+	printf "%-22s %-5s %-5s %-5s %-5s %-5s %-5s %-5s %-5s %-5s %-5s %-5s %-5s %-5s %-5s %-5s %-5s %-5s %-5s\n" \
+	  "" D1 D2 D3 D4 D5 D6 A1 A2 A3 A4 A5 A6 P1 P2 P3 P4 P5 P6; \
+	for f in $$RID/*.jsonl; do basename "$$f" .jsonl; done \
+	  | sed 's/__.*//' | sort -u | while read llm; do \
+	  printf "%-22s " "$$llm"; \
+	  for scen in D1 D2 D3 D4 D5 D6 A1 A2 A3 A4 A5 A6 P1 P2 P3 P4 P5 P6; do \
+	    file="$$RID/$${llm}__$${scen}.jsonl"; \
+	    if [ ! -f "$$file" ]; then printf "%-5s " "—"; continue; fi; \
+	    K=$$(wc -l < "$$file" | tr -d ' '); \
+	    P=$$(grep -cE '"outcome"\s*:\s*"PASS"' "$$file" 2>/dev/null); \
+	    if [ "$$K" = "0" ]; then printf "%-5s " "—"; \
+	    else printf "%-5s " "$$P/$$K"; fi; \
 	  done; \
 	  echo ""; \
 	done

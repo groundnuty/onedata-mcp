@@ -98,9 +98,7 @@ def main() -> None:
 
             middleware: list[Middleware] = []
             if os.environ.get("MCP_DNS_REBINDING_PROTECTION", "1").strip() != "0":
-                middleware.append(
-                    Middleware(DnsRebindingProtection, host=host, port=port)
-                )
+                middleware.append(Middleware(DnsRebindingProtection, host=host, port=port))
 
             mcp.run(transport="http", host=host, port=port, middleware=middleware)
         else:

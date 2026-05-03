@@ -56,6 +56,16 @@ class TrialArtefact:
     # benchmark/llm_adapters/claude_agent_sdk.py for the gate logic.
     denied_calls: tuple[dict, ...] = ()
     error: str | None = None
+    # Per-round adapter trace: full request/response shapes for each
+    # tool-use round of the conversation. Captured for false-negative
+    # analysis — once K=8 lands, we want to be able to inspect WHY a
+    # specific trial decided what it decided without re-running. Schema
+    # comes from the adapter's `dispatch.raw_trace` (typically
+    # {"rounds": [{messages_pre_request, tool_calls_emitted,
+    # finish_reason, content_text_length}, ...]}). Optional — adapters
+    # that don't capture rounds (e.g. claude-agent-sdk wrapping the
+    # local CC binary) leave this empty.
+    raw_trace: dict | None = None
 
 
 def to_json_dict(artefact: TrialArtefact) -> dict:

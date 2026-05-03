@@ -84,6 +84,21 @@ def latest_run(artefact_root: Path) -> Path:
 
 
 def render_paper_report(records: list[TrialRecord], run_id: str) -> str:
+    """Compact, paper-facing summary table.
+
+    K-aware: for K>1 cells, shows the cell's pass-rate as a fraction
+    (e.g., ``8/8``, ``6/8``) and supplies stability columns in the
+    per-LLM totals table:
+
+    - ``stable PASS`` — # of cells where every trial passed (P=K)
+    - ``stable FAIL`` — # of cells where every trial failed (P=0)
+    - ``stochastic`` — # of cells with mixed outcomes (0<P<K)
+
+    Stochastic count is the headline signal for K=8: low → harness +
+    model are deterministic; high → either real model variance, vLLM
+    parser-coverage residuals (L-3), or oracle-edge stochasticity
+    (e.g., long-list emission, K=1 noise on weak legs).
+    """
     by_cell: dict[tuple[str, str], list[TrialRecord]] = defaultdict(list)
     for r in records:
         by_cell[(r.llm_name, r.scenario_id)].append(r)
@@ -91,9 +106,16 @@ def render_paper_report(records: list[TrialRecord], run_id: str) -> str:
     llms = sorted({r.llm_name for r in records})
     scenarios = sorted({r.scenario_id for r in records})
 
+    # Detect K (max trials per cell). If cells have inconsistent counts
+    # (e.g., V4-pro probe at K=1 + others at K=8), use the max — the
+    # headline we want for the paper is "K=8 across the board". Cells
+    # that fall short get rendered as P/Krunning (e.g., 1/1 for the probe).
+    cell_sizes = [len(rs) for rs in by_cell.values()]
+    k_max = max(cell_sizes) if cell_sizes else 0
+
     out: list[str] = []
     out.append(f"# PPAM 2026 benchmark — paper summary  (run `{run_id}`)\n")
-    out.append(f"**Panel:** {', '.join(llms)}\n")
+    out.append(f"**Panel:** {', '.join(llms)}  •  **K (max trials/cell):** {k_max}\n")
     out.append(f"**Scenarios run:** {len(scenarios)} ({', '.join(scenarios)})\n")
     out.append("")
 
@@ -112,21 +134,69 @@ def render_paper_report(records: list[TrialRecord], run_id: str) -> str:
         out.append("| " + " | ".join(row) + " |")
     out.append("")
 
-    # Per-LLM totals
-    out.append("## Per-LLM totals\n")
-    out.append("| LLM | PASS | FAIL | RESET_FAIL | ADAPTER_ERROR | Pass rate |")
-    out.append("|---|---|---|---|---|---|")
+    # Per-LLM totals — K-aware
+    out.append("## Per-LLM totals (stability breakdown)\n")
+    out.append(
+        "| LLM | trials | PASS | FAIL | RESET | ADAPTER | "
+        "rate | stable PASS | stable FAIL | stochastic |"
+    )
+    out.append("|---|---|---|---|---|---|---|---|---|---|")
     for llm in llms:
         rs = [r for r in records if r.llm_name == llm]
         c = Counter(r.outcome for r in rs)
         total = len(rs)
         passes = c.get("PASS", 0)
         rate = f"{passes / total * 100:.1f}%" if total else "—"
+        # Per-cell stability for this LLM.
+        stable_pass = stable_fail = stochastic = 0
+        n_cells = 0
+        for sid in scenarios:
+            cell = by_cell.get((llm, sid), [])
+            if not cell:
+                continue
+            n_cells += 1
+            p = sum(1 for r in cell if r.outcome == "PASS")
+            k = len(cell)
+            if p == k:
+                stable_pass += 1
+            elif p == 0:
+                stable_fail += 1
+            else:
+                stochastic += 1
         out.append(
-            f"| `{llm}` | {passes} | {c.get('FAIL', 0)} | "
-            f"{c.get('RESET_FAIL', 0)} | {c.get('ADAPTER_ERROR', 0)} | {rate} |"
+            f"| `{llm}` | {total} | {passes} | {c.get('FAIL', 0)} | "
+            f"{c.get('RESET_FAIL', 0)} | {c.get('ADAPTER_ERROR', 0)} | "
+            f"{rate} | {stable_pass}/{n_cells} | "
+            f"{stable_fail}/{n_cells} | {stochastic}/{n_cells} |"
         )
     out.append("")
+
+    # Stochastic-cells call-out — useful for paper Threats-to-Validity
+    # discussion ("which cells are deterministic, which need K>1").
+    if k_max > 1:
+        out.append("## Stochastic cells (0 < P < K)\n")
+        out.append(
+            "Cells with mixed outcomes — these are where harness, model, "
+            "or deployment variance shows up. Stable-PASS / stable-FAIL "
+            "cells (not listed) are deterministic at this K.\n"
+        )
+        any_stochastic = False
+        for llm in llms:
+            stoc_rows = []
+            for sid in scenarios:
+                cell = by_cell.get((llm, sid), [])
+                if not cell:
+                    continue
+                p = sum(1 for r in cell if r.outcome == "PASS")
+                k = len(cell)
+                if 0 < p < k:
+                    stoc_rows.append(f"`{sid}`={p}/{k}")
+            if stoc_rows:
+                any_stochastic = True
+                out.append(f"- **`{llm}`**: " + ", ".join(stoc_rows))
+        if not any_stochastic:
+            out.append("*(none — all cells are stable PASS or stable FAIL at this K)*")
+        out.append("")
 
     return "\n".join(out)
 

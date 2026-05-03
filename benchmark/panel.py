@@ -183,8 +183,7 @@ def build_panel() -> tuple[tuple[PanelEntry, ...], tuple[str, ...]]:
             return
         if not (base and model_id):
             skipped.append(
-                f"Local vLLM leg {prefix}: need BOTH _BASE_URL and "
-                f"_MODEL_ID set in .env"
+                f"Local vLLM leg {prefix}: need BOTH _BASE_URL and _MODEL_ID set in .env"
             )
             return
         name = os.getenv(f"{prefix}_NAME", "").strip() or model_id

@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from openai import APIConnectionError, APITimeoutError, RateLimitError
+from openai import APITimeoutError, RateLimitError
 
 from benchmark.llm_adapters.openai_compat import _create_with_retry
 
@@ -38,9 +38,7 @@ def _make_rate_limit_error() -> RateLimitError:
 
 def _make_timeout_error() -> APITimeoutError:
     """APITimeoutError — transient, also retried."""
-    return APITimeoutError(
-        request=httpx.Request("POST", "https://example.com/v1/chat/completions")
-    )
+    return APITimeoutError(request=httpx.Request("POST", "https://example.com/v1/chat/completions"))
 
 
 def _success_response() -> object:

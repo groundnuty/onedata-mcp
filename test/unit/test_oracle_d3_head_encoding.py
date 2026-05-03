@@ -67,9 +67,7 @@ async def test_d3_passes_with_escape_rendered_newlines_truncated() -> None:
     chars. With the 30-char expected_head this passes cleanly."""
     expected_size = len(D3_SCENARIO.fixture.files[0].content.encode("utf-8"))
     # Verbatim Sonnet final_answer from run 20260502T190757:
-    answer = (
-        f"size={expected_size}; head=MANIFEST v1\\nbuild=46-g14b5bda7\\nspace=ppam_2026_m"
-    )
+    answer = f"size={expected_size}; head=MANIFEST v1\\nbuild=46-g14b5bda7\\nspace=ppam_2026_m"
     result = await verify_d3(_ctx(), _trace(answer))
     assert result.mcp_pass is True
 

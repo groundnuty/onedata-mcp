@@ -1,3 +1,4 @@
+# ruff: noqa: E501  -- agent verbatim output is intentionally not wrapped
 """Tests for extract_paths' exclusion-marker detection.
 
 Surfaced 2026-05-02 by P6 K=1 sweep (run T195311). Both Qwen and GLM
@@ -14,7 +15,6 @@ revert (or naive 'find all paths' refactor) is caught.
 from __future__ import annotations
 
 from benchmark.oracles._helpers import extract_paths
-
 
 SPACE_PREFIX = "/ppam_2026_mcp_tests"
 

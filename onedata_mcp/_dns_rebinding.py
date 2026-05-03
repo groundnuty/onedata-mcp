@@ -77,8 +77,7 @@ class DnsRebindingProtection:
             return
 
         headers = {
-            k.decode("latin-1").lower(): v.decode("latin-1")
-            for k, v in scope.get("headers", [])
+            k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])
         }
         host = headers.get("host", "")
         origin = headers.get("origin")  # may be None

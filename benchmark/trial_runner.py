@@ -130,6 +130,11 @@ async def run_trial(
 
     outcome: TrialOutcome = "PASS" if oracle_result.mcp_pass else "FAIL"
     denied = tuple(dispatch.raw_trace.get("denied_calls") or ())
+    # Persist the per-round adapter trace verbatim. Strips `denied_calls`
+    # because that's already a top-level field. Everything else (per-
+    # round messages_pre_request, finish_reason, content_text_length,
+    # error_round) lands in raw_trace for false-negative analysis.
+    raw_trace = {k: v for k, v in dispatch.raw_trace.items() if k != "denied_calls"}
     artefact = TrialArtefact(
         run_id=run_id,
         llm_name=adapter.config.name,
@@ -153,6 +158,7 @@ async def run_trial(
         oracle_diagnosis=oracle_result.diagnosis,
         denied_calls=denied,
         error=dispatch.error,
+        raw_trace=raw_trace,
     )
     return _persist(artefact, artefact_dir)
 
