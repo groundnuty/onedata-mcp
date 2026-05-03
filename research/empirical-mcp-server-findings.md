@@ -549,7 +549,13 @@ filters correctly.
 
 ---
 
-## M-13. HTTP transport accepts arbitrary Host/Origin headers (DNS-rebinding vulnerability)
+## M-13. HTTP transport accepts arbitrary Host/Origin headers (DNS-rebinding vulnerability) — RESOLVED 2026-05-03
+
+> **Status: RESOLVED** in commit on `ppam2026/14-tools` (see git log
+> for the M-13 fix commit). FastMCP HTTP transport now enforces
+> Host/Origin allow-listing via `onedata_mcp/_dns_rebinding.py`
+> ASGI middleware. Conformance suite v0.1.16
+> `dns-rebinding-protection` scenario goes from 1/2 → 2/2 PASS.
 
 **Surface:** `onedata-mcp` HTTP transport (added 2026-05-03 to support
 the conformance + Inspector tooling). FastMCP-default behaviour;

@@ -85,7 +85,24 @@ def main() -> None:
             host = os.environ.get("MCP_HOST", "127.0.0.1")
             port = int(os.environ.get("MCP_PORT", "3037"))
             logger.info("Server started, transport=http host=%s port=%d", host, port)
-            mcp.run(transport="http", host=host, port=port)
+
+            # MCP-2025-11-25 security: enforce DNS-rebinding protection
+            # on the HTTP transport. Stdio is unaffected. Without this,
+            # the conformance suite's `dns-rebinding-protection` scenario
+            # FAILs (M-13). Operator can opt-out by setting
+            # MCP_DNS_REBINDING_PROTECTION=0 (NOT recommended; offered
+            # for debugging exotic Host-header environments).
+            from starlette.middleware import Middleware
+
+            from onedata_mcp._dns_rebinding import DnsRebindingProtection
+
+            middleware: list[Middleware] = []
+            if os.environ.get("MCP_DNS_REBINDING_PROTECTION", "1").strip() != "0":
+                middleware.append(
+                    Middleware(DnsRebindingProtection, host=host, port=port)
+                )
+
+            mcp.run(transport="http", host=host, port=port, middleware=middleware)
         else:
             logger.info("Server started, transport=stdio")
             mcp.run()

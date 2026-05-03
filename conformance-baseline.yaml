@@ -55,10 +55,6 @@ server:
 
   # ---- Real findings, expected-fail until fixed ----
   #
-  # M-13 candidate: HTTP transport accepts non-localhost Host/Origin
-  # headers. Per MCP-2025-11-25 security spec, local servers MUST
-  # reject these to prevent DNS-rebinding attacks. FastMCP's HTTP
-  # transport doesn't enforce this by default; needs middleware or
-  # FastMCP config.  Tracked separately; will be removed from
-  # baseline once fixed.
-  - dns-rebinding-protection
+  # (No entries — M-13 fix landed 2026-05-03 in
+  # onedata_mcp/_dns_rebinding.py, so the previously-failing
+  # `dns-rebinding-protection` scenario now passes.)
