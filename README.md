@@ -2,7 +2,7 @@
 
 An [MCP](https://modelcontextprotocol.io/) server that connects assistants to [Onedata](https://onedata.org/) (Onezone + Oneprovider): spaces, harvesters, files, **QoS, distribution, providers, transfers**.
 
-This fork (branch `ppam2026/14-tools` of `groundnuty/onedata-mcp`) extends [`M0rgho/onedata-mcp`](https://github.com/M0rgho/onedata-mcp) with seven federation-state tools (six per paper spec, plus a recursive `query_by_metadata` that needs no harvester) for the PPAM 2026 *LLM-agentic access to a federated scientific data layer with Onedata* benchmark. Pinned to **Onedata 25.0** swagger. The headline benchmark uses a curated 15-tool allowlist defined in [`benchmark/tool_allowlist.py`](benchmark/tool_allowlist.py); see [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) for endpoint mapping, the three corrections vs. paper §3 spec, and the known `move_file` gap (no public REST endpoint upstream).
+This fork (branch `ppam2026/14-tools` of `groundnuty/onedata-mcp`) extends [`M0rgho/onedata-mcp`](https://github.com/M0rgho/onedata-mcp) with seven federation-state tools (six per paper spec, plus a recursive `query_by_metadata` that needs no harvester) for the PPAM 2026 *LLM-agentic access to a federated scientific data layer with Onedata* benchmark. Pinned to **Onedata 25.0** swagger. The headline benchmark uses a curated 15-tool allowlist defined in [`benchmark/tool_allowlist.py`](benchmark/tool_allowlist.py); see [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) for endpoint mapping and the three corrections vs. paper §3 spec.
 
 ## Tool surface
 
@@ -19,7 +19,7 @@ This fork (branch `ppam2026/14-tools` of `groundnuty/onedata-mcp`) extends [`M0r
 | `grep_file_content`           | files         |                                                      |
 | `create_file`                 | files         |                                                      |
 | `delete_file`                 | files         |                                                      |
-| `move_file`                   | files         | **NEW** — currently `NotImplementedError` (no public REST endpoint in Onedata 25.0; pending decision) |
+| `move_file`                   | files         | **NEW** — CDMI (`PUT /cdmi/{dst_space}/{path}`); intra-space only |
 | `get_file_metadata`           | files         | json / rdf / xattrs                                  |
 | `set_file_metadata`           | files         | json / rdf / xattrs                                  |
 | `get_file_distribution`       | files         | **NEW** — per-provider, per-storage block ranges     |
