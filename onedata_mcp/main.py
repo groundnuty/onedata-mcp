@@ -5,6 +5,10 @@ import sys
 from fastmcp import FastMCP
 
 from onedata_mcp.modules import files, harvesters, metadata, qos, spaces, transfers
+from onedata_mcp.token_policy import (
+    WRITE_TOOL_NAMES,
+    resolve_register_write_tools_sync,
+)
 
 
 def _setup_logging() -> logging.Logger:
@@ -55,6 +59,19 @@ def _create_onedata_mcp_server() -> FastMCP:
     qos.register_module(mcp)
     spaces.register_module(mcp)
     transfers.register_module(mcp)
+
+    # Operational safety: when the Oneprovider token is read-only
+    # (data.readonly caveat), prune the mutating tools from the surface so a
+    # read-only deployment cannot be asked to attempt writes. The default
+    # (writable token, or check skipped) leaves the full hardened surface
+    # untouched. This prunes already-registered tools by name — it does not
+    # alter any tool definition.
+    if not resolve_register_write_tools_sync():
+        for tool_name in WRITE_TOOL_NAMES:
+            try:
+                mcp.local_provider.remove_tool(tool_name)
+            except Exception as exc:  # noqa: BLE001 — best-effort prune; log + continue
+                logger.warning("Could not remove write tool %r: %s", tool_name, exc)
 
     return mcp
 
