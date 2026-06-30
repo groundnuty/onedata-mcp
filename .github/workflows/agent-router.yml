@@ -1,0 +1,17 @@
+name: Agent Router
+on:
+  issues:
+    types: [labeled, closed]
+  issue_comment:
+    types: [created]
+  pull_request:
+    types: [opened]
+  pull_request_review:
+    types: [submitted]
+jobs:
+  route:
+    uses: groundnuty/macf-actions/.github/workflows/agent-router.yml@v3
+    with:
+      project: ppam-2026
+      registry-api-path: /repos/groundnuty/groundnuty
+    secrets: inherit
