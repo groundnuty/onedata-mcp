@@ -11,6 +11,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
     InMemorySpanExporter,
 )
 from opentelemetry.trace import StatusCode
+from pytest_httpx import HTTPXMock
 
 from onedata_mcp import telemetry
 from onedata_mcp.telemetry import TracingMiddleware
@@ -162,3 +163,66 @@ async def test_new_trace_when_no_traceparent(
     # A root span (no remote parent) still gets a valid trace id.
     assert spans[0].parent is None
     assert spans[0].context.trace_id != 0
+
+
+# --- REST child-span status (#10) ------------------------------------------
+
+
+def _set_oneprovider_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ONEDATA_ONEPROVIDER_HOST", "https://oneprovider.example")
+    monkeypatch.setenv("ONEDATA_ONEPROVIDER_TOKEN", "token-p")
+    monkeypatch.setenv("ONEDATA_ALLOW_INSECURE_TLS", "false")
+
+
+@pytest.mark.asyncio
+async def test_rest_span_marked_error_on_non_2xx(
+    span_exporter: InMemorySpanExporter,
+    monkeypatch: pytest.MonkeyPatch,
+    httpx_mock: HTTPXMock,
+) -> None:
+    from onedata_mcp.api import transfers
+    from onedata_mcp.utils import OnedataApiError
+
+    _set_oneprovider_env(monkeypatch)
+    httpx_mock.add_response(
+        method="GET",
+        url="https://oneprovider.example/api/v3/oneprovider/transfers/tX",
+        status_code=404,
+        json={"error": {"id": "posix", "details": {"errno": "enoent"}}},
+    )
+
+    with pytest.raises(OnedataApiError):
+        await transfers.get_transfer("tX")
+
+    rest = [s for s in span_exporter.get_finished_spans() if s.name == "onedata.rest GET"]
+    assert len(rest) == 1
+    span = rest[0]
+    assert span.status.status_code == StatusCode.ERROR
+    assert span.attributes["http.response.status_code"] == 404
+    assert span.attributes["onedata.error_id"] == "posix"
+    assert span.attributes["onedata.errno"] == "enoent"
+
+
+@pytest.mark.asyncio
+async def test_rest_span_ok_on_2xx(
+    span_exporter: InMemorySpanExporter,
+    monkeypatch: pytest.MonkeyPatch,
+    httpx_mock: HTTPXMock,
+) -> None:
+    from onedata_mcp.api import transfers
+
+    _set_oneprovider_env(monkeypatch)
+    httpx_mock.add_response(
+        method="GET",
+        url="https://oneprovider.example/api/v3/oneprovider/transfers/tY",
+        status_code=200,
+        json={"transferState": "completed"},
+    )
+
+    await transfers.get_transfer("tY")
+
+    rest = [s for s in span_exporter.get_finished_spans() if s.name == "onedata.rest GET"]
+    assert len(rest) == 1
+    span = rest[0]
+    assert span.status.status_code != StatusCode.ERROR
+    assert "onedata.error_id" not in span.attributes

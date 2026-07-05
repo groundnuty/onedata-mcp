@@ -109,6 +109,10 @@ async def request(
     else:
         span_cm = contextlib.nullcontext()
 
+    # Built inside the span's lifetime on a non-2xx response, raised after the
+    # block. Keeping construction inside the `with` lets us set the REST span's
+    # ERROR status + onedata.* attrs before the span ends (#10).
+    onedata_error: OnedataApiError | None = None
     try:
         with span_cm as span:
             if span is not None:
@@ -125,30 +129,47 @@ async def request(
                     base_url=url, headers=headers, verify=verify
                 ) as client:
                     response = await client.request(method, path, params=params, content=body)
+
+            try:
+                content_type = response.headers.get("Content-Type", "")
+                if content_type.startswith("application/json"):
+                    response_body: Any = response.json()
+                else:
+                    response_body = response.text
+            except ValueError:
+                response_body = response.content
+
             if span is not None:
                 span.set_attribute("http.response.status_code", response.status_code)
+
+            # A non-2xx Onedata response is a REST-level failure: mark the span
+            # ERROR here (not only on network exceptions), so Tempo queries
+            # filtering onedata.rest spans by status.code==ERROR don't undercount.
+            if response.is_error:
+                response_payload = {"status_code": response.status_code, "body": response_body}
+                details = _format_body_for_log(response_body)
+                onedata_error = OnedataApiError(
+                    f"Onedata API request failed: {method} {path} "
+                    f"(status={response.status_code}) - {details}",
+                    response=response_payload,
+                )
+                if span is not None:
+                    if onedata_error.error_id:
+                        span.set_attribute("onedata.error_id", onedata_error.error_id)
+                    if onedata_error.errno:
+                        span.set_attribute("onedata.errno", onedata_error.errno)
+                    span.set_status(
+                        telemetry.Status(
+                            telemetry.StatusCode.ERROR,
+                            f"HTTP {response.status_code}",
+                        )
+                    )
     except Exception as e:
         err = f"Onedata API request failed: {method} {path} - {e!s}"
         raise OnedataApiError(err, response=None) from e
 
-    try:
-        content_type = response.headers.get("Content-Type", "")
-        if content_type.startswith("application/json"):
-            response_body: Any = response.json()
-        else:
-            response_body = response.text
-    except ValueError:
-        response_body = response.content
-
-    if response.is_error:
-        response_payload = {"status_code": response.status_code, "body": response_body}
-        details = _format_body_for_log(response_body)
-
-        raise OnedataApiError(
-            f"Onedata API request failed: {method} {path} "
-            f"(status={response.status_code}) - {details}",
-            response=response_payload,
-        )
+    if onedata_error is not None:
+        raise onedata_error
 
     logger.debug(
         "Onedata API request successful: %s %s\nStatus: %s\nHeaders: %s\nBody: %s",
