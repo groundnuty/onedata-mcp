@@ -97,11 +97,12 @@ async def test_pruning_removes_exactly_the_write_tools() -> None:
     """Removing WRITE_TOOL_NAMES leaves the read surface intact (prune semantics)."""
     from fastmcp import FastMCP
 
-    from onedata_mcp.modules import files, qos
+    from onedata_mcp.modules import files, qos, transfers
 
     probe = FastMCP(name="probe")
     files.register_module(probe)
     qos.register_module(probe)
+    transfers.register_module(probe)
 
     before = {t.name for t in await probe.list_tools()}
     assert before >= token_policy.WRITE_TOOL_NAMES

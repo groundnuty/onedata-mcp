@@ -112,6 +112,11 @@ ABLATION_EXTRAS: frozenset[str] = frozenset(
         # alternative and is exposed in the ablation surface so the
         # explicit-mkdir path can be measured separately.
         "create_directory",
+        # Added 2026-07-05 (issue #8): agent-triggerable replication transfer
+        # (wraps POST /transfers). Requested by the ICSOC 2026 fleet for their
+        # transfer-convergence scenarios; not part of the frozen PPAM HEADLINE
+        # 16, so it lives in the ablation surface.
+        "schedule_file_replication",
     }
 )
 

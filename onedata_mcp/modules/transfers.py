@@ -7,7 +7,11 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from onedata_mcp.api.spaces import resolve_space_id_or_name
-from onedata_mcp.api.transfers import get_transfer, list_space_transfers
+from onedata_mcp.api.transfers import (
+    get_transfer,
+    list_space_transfers,
+    schedule_file_replication,
+)
 
 
 def register_module(mcp: FastMCP) -> None:
@@ -55,3 +59,28 @@ def register_module(mcp: FastMCP) -> None:
         destination provider ids, file path, byte counts, and timing.
         """
         return await get_transfer(transfer_id)
+
+    @mcp.tool(
+        name="schedule_file_replication",
+        annotations=ToolAnnotations(destructiveHint=True),
+    )
+    async def mcp_schedule_file_replication(
+        file_id_or_path: str = Field(
+            description="File id or path in format /<space_name>/<path_to_file>"
+        ),
+        target_provider_id: str = Field(
+            description="Provider id to replicate the file TO (data is copied to this provider)"
+        ),
+    ) -> dict[str, Any]:
+        """Schedule a replication transfer of a file to a target provider.
+
+        Copies the file's data to `target_provider_id` and returns the
+        scheduled transfer's id; poll it with `get_transfer`, or watch the
+        space transfer log with `list_space_transfers`. Replication only —
+        does not evict or migrate.
+
+        The target provider must support the file's space; if it does not, the
+        call fails with a structured error explaining why the placement cannot
+        be scheduled.
+        """
+        return await schedule_file_replication(file_id_or_path, target_provider_id)
