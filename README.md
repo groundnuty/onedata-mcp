@@ -6,12 +6,12 @@ This fork (branch `ppam2026/14-tools` of `groundnuty/onedata-mcp`) extends [`M0r
 
 ## Tool surface
 
-The server registers **26 tools** in total (the table below). Two subsets matter:
+The server registers **27 tools** in total (the table below). Two subsets matter:
 
-- **19 tools** remain when the server is run with a read-only Onedata token (a `data.readonly` caveat prunes the 7 mutating tools — see [`onedata_mcp/token_policy.py`](onedata_mcp/token_policy.py)).
+- **19 tools** remain when the server is run with a read-only Onedata token (a `data.readonly` caveat prunes the 8 mutating tools — see [`onedata_mcp/token_policy.py`](onedata_mcp/token_policy.py)).
 - **16 tools** form the curated **HEADLINE** benchmark allowlist (`benchmark/tool_allowlist.py::HEADLINE`) — the subset the PPAM benchmark restricts the agent to. This is distinct from the registered surface: the benchmark curates *down* to 16, it does not cap what the server exposes.
 
-The branch name (`14-tools`) is historical — the surface has since grown; the authoritative live count is what `tools/list` returns (26).
+The branch name (`14-tools`) is historical — the surface has since grown; the authoritative live count is what `tools/list` returns (27).
 
 | Tool                          | Group         | Notes                                                |
 |-------------------------------|---------------|------------------------------------------------------|
@@ -37,6 +37,7 @@ The branch name (`14-tools`) is historical — the surface has since grown; the 
 | `remove_qos_requirement`      | qos           | **NEW**                                              |
 | `list_space_transfers`        | transfers     | **NEW** — IDs only; pair with `get_transfer`         |
 | `get_transfer`                | transfers     | **NEW**                                              |
+| `schedule_file_replication`   | transfers     | **NEW** — schedule a replication transfer to a target provider |
 | `list_user_harvesters`        | harvesters    |                                                      |
 | `get_harvester_index_schema`  | harvesters    |                                                      |
 | `query_harvester_index`       | harvesters    | excluded from headline benchmark allowlist           |

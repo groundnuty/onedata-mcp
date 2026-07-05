@@ -36,6 +36,8 @@ WRITE_TOOL_NAMES = frozenset(
         # qos
         "add_file_qos_requirement",
         "remove_qos_requirement",
+        # transfers
+        "schedule_file_replication",
     }
 )
 
