@@ -20,6 +20,7 @@ from onedata_mcp.api.files import (
     list_files_recursively,
     move_file,
     set_file_metadata,
+    set_file_xattrs,
 )
 from onedata_mcp.api.files import (
     create_directory as api_create_directory,
@@ -68,8 +69,32 @@ async def _resolve_with_mcp_root(path_or_id: str, ctx: Optional[Context]) -> str
     return f"{root_path.rstrip('/')}/{path_or_id.lstrip('/')}"
 
 
-def register_module(mcp: FastMCP) -> None:
-    """Register onedata files module tools and prompts with the MCP server."""
+def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
+    """Register onedata files module tools and prompts with the MCP server.
+
+    When ``experimental`` is set, additionally registers un-validated tools
+    (currently ``set_file_xattrs``) gated behind ONEDATA_MCP_EXPERIMENTAL —
+    see onedata_mcp/experimental.py and onedata-mcp#1.
+    """
+
+    if experimental:
+
+        @mcp.tool(name="set_file_xattrs")
+        async def mcp_set_file_xattrs(
+            file_id_or_path: str = Field(
+                description="File id or path to the file in format /<space_name>/<path_to_file>"
+            ),
+            xattrs: dict[str, str] | str = Field(
+                description=(
+                    "Extended attributes: keys map to string values only "
+                    "(omitted keys are left unchanged). Use this rather than "
+                    "`set_file_metadata` for extended attributes. You may send a "
+                    'JSON object string instead, e.g. \'{"license": "CC-0"}\'.'
+                ),
+            ),
+        ) -> None:
+            """Merge file extended attributes without replacing JSON/RDF metadata."""
+            return await set_file_xattrs(file_id_or_path, xattrs)
 
     @mcp.tool(name="get_file_id", annotations=ToolAnnotations(readOnlyHint=True))
     async def mcp_get_file_id(

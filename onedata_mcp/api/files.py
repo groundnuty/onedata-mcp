@@ -1,3 +1,4 @@
+import json
 from asyncio.log import logger
 from collections.abc import Iterable
 from typing import Any
@@ -419,6 +420,16 @@ async def get_file_metadata(file_id_or_path: str, metadata_types: list[str]) -> 
             raise
 
     return result
+
+
+async def set_file_xattrs(file_id_or_path: str, xattrs: dict[str, str] | str) -> None:
+    """Merge extended attributes (string values only); omitted keys unchanged.
+
+    Convenience wrapper over ``set_file_metadata(..., "xattrs", ...)``. Accepts a
+    dict or a JSON-object string (some models pass the payload pre-serialized).
+    """
+    payload = json.dumps(xattrs) if isinstance(xattrs, dict) else xattrs
+    await set_file_metadata(file_id_or_path, "xattrs", payload)
 
 
 async def set_file_metadata(
