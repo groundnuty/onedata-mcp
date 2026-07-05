@@ -1,8 +1,10 @@
 import asyncio
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from onedata_mcp.config import get_oneprovider_config, get_onezone_config
 from onedata_mcp.utils import request
+
+DatasetState = Literal["attached", "detached"]
 
 
 class SpacesListResponse(TypedDict):
@@ -56,6 +58,36 @@ async def resolve_space_id_or_name(value: str) -> str:
                 return sid
     available = sorted(s.get("name", "?") for s in spaces if s.get("name"))
     raise ValueError(f"Space {value!r} not found. Available names: {available}")
+
+
+async def list_space_datasets(
+    space_id_or_name: str,
+    *,
+    state: DatasetState = "attached",
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Top-level datasets in a space.
+
+    Endpoint: GET /api/v3/oneprovider/spaces/{sid}/datasets (oneprovider).
+    `state`: 'attached' follows the current file layout; 'detached' is the
+    hierarchy frozen at detachment time. Adapted from upstream 63c21b5.
+    """
+    if state not in ("attached", "detached"):
+        raise ValueError("state must be 'attached' or 'detached'")
+    if limit < 1 or limit > 1000:
+        raise ValueError("limit must be between 1 and 1000")
+
+    space_id = await resolve_space_id_or_name(space_id_or_name)
+    config = get_oneprovider_config()
+    response = await request(
+        config,
+        "GET",
+        f"/spaces/{space_id}/datasets",
+        params={"state": state, "limit": limit, "offset": offset},
+    )
+    body = response["body"]
+    return body if isinstance(body, dict) else {"datasets": []}
 
 
 async def list_user_spaces() -> list[dict[str, Any]]:
