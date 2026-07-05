@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -113,6 +114,8 @@ async def request(
     # block. Keeping construction inside the `with` lets us set the REST span's
     # ERROR status + onedata.* attrs before the span ends (#10).
     onedata_error: OnedataApiError | None = None
+    response: httpx.Response | None = None
+    t0 = time.perf_counter()
     try:
         with span_cm as span:
             if span is not None:
@@ -165,9 +168,18 @@ async def request(
                         )
                     )
     except Exception as e:
+        telemetry.record_rest_request(method, "exception", (time.perf_counter() - t0) * 1000.0)
         err = f"Onedata API request failed: {method} {path} - {e!s}"
         raise OnedataApiError(err, response=None) from e
 
+    # Record REST duration for both success and non-2xx (status class from the
+    # response); the network-exception path is recorded above.
+    if response is not None:
+        telemetry.record_rest_request(
+            method,
+            f"{response.status_code // 100}xx",
+            (time.perf_counter() - t0) * 1000.0,
+        )
     if onedata_error is not None:
         raise onedata_error
 
