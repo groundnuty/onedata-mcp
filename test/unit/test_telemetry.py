@@ -58,6 +58,23 @@ def test_setup_reports_enabled_when_endpoint_set(
     assert telemetry._otel_export_configured() is True
 
 
+def test_setup_stays_disabled_on_exporter_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed OTEL_* endpoint must disable telemetry, not crash the server."""
+    import opentelemetry.exporter.otlp.proto.http.trace_exporter as otlp
+
+    monkeypatch.setattr(telemetry, "_telemetry_enabled", False)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise ValueError("malformed endpoint")
+
+    monkeypatch.setattr(otlp, "OTLPSpanExporter", boom)
+    assert telemetry.setup_telemetry() is False
+    assert telemetry.telemetry_enabled() is False
+
+
 @pytest.mark.asyncio
 async def test_middleware_passthrough_when_disabled(
     monkeypatch: pytest.MonkeyPatch,

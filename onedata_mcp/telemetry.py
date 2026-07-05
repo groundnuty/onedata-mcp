@@ -69,19 +69,19 @@ def setup_telemetry() -> bool:
         from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
-    except ImportError as exc:  # pragma: no cover - defensive
-        logger.warning(
-            "OTEL_* is set but the OpenTelemetry SDK is not installed (%s); "
-            "telemetry stays disabled",
-            exc,
-        )
+
+        # Resource.create() reads OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES;
+        # the OTLP exporter reads OTEL_EXPORTER_OTLP_* itself. Both the imports
+        # AND the exporter construction are guarded: a missing SDK or a
+        # malformed OTEL_* value must leave telemetry disabled, never crash the
+        # server at construction time (honours this function's "never raises").
+        provider = TracerProvider(resource=Resource.create())
+        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+        trace.set_tracer_provider(provider)
+    except Exception as exc:  # noqa: BLE001 — telemetry must never take the server down
+        logger.warning("OpenTelemetry setup failed (%s); telemetry stays disabled", exc)
         return False
 
-    # Resource.create() reads OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES from
-    # the environment; the OTLP exporter reads OTEL_EXPORTER_OTLP_* itself.
-    provider = TracerProvider(resource=Resource.create())
-    provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
-    trace.set_tracer_provider(provider)
     _telemetry_enabled = True
     logger.info("OpenTelemetry tracing enabled (OTLP/HTTP exporter)")
     return True
