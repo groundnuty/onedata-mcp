@@ -2,9 +2,16 @@
 
 An [MCP](https://modelcontextprotocol.io/) server that connects assistants to [Onedata](https://onedata.org/) (Onezone + Oneprovider): spaces, harvesters, files, **QoS, distribution, providers, transfers**.
 
-This fork (branch `ppam2026/14-tools` of `groundnuty/onedata-mcp`) extends [`M0rgho/onedata-mcp`](https://github.com/M0rgho/onedata-mcp) with seven federation-state tools (six per paper spec, plus a recursive `query_by_metadata` that needs no harvester) for the PPAM 2026 *LLM-agentic access to a federated scientific data layer with Onedata* benchmark. Pinned to **Onedata 25.0** swagger. The headline benchmark uses a curated 15-tool allowlist defined in [`benchmark/tool_allowlist.py`](benchmark/tool_allowlist.py); see [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) for endpoint mapping and the three corrections vs. paper §3 spec.
+This fork (branch `ppam2026/14-tools` of `groundnuty/onedata-mcp`) extends [`M0rgho/onedata-mcp`](https://github.com/M0rgho/onedata-mcp) with seven federation-state tools (six per paper spec, plus a recursive `query_by_metadata` that needs no harvester) for the PPAM 2026 *LLM-agentic access to a federated scientific data layer with Onedata* benchmark. Pinned to **Onedata 25.0** swagger. The headline benchmark uses a curated 16-tool allowlist defined in [`benchmark/tool_allowlist.py`](benchmark/tool_allowlist.py); see [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) for endpoint mapping and the three corrections vs. paper §3 spec.
 
 ## Tool surface
+
+The server registers **26 tools** in total (the table below). Two subsets matter:
+
+- **19 tools** remain when the server is run with a read-only Onedata token (a `data.readonly` caveat prunes the 7 mutating tools — see [`onedata_mcp/token_policy.py`](onedata_mcp/token_policy.py)).
+- **16 tools** form the curated **HEADLINE** benchmark allowlist (`benchmark/tool_allowlist.py::HEADLINE`) — the subset the PPAM benchmark restricts the agent to. This is distinct from the registered surface: the benchmark curates *down* to 16, it does not cap what the server exposes.
+
+The branch name (`14-tools`) is historical — the surface has since grown; the authoritative live count is what `tools/list` returns (26).
 
 | Tool                          | Group         | Notes                                                |
 |-------------------------------|---------------|------------------------------------------------------|
@@ -18,6 +25,7 @@ This fork (branch `ppam2026/14-tools` of `groundnuty/onedata-mcp`) extends [`M0r
 | `download_file`               | files         |                                                      |
 | `grep_file_content`           | files         |                                                      |
 | `create_file`                 | files         |                                                      |
+| `create_directory`            | files         | **NEW** — explicit directory creation (finding M-11) |
 | `delete_file`                 | files         |                                                      |
 | `move_file`                   | files         | **NEW** — CDMI (`PUT /cdmi/{dst_space}/{path}`); intra-space only |
 | `get_file_metadata`           | files         | json / rdf / xattrs                                  |
