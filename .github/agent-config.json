@@ -1,0 +1,14 @@
+{
+  "agents": {
+    "code-agent": {
+      "app_name": "ppam-2026-code-agent",
+      "host": "orzechpro.tail491af.ts.net",
+      "tmux_session": "code-agent",
+      "tmux_bin": "tmux",
+      "workspace_dir": "/home/ubuntu/repos/groundnuty/onedata-mcp",
+      "ssh_user": "ubuntu",
+      "ssh_key_secret": "AGENT_SSH_KEY"
+    }
+  },
+  "label_to_status": { "in-progress": "In Progress", "in-review": "In Review", "blocked": "Blocked" }
+}
