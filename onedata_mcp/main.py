@@ -5,7 +5,7 @@ import sys
 from fastmcp import FastMCP
 
 from onedata_mcp.modules import files, harvesters, metadata, qos, spaces, transfers
-from onedata_mcp.telemetry import TracingMiddleware, setup_telemetry
+from onedata_mcp.telemetry import TracingMiddleware, setup_metrics, setup_telemetry
 from onedata_mcp.token_policy import (
     WRITE_TOOL_NAMES,
     resolve_register_write_tools_sync,
@@ -54,10 +54,11 @@ def _create_onedata_mcp_server() -> FastMCP:
     """,
     )
 
-    # Observability: install the OTLP tracer iff OTEL_* is configured (no-op
-    # otherwise), and emit one span per tool call via middleware. Opt-in only;
-    # nothing is hardcoded. See onedata_mcp/telemetry.py.
+    # Observability: install the OTLP tracer + meter iff OTEL_* is configured
+    # (no-op otherwise), and emit one span + duration metric per tool call via
+    # middleware. Opt-in only; nothing is hardcoded. See onedata_mcp/telemetry.py.
     setup_telemetry()
+    setup_metrics()
     mcp.add_middleware(TracingMiddleware())
 
     files.register_module(mcp)
