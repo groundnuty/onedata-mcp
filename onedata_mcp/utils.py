@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import httpx
+
+from onedata_mcp import telemetry
 
 if TYPE_CHECKING:
     from .config import OnedataConfig
@@ -96,13 +99,34 @@ async def request(
 
     headers.update(additional_headers or {})
 
+    # Outbound child span + W3C traceparent injection, so a harness-initiated
+    # trace continues into the Onedata REST call. No-op when telemetry is off.
+    if telemetry.telemetry_enabled():
+        span_cm = telemetry.get_tracer().start_as_current_span(
+            f"onedata.rest {method}",
+            kind=telemetry.SpanKind.CLIENT,
+        )
+    else:
+        span_cm = contextlib.nullcontext()
+
     try:
-        if json_body is not None:
-            async with httpx.AsyncClient(base_url=url, headers=headers, verify=verify) as client:
-                response = await client.request(method, path, params=params, json=json_body)
-        else:
-            async with httpx.AsyncClient(base_url=url, headers=headers, verify=verify) as client:
-                response = await client.request(method, path, params=params, content=body)
+        with span_cm as span:
+            if span is not None:
+                span.set_attribute("http.request.method", method)
+                span.set_attribute("url.path", path)
+                telemetry.inject_traceparent(headers)
+            if json_body is not None:
+                async with httpx.AsyncClient(
+                    base_url=url, headers=headers, verify=verify
+                ) as client:
+                    response = await client.request(method, path, params=params, json=json_body)
+            else:
+                async with httpx.AsyncClient(
+                    base_url=url, headers=headers, verify=verify
+                ) as client:
+                    response = await client.request(method, path, params=params, content=body)
+            if span is not None:
+                span.set_attribute("http.response.status_code", response.status_code)
     except Exception as e:
         err = f"Onedata API request failed: {method} {path} - {e!s}"
         raise OnedataApiError(err, response=None) from e
