@@ -118,6 +118,30 @@ You can omit `env` here and rely on a `.env` file next to the project if the ser
 uv run fastmcp dev inspector onedata_mcp/main.py:mcp
 ```
 
+## Telemetry (OpenTelemetry)
+
+The server can emit one OpenTelemetry span per MCP tool call (tool name,
+duration, success/error status, error class on failure) and continues an
+incoming W3C `traceparent`, so a client-initiated trace flows
+client → MCP server → Onedata REST as a single correlated trace.
+
+**Telemetry is opt-in and fully no-op by default.** With none of the `OTEL_*`
+variables set, no exporter is installed — there is no startup cost and no
+retry spam without a collector. Enable it purely through the standard `OTEL_*`
+environment variables (nothing is hardcoded):
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://<your-collector-host>:4318"  # OTLP/HTTP
+export OTEL_SERVICE_NAME="onedata-mcp"
+# optional: export OTEL_RESOURCE_ATTRIBUTES="deployment.environment=dev"
+uv run onedata-mcp
+```
+
+Any OTLP/HTTP collector works (e.g. an `otel/opentelemetry-collector` container
+exposing `:4318`). Trace-context propagation: a client that places a
+`traceparent` in the MCP request `_meta` will have the server's spans parented
+to that trace.
+
 ## Development
 
 - Format / lint: `uv run ruff format`
