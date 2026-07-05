@@ -8,9 +8,14 @@ on:
     types: [opened]
   pull_request_review:
     types: [submitted]
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+  checks: read
 jobs:
   route:
-    uses: groundnuty/macf-actions/.github/workflows/agent-router.yml@v3
+    uses: groundnuty/macf-actions/.github/workflows/agent-router.yml@v3.4.1
     with:
       project: ppam-2026
       registry-api-path: /repos/groundnuty/groundnuty
