@@ -10,12 +10,12 @@ Two axes:
   ``stable``       — validated against the PPAM 7-LLM K=8 panel (== the
                      benchmark HEADLINE-16). Proven against weaker models.
   ``experimental`` — registered but NOT panel-validated: either added to this
-                     fork after the paper freeze, or inherited from the M0rgho
-                     upstream fork and never swept against our panel.
+                     project after the paper freeze, or inherited from the
+                     upstream base surface and never swept against our panel.
 
 ``origin`` (a distrust signal for anything unvalidated)
-  ``ours``     — authored in this fork after the M0rgho fork point (85b8515).
-  ``upstream`` — inherited/adapted from M0rgho/onedata-mcp.
+  ``ours``     — authored here after the upstream base commit (85b8515).
+  ``upstream`` — inherited/adapted from the upstream base surface.
 
 Note **panel-validation trumps origin**: an upstream-origin tool that made it
 into the HEADLINE-16 and survived K=8 was hardened by us (M-1..M-13 findings)
@@ -64,7 +64,7 @@ EXPERIMENTAL: frozenset[str] = frozenset(
         "create_directory",
         "remove_qos_requirement",
         "schedule_file_replication",
-        # inherited from the M0rgho upstream fork, never panel-swept (the
+        # inherited from the upstream base surface, never panel-swept (the
         # genuine distrust set)
         "get_file_attributes",
         "get_file_id",
@@ -77,8 +77,8 @@ EXPERIMENTAL: frozenset[str] = frozenset(
     }
 )
 
-# origin == "upstream": present at the M0rgho fork point (85b8515). Everything
-# else is "ours".
+# origin == "upstream": present at the upstream base commit (85b8515).
+# Everything else is "ours".
 UPSTREAM: frozenset[str] = frozenset(
     {
         "create_file",

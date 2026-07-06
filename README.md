@@ -2,13 +2,13 @@
 
 An [MCP](https://modelcontextprotocol.io/) server that connects assistants to [Onedata](https://onedata.org/) (Onezone + Oneprovider): spaces, harvesters, files, **QoS, distribution, providers, transfers**.
 
-This fork (branch `ppam2026/14-tools` of `groundnuty/onedata-mcp`) extends [`M0rgho/onedata-mcp`](https://github.com/M0rgho/onedata-mcp) with seven federation-state tools (six per paper spec, plus a recursive `query_by_metadata` that needs no harvester) for the PPAM 2026 *LLM-agentic access to a federated scientific data layer with Onedata* benchmark. Pinned to **Onedata 25.0** swagger. The headline benchmark uses a curated 16-tool allowlist defined in [`benchmark/tool_allowlist.py`](benchmark/tool_allowlist.py); see [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) for endpoint mapping and the three corrections vs. paper §3 spec.
+`groundnuty/onedata-mcp` extends a pre-existing Onedata MCP base surface with seven federation-state tools (six per paper spec, plus a recursive `query_by_metadata` that needs no harvester) for the PPAM 2026 *LLM-agentic access to a federated scientific data layer with Onedata* benchmark. Pinned to **Onedata 25.0** swagger. The headline benchmark uses a curated 16-tool allowlist defined in [`benchmark/tool_allowlist.py`](benchmark/tool_allowlist.py); see [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) for endpoint mapping and the three corrections vs. paper §3 spec.
 
 ## Tool surface
 
 The server registers **27 tools** in total (the table below). Three lenses matter:
 
-- **Maturity — 16 `stable` / 11 `experimental`.** `stable` tools were validated against the PPAM 7-LLM K=8 panel (== the HEADLINE benchmark allowlist); `experimental` tools are registered but not yet panel-swept — either added after the paper freeze, or inherited from the [`M0rgho/onedata-mcp`](https://github.com/M0rgho/onedata-mcp) upstream fork and never validated against our panel. See [`onedata_mcp/tool_maturity.py`](onedata_mcp/tool_maturity.py). Origin (`ours`/`upstream`) is a provenance signal — note that panel-validation trumps origin: an upstream tool that survived K=8 is `stable`.
+- **Maturity — 16 `stable` / 11 `experimental`.** `stable` tools were validated against the PPAM 7-LLM K=8 panel (== the HEADLINE benchmark allowlist); `experimental` tools are registered but not yet panel-swept — either added after the paper freeze, or inherited from the upstream base surface and never validated against our panel. See [`onedata_mcp/tool_maturity.py`](onedata_mcp/tool_maturity.py). Origin (`ours`/`upstream`) is a provenance signal — note that panel-validation trumps origin: an upstream tool that survived K=8 is `stable`.
 - **Read-only token — 19 tools.** Running with a `data.readonly` Onedata token prunes the 8 mutating tools (see [`onedata_mcp/token_policy.py`](onedata_mcp/token_policy.py)).
 - **HEADLINE benchmark allowlist — 16 tools.** The subset the PPAM benchmark restricts the agent to (`benchmark/tool_allowlist.py::HEADLINE`); identical to the `stable` set. The benchmark curates *down* to 16 — it does not cap what the server exposes.
 

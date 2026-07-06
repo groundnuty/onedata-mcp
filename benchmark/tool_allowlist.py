@@ -1,15 +1,15 @@
 """Curated tool allowlist for the PPAM 2026 headline benchmark sweep.
 
-The full MCP server exposes ~21 tools (M0rgho's 14 + 7 we added). For the
-**headline** benchmark the harness restricts the agent to a curated 16-tool
-surface; the **ablation** sweep uses the full surface to test the curation
-contribution. See:
+The full MCP server exposes ~21 tools (14 inherited from the upstream base + 7
+we added). For the **headline** benchmark the harness restricts the agent to a
+curated 16-tool surface; the **ablation** sweep uses the full surface to test
+the curation contribution. See:
 
 - design/03-tool-allowlist-curation.md   for the rationale per tool
 - design/02-query-by-metadata-no-harvester.md   for harvester exclusion
 - design/01-move-file-strategy.md   for the move_file caveat
 
-Mapping back to paper Table 1 (paper-name → M0rgho name):
+Mapping back to paper Table 1 (paper-name → server name):
 
   list_spaces             →  list_user_spaces
   find_files              →  list_files_recursively
@@ -75,7 +75,7 @@ assert len(HEADLINE) == 16, f"HEADLINE must have exactly 16 tools, got {len(HEAD
 
 
 # Tools registered by the MCP server but **excluded** from the headline:
-# - kept in the codebase per "extend M0rgho, don't replace" directive
+# - kept in the codebase per "extend the base surface, don't replace" directive
 # - excluded both from headline and from the full ablation surface
 #   (the federation has no harvester, so they always fail)
 EXCLUDED_HARVESTER: frozenset[str] = frozenset(
