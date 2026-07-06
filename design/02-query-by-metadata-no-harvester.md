@@ -12,7 +12,7 @@ The PPAM 2026 implementation spec (`research/22-mcp-implementation-spec.md` §3.
 2. **(b) CouchDB-style `createView` + `queryView`** — agent writes a JavaScript map function. Rejected at spec time as not agent-friendly.
 3. **(c) Recursive `list_files_recursively` + per-file `get_file_metadata` + client-side filter** — no special infra, depth- and result-bounded.
 
-M0rgho already shipped strategy (a) under the names `query_harvester_index` / `get_harvester_index_schema` / `list_user_harvesters`.
+The base surface already shipped strategy (a) under the names `query_harvester_index` / `get_harvester_index_schema` / `list_user_harvesters`.
 
 ## Why (c)
 
@@ -62,9 +62,9 @@ If either bound is hit, the result includes `"truncated": true` so the agent kno
 
 **Cost note (paper §3 token economics):** worst case is `max_depth × max_files_per_dir + max_results × 1` HTTP calls. The harness's `chat_messages_stats` instruments per-call cost, so post-hoc analysis can flag tasks where `query_by_metadata` is a hot loop.
 
-## What stays of M0rgho's harvester surface
+## What stays of the inherited harvester surface
 
-We extend, not replace (per user directive 2026-04-30). M0rgho's `list_user_harvesters`, `get_harvester_index_schema`, `query_harvester_index` remain registered and callable. They are:
+We extend, not replace (per user directive 2026-04-30). The inherited `list_user_harvesters`, `get_harvester_index_schema`, `query_harvester_index` remain registered and callable. They are:
 
 - ❌ **excluded from the `tool_context_mode="minimal"` 14-tool benchmark allowlist** (the headline benchmark)
 - ❌ **excluded from the `tool_context_mode="full"` ablation surface as well** — the SPICE federation has no harvester configured (confirmed 2026-04-30 by user). The harvester tools would always fail on this deployment, so they would degrade the ablation rather than enrich it.

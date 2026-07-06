@@ -287,7 +287,7 @@ The full curated surface (`HEADLINE` allowlist used in the PPAM 2026 paper):
 | `list_space_transfers`     | Scheduled transfers in a space (IDs only; pair with `get_transfer`). |
 | `get_transfer`             | Single transfer's source, destination, state, bytes.    |
 
-The server also exposes (outside HEADLINE) the M0rgho-inherited harvester tools (`list_user_harvesters`, `get_harvester_index_schema`, `query_harvester_index`), `get_file_id`, `get_file_attributes`, `list_children`, and `grep_file_content` for ablation experiments and Onedata-specific debugging.
+The server also exposes (outside HEADLINE) the inherited harvester tools (`list_user_harvesters`, `get_harvester_index_schema`, `query_harvester_index`), `get_file_id`, `get_file_attributes`, `list_children`, and `grep_file_content` for ablation experiments and Onedata-specific debugging.
 
 ---
 

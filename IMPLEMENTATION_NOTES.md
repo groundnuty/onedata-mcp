@@ -3,13 +3,13 @@
 > **Documentation map.** This file is the operational reference. Decisions are in `design/` (00 fork, 01 move, 02 query-by-metadata, 03 allowlist, 04 scenarios, 05 reset protocol, 06 oracle philosophy). Empirical observations against the live 25.0 deployment are in `research/empirical-onedata-25.0-findings.md`. Paper-writing-agent handoff (corrections to §3 / §4 / §7 spec text) is in `papers/ppam-2026/research/28-empirical-spec-corrections.md`.
 
 
-**Branch:** `ppam2026/14-tools` of `groundnuty/onedata-mcp` (fork of `M0rgho/onedata-mcp`).
+**Branch:** `ppam2026/14-tools` of `groundnuty/onedata-mcp`.
 **Pinned target:** Onedata 25.0 (federation deployed at `data.spice-platform.eu` reports `version: 25.0`, build `46-g14b5bda7`).
 **Swagger refs used during implementation:** `oneprovider-swagger@25.0` (commit `39da981`), `onezone-swagger@25.0` (commit `58c6976`), `onepanel-swagger@25.0` (commit `aa17c67`). All three repos cloned to `/Users/orzech/repos/onedata/`.
 
 ## Summary
 
-The fork adds 6 MCP tools to M0rgho's existing surface, extending it from his metadata-and-harvester focus to the QoS / distribution / transfers / cross-provider topology that the PPAM 2026 benchmark exercises. The 6 added tools are:
+The fork adds 6 MCP tools to the pre-existing base surface, extending it from a metadata-and-harvester focus to the QoS / distribution / transfers / cross-provider topology that the PPAM 2026 benchmark exercises. The 6 added tools are:
 
 1. `get_file_distribution` (file-level)
 2. `move_file` (file-level, **stubbed** — see §Move file below)
@@ -22,7 +22,7 @@ A seventh tool, `get_transfer`, is also exposed because the list endpoint return
 
 A QoS module helper (`get_qos_requirement`, `remove_qos_requirement`) is included for completeness of the QoS lifecycle, even though the headline benchmark only exercises `add` + `summary`.
 
-## Module layout (added to M0rgho's existing layered architecture)
+## Module layout (added to the existing layered architecture)
 
 ```
 onedata_mcp/
@@ -79,13 +79,13 @@ If the deployment's `-spice-v1` patch on onezone changes the response shape of `
 
 **Decided:** recursive primitives. New tool `query_by_metadata` lives in `onedata_mcp/api/metadata.py`, composing `list_files_recursively` + `get_file_metadata` with a small `key=value` / `key=*` predicate parser. Bounded by `max_depth`, `max_results`, and an internal `MAX_FILES_VISITED=1000` hard cap. Returns `truncated: true` whenever any cap fires.
 
-Harvester-based tools (`query_harvester_index`, `get_harvester_index_schema`, `list_user_harvesters`) inherited from M0rgho stay in the codebase and remain callable, but are excluded from the PPAM headline 14-tool benchmark allowlist.
+Harvester-based tools (`query_harvester_index`, `get_harvester_index_schema`, `list_user_harvesters`) inherited from the base surface stay in the codebase and remain callable, but are excluded from the PPAM headline 14-tool benchmark allowlist.
 
 Full rationale and tradeoffs: **[`design/02-query-by-metadata-no-harvester.md`](design/02-query-by-metadata-no-harvester.md)**.
 
 ## Tool count for paper Table 1
 
-The fork now exposes ~21 MCP tools (M0rgho's 14 + 7 we added: 6 from the spec plus the recursive `query_by_metadata`). The PPAM benchmark will use the harness's `tool_context_mode={"full","minimal"}` to:
+The fork now exposes ~21 MCP tools (14 inherited from the base surface + 7 we added: 6 from the spec plus the recursive `query_by_metadata`). The PPAM benchmark will use the harness's `tool_context_mode={"full","minimal"}` to:
 
 - run a **headline** sweep with a curated 15-tool allowlist (`benchmark/tool_allowlist.HEADLINE`)
 - run an **ablation** sweep with the 22-tool full surface (`benchmark/tool_allowlist.ABLATION_FULL` = headline + 7 extras; harvesters excluded because the federation has no harvester)
@@ -98,7 +98,7 @@ The 18 PPAM 2026 scenarios are defined in `benchmark/scenarios.py` (with datacla
 
 ## Testing
 
-Unit tests pass (78/78 total: 33 pre-existing M0rgho + 11 new-tool api + 16 metadata-query + 5 allowlist-drift + 5 move_file + 9 scenario-drift):
+Unit tests pass (78/78 total: 33 pre-existing + 11 new-tool api + 16 metadata-query + 5 allowlist-drift + 5 move_file + 9 scenario-drift):
 
 ```bash
 uv run pytest test/unit -v

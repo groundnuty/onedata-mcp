@@ -6,7 +6,7 @@
 
 ## Context
 
-The fork registers 21 MCP tools (M0rgho's 14 + 7 we added). The PPAM 2026 paper claims a "curated 14-tool surface" — that count is editable in the paper text and was not load-bearing on the curation argument. Before scenario authoring (#20) and harness extension (#19) we need a concrete, frozen, version-controlled allowlist that:
+The fork registers 21 MCP tools (14 inherited from the base surface + 7 we added). The PPAM 2026 paper claims a "curated 14-tool surface" — that count is editable in the paper text and was not load-bearing on the curation argument. Before scenario authoring (#20) and harness extension (#19) we need a concrete, frozen, version-controlled allowlist that:
 
 - maps cleanly onto the paper's Table 1 (so the paper-writing agent can update the table consistently)
 - can be passed to the harness as a `frozenset[str]` to filter `tools/list` for the headline sweep
@@ -15,7 +15,7 @@ The fork registers 21 MCP tools (M0rgho's 14 + 7 we added). The PPAM 2026 paper 
 
 ## The 15
 
-Mapping to paper Table 1 (paper-name → M0rgho name in our fork):
+Mapping to paper Table 1 (paper-name → server name in our fork):
 
 | # | Paper Table 1 row | Allowlist tool name | R-class |
 |---|---|---|---|
@@ -39,11 +39,11 @@ Mapping to paper Table 1 (paper-name → M0rgho name in our fork):
 
 - **Add `get_transfer` to Table 1; bump the headline count from "14-tool" to "15-tool" everywhere it appears.** *Reason:* the `list_space_transfers` REST endpoint returns transfer **IDs only** — no source / destination / state / bytes detail. Scenario P4 ("Most-recent migration of file F") is unsolvable from IDs alone; the agent must follow up with `get_transfer` per ID. Without `get_transfer` in the allowlist, P4 would always fail not because of model capability but because of allowlist incompleteness — exactly the failure mode the paper §3 curation argument warns against. (Search for `14` in §3, §4, §5.6, abstract; replace with `15` where the context is the tool count.)
 
-`remove_file` (= `delete_file` in the M0rgho convention) **stays in the headline.** A "federated data layer" claim with create-but-no-delete reads as a CRUD asymmetry the paper would have to justify. Keeping the deletion primitive preserves the platform framing even if no headline scenario exercises it; it also leaves the door open for future scenarios (planned cleanup oracles, cross-trial fixture resets) without re-curating.
+`remove_file` (= `delete_file` in the server convention) **stays in the headline.** A "federated data layer" claim with create-but-no-delete reads as a CRUD asymmetry the paper would have to justify. Keeping the deletion primitive preserves the platform framing even if no headline scenario exercises it; it also leaves the door open for future scenarios (planned cleanup oracles, cross-trial fixture resets) without re-curating.
 
-## Why these names (M0rgho convention vs paper convention)
+## Why these names (server convention vs paper convention)
 
-Resolved 2026-04-30: pick whichever naming is most aligned with the underlying Onedata REST API. M0rgho's names (`list_user_spaces`, `download_file`, `delete_file`, `get_file_metadata`, etc.) are more REST-faithful than the paper's (`list_spaces`, `read_file`, etc.) — the M0rgho name maps to the actual operationId in the swagger. The paper-writing agent updates Table 1 + prose mentions when picking up the results. Documented in IMPLEMENTATION_NOTES.md.
+Resolved 2026-04-30: pick whichever naming is most aligned with the underlying Onedata REST API. The server's names (`list_user_spaces`, `download_file`, `delete_file`, `get_file_metadata`, etc.) are more REST-faithful than the paper's (`list_spaces`, `read_file`, etc.) — the server name maps to the actual operationId in the swagger. The paper-writing agent updates Table 1 + prose mentions when picking up the results. Documented in IMPLEMENTATION_NOTES.md.
 
 ## What's in the ablation surface
 
@@ -63,7 +63,7 @@ The `tool_context_mode="full"` ablation surface (`ABLATION_FULL`) extends the he
 
 ## What's never in any sweep
 
-`EXCLUDED_HARVESTER`: `list_user_harvesters`, `get_harvester_index_schema`, `query_harvester_index`. Reason: the SPICE federation has no harvester configured (confirmed by user 2026-04-30; see `design/02-query-by-metadata-no-harvester.md`). These tools are kept registered for codebase parity with M0rgho upstream, but they always fail on this deployment, so including them in either sweep would manufacture artificial failures unrelated to either model capability or curation.
+`EXCLUDED_HARVESTER`: `list_user_harvesters`, `get_harvester_index_schema`, `query_harvester_index`. Reason: the SPICE federation has no harvester configured (confirmed by user 2026-04-30; see `design/02-query-by-metadata-no-harvester.md`). These tools are kept registered for codebase parity with the upstream base surface, but they always fail on this deployment, so including them in either sweep would manufacture artificial failures unrelated to either model capability or curation.
 
 ## Why the headline is 15 (not 14, not 16)
 
