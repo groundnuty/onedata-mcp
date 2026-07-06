@@ -6,42 +6,61 @@ This fork (branch `ppam2026/14-tools` of `groundnuty/onedata-mcp`) extends [`M0r
 
 ## Tool surface
 
-The server registers **27 tools** in total (the table below). Two subsets matter:
+The server registers **27 tools** in total (the table below). Three lenses matter:
 
-- **19 tools** remain when the server is run with a read-only Onedata token (a `data.readonly` caveat prunes the 8 mutating tools — see [`onedata_mcp/token_policy.py`](onedata_mcp/token_policy.py)).
-- **16 tools** form the curated **HEADLINE** benchmark allowlist (`benchmark/tool_allowlist.py::HEADLINE`) — the subset the PPAM benchmark restricts the agent to. This is distinct from the registered surface: the benchmark curates *down* to 16, it does not cap what the server exposes.
+- **Maturity — 16 `stable` / 11 `experimental`.** `stable` tools were validated against the PPAM 7-LLM K=8 panel (== the HEADLINE benchmark allowlist); `experimental` tools are registered but not yet panel-swept — either added after the paper freeze, or inherited from the [`M0rgho/onedata-mcp`](https://github.com/M0rgho/onedata-mcp) upstream fork and never validated against our panel. See [`onedata_mcp/tool_maturity.py`](onedata_mcp/tool_maturity.py). Origin (`ours`/`upstream`) is a provenance signal — note that panel-validation trumps origin: an upstream tool that survived K=8 is `stable`.
+- **Read-only token — 19 tools.** Running with a `data.readonly` Onedata token prunes the 8 mutating tools (see [`onedata_mcp/token_policy.py`](onedata_mcp/token_policy.py)).
+- **HEADLINE benchmark allowlist — 16 tools.** The subset the PPAM benchmark restricts the agent to (`benchmark/tool_allowlist.py::HEADLINE`); identical to the `stable` set. The benchmark curates *down* to 16 — it does not cap what the server exposes.
 
-The branch name (`14-tools`) is historical — the surface has since grown; the authoritative live count is what `tools/list` returns (27).
+You can restrict the exposed surface at launch — see [Selecting tools at launch](#selecting-tools-at-launch). The branch name (`14-tools`) is historical; the authoritative live count is what `tools/list` returns (27).
 
-| Tool                          | Group         | Notes                                                |
-|-------------------------------|---------------|------------------------------------------------------|
-| `list_user_spaces`            | spaces        |                                                      |
-| `list_marketplace_spaces`     | spaces        |                                                      |
-| `list_space_providers`        | spaces        | **NEW** — providers from oneprovider's `/spaces/{sid}` |
-| `get_file_id`                 | files         |                                                      |
-| `get_file_attributes`         | files         |                                                      |
-| `list_children`               | files         |                                                      |
-| `list_files_recursively`      | files         |                                                      |
-| `download_file`               | files         |                                                      |
-| `grep_file_content`           | files         |                                                      |
-| `create_file`                 | files         |                                                      |
-| `create_directory`            | files         | **NEW** — explicit directory creation (finding M-11) |
-| `delete_file`                 | files         |                                                      |
-| `move_file`                   | files         | **NEW** — CDMI (`PUT /cdmi/{dst_space}/{path}`); intra-space only |
-| `get_file_metadata`           | files         | json / rdf / xattrs                                  |
-| `set_file_metadata`           | files         | json / rdf / xattrs                                  |
-| `get_file_distribution`       | files         | **NEW** — per-provider, per-storage block ranges     |
-| `get_file_qos_summary`        | qos           | **NEW**                                              |
-| `add_file_qos_requirement`    | qos           | **NEW** — async; returns ID, replication eventual    |
-| `get_qos_requirement`         | qos           | **NEW** — detail by ID                               |
-| `remove_qos_requirement`      | qos           | **NEW**                                              |
-| `list_space_transfers`        | transfers     | **NEW** — IDs only; pair with `get_transfer`         |
-| `get_transfer`                | transfers     | **NEW**                                              |
-| `schedule_file_replication`   | transfers     | **NEW** — schedule a replication transfer to a target provider |
-| `list_user_harvesters`        | harvesters    |                                                      |
-| `get_harvester_index_schema`  | harvesters    |                                                      |
-| `query_harvester_index`       | harvesters    | excluded from headline benchmark allowlist           |
-| `query_by_metadata`           | metadata      | **NEW** — recursive predicate evaluator (no harvester) |
+`Mat.` column: `stable` = panel-validated; `exp·up` = experimental, inherited from upstream (the genuine distrust set); `exp·ours` = experimental, added by this fork post-paper.
+
+| Tool                          | Group         | Mat.      | Notes                                                |
+|-------------------------------|---------------|-----------|------------------------------------------------------|
+| `list_user_spaces`            | spaces        | stable    |                                                      |
+| `list_marketplace_spaces`     | spaces        | exp·up    |                                                      |
+| `list_space_providers`        | spaces        | stable    | **NEW** — providers from oneprovider's `/spaces/{sid}` |
+| `get_file_id`                 | files         | exp·up    |                                                      |
+| `get_file_attributes`         | files         | exp·up    |                                                      |
+| `list_children`               | files         | exp·up    |                                                      |
+| `list_files_recursively`      | files         | stable    |                                                      |
+| `download_file`               | files         | stable    |                                                      |
+| `grep_file_content`           | files         | exp·up    |                                                      |
+| `create_file`                 | files         | stable    |                                                      |
+| `create_directory`            | files         | exp·ours  | **NEW** — explicit directory creation (finding M-11) |
+| `delete_file`                 | files         | stable    |                                                      |
+| `move_file`                   | files         | stable    | **NEW** — CDMI (`PUT /cdmi/{dst_space}/{path}`); intra-space only |
+| `get_file_metadata`           | files         | stable    | json / rdf / xattrs                                  |
+| `set_file_metadata`           | files         | stable    | json / rdf / xattrs                                  |
+| `get_file_distribution`       | files         | stable    | **NEW** — per-provider, per-storage block ranges     |
+| `get_file_qos_summary`        | qos           | stable    | **NEW**                                              |
+| `add_file_qos_requirement`    | qos           | stable    | **NEW** — async; returns ID, replication eventual    |
+| `get_qos_requirement`         | qos           | stable    | **NEW** — detail by ID                               |
+| `remove_qos_requirement`      | qos           | exp·ours  | **NEW** — not in the panel-validated HEADLINE set    |
+| `list_space_transfers`        | transfers     | stable    | **NEW** — IDs only; pair with `get_transfer`         |
+| `get_transfer`                | transfers     | stable    | **NEW**                                              |
+| `schedule_file_replication`   | transfers     | exp·ours  | **NEW** — schedule a replication transfer to a target provider |
+| `list_user_harvesters`        | harvesters    | exp·up    |                                                      |
+| `get_harvester_index_schema`  | harvesters    | exp·up    |                                                      |
+| `query_harvester_index`       | harvesters    | exp·up    | excluded from headline benchmark allowlist           |
+| `query_by_metadata`           | metadata      | stable    | **NEW** — recursive predicate evaluator (no harvester) |
+
+### Selecting tools at launch
+
+Two env vars restrict which tools the server exposes (model-invisible; they prune the registered surface, they do not alter any tool). With neither set, all 27 are exposed.
+
+| Env var | Effect |
+| ------- | ------ |
+| `ONEDATA_MCP_MATURITY` | Comma-separated maturity tiers to expose. `stable` → only the 16 panel-validated tools; `stable,experimental` (or unset) → all 27. |
+| `ONEDATA_MCP_TOOLS` | Comma-separated explicit tool allowlist (e.g. `list_user_spaces,download_file`). Takes precedence over `ONEDATA_MCP_MATURITY`; unknown names are ignored with a warning. |
+
+```bash
+# Expose only the panel-validated set (conservative deployment):
+ONEDATA_MCP_MATURITY=stable uv run onedata-mcp
+```
+
+This composes with the read-only-token prune: both simply hide tools, so a read-only token + `ONEDATA_MCP_MATURITY=stable` yields the stable-and-non-mutating intersection.
 
 ## Requirements
 

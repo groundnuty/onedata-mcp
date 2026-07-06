@@ -10,6 +10,7 @@ from onedata_mcp.token_policy import (
     WRITE_TOOL_NAMES,
     resolve_register_write_tools_sync,
 )
+from onedata_mcp.tool_maturity import tools_to_remove
 
 
 def _setup_logging() -> logging.Logger:
@@ -80,6 +81,17 @@ def _create_onedata_mcp_server() -> FastMCP:
                 mcp.local_provider.remove_tool(tool_name)
             except Exception as exc:  # noqa: BLE001 — best-effort prune; log + continue
                 logger.warning("Could not remove write tool %r: %s", tool_name, exc)
+
+    # Launch-time tool selection: ONEDATA_MCP_MATURITY (tier filter, e.g.
+    # "stable" for the panel-validated set only) and ONEDATA_MCP_TOOLS (explicit
+    # allowlist) prune the exposed surface. With neither set, the full surface
+    # stays. Model-invisible; same by-name prune as the read-only-token guard
+    # above. See onedata_mcp/tool_maturity.py.
+    for tool_name in tools_to_remove():
+        try:
+            mcp.local_provider.remove_tool(tool_name)
+        except Exception as exc:  # noqa: BLE001 — best-effort prune; log + continue
+            logger.warning("Could not remove tool %r for selection: %s", tool_name, exc)
 
     return mcp
 
