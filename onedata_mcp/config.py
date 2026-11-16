@@ -12,6 +12,9 @@ class OnedataConfig:
     base_url: str
     auth_headers: dict[str, str]
     verify_ssl: bool
+    # The name this server declares for the service a call is for ("onezone" or
+    # "oneprovider"). Error messages carry it instead of the host or the URL.
+    service: str = "onedata"
 
 
 @dataclass(frozen=True)
@@ -49,6 +52,7 @@ def get_onezone_config() -> OnedataConfig:
         base_url=base_url,
         auth_headers=auth_headers,
         verify_ssl=verify_ssl,
+        service="onezone",
     )
 
 
@@ -76,4 +80,5 @@ def get_oneprovider_config() -> OnedataConfig:
         base_url=base_url,
         auth_headers=auth_headers,
         verify_ssl=verify_ssl,
+        service="oneprovider",
     )
