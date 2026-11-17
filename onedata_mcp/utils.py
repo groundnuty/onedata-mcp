@@ -191,15 +191,20 @@ def transport_failure(
 
 
 # What the structured JSON body of a non-2xx answer may not show. Onedata's own error
-# ids and descriptions reach the agent unchanged, except for exactly three things:
-#   1. a node the deploy named in ONEDATA_MCP_NODE_NAMES (its host name or address,
-#      with a port that follows it) is replaced by its DECLARED name, so the text an
-#      agent sees is the same on every deployment of the same layout;
+# ids and descriptions reach the agent unchanged, except for exactly three things, all
+# of which apply ONLY when the deploy gives a node list (ONEDATA_MCP_NODE_NAMES, the
+# fallback mode for a federation whose real names must stay hidden):
+#   1. a node the list names (its host name or address, with a port that follows it) is
+#      replaced by its DECLARED name, so the text an agent sees is the same on every
+#      deployment of the same layout;
 #   2. a URL is masked;
 #   3. a `host=` or `port=` pair is masked.
 # Anything else, a dotted file name included, passes untouched. Both masks run after
-# the replacement, so a URL or a pair naming a known node reads `<address>` exactly as
-# it does where no list is given (Compose).
+# the replacement, so a URL or a pair naming a known node reads `<address>`.
+# With no list (unset, empty or `{}`, as on Compose, where the names are already the
+# declared ones) none of the three applies: an Onedata error text reaches the caller
+# byte for byte as Onedata wrote it. Transport errors and non-JSON bodies are this
+# server's own fixed host-free texts and are the same in both modes.
 _MASK = "<address>"
 # A URL starts at a token start; the scan of a hostile `a.a.a. ...` body stays linear.
 # Trailing sentence punctuation stays outside the URL.
@@ -249,7 +254,12 @@ def replace_node_names(text: str, node_names: tuple[tuple[str, str], ...]) -> st
 
 
 def redact_endpoints(text: str, config: OnedataConfig) -> str:
-    """Apply the three rules above to a service's error text; every other byte is kept."""
+    """Apply the three rules above to a service's error text; every other byte is kept.
+
+    Without a node list (`config.node_names` empty) the text is returned as it is.
+    """
+    if not config.node_names:
+        return text
     text = replace_node_names(text, config.node_names)
     text = _URL_RE.sub(_MASK, text)
     return _KEYWORD_RE.sub(_MASK, text)
@@ -263,8 +273,10 @@ def redact_json_text(text: str, config: OnedataConfig) -> str:
 
     On the serialized text an escape such as `\\n` or `\\"` would sit against a name
     and break its boundary (`\\nnode17`, `host=\\"x\\"`). A string no rule touches is
-    kept byte for byte.
+    kept byte for byte. Without a node list the whole text is kept as it is.
     """
+    if not config.node_names:
+        return text
 
     def _one(match: re.Match[str]) -> str:
         literal = match.group(0)
@@ -289,10 +301,11 @@ def http_failure_message(
 ) -> str:
     """The message for a non-2xx answer: the status, and the body when it is safe to show.
 
-    A structured (JSON) body is Onedata's own error and reaches the agent unchanged
-    but for the three rules at `redact_endpoints`. Anything else (an HTML page from
-    a gateway, plain text, bytes) is replaced by `http_<status>` and the service
-    name, because such a page may name the upstream node.
+    A structured (JSON) body is Onedata's own error and reaches the agent unchanged;
+    only when a node list is configured are the three rules at `redact_endpoints`
+    applied to it. Anything else (an HTML page from a gateway, plain text, bytes) is
+    replaced by `http_<status>` and the service name in both modes, because such a
+    page may name the upstream node.
     """
     if isinstance(body, dict | list):
         detail = redact_json_text(_format_body_for_log(body), config)

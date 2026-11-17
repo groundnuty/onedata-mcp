@@ -39,6 +39,7 @@ from onedata_mcp.utils import (
     OnedataApiError,
     OnedataInvalidSpaceError,
     redact_endpoints,
+    redact_json_text,
     replace_node_names,
     request,
     transport_error_kind,
@@ -370,19 +371,55 @@ async def test_a_description_naming_a_known_node_shows_its_declared_name(
 
 
 @pytest.mark.asyncio
-async def test_a_known_node_in_a_url_or_a_pair_reads_as_it_does_on_compose(
+async def test_with_a_node_list_a_url_and_a_pair_are_masked(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
-    """With and without the list the answer is the same: URLs and pairs are masked."""
+    """The fallback mode: URLs and `host=` / `port=` pairs read `<address>`, listed node or not."""
     _set_env(monkeypatch)
-    text = f"Contacted https://{NODE_FQDN}:{NODE_PORT}/qos, host='{NODE_FQDN}' and port={NODE_PORT}"
-    with_list = await _redacted_answer(monkeypatch, httpx_mock, text, node_names=True)
-    without_list = await _redacted_answer(monkeypatch, httpx_mock, text, node_names=False)
-
-    assert with_list == without_list
-    assert with_list == _expected_message(
-        _qos_error("Contacted <address>, <address> and <address>")
+    text = (
+        f"Contacted https://{NODE_FQDN}:{NODE_PORT}/qos, host='{NODE_FQDN}', port={NODE_PORT}, "
+        "hostname=other.example and http://unlisted.example/x"
     )
+    answer = await _redacted_answer(monkeypatch, httpx_mock, text, node_names=True)
+
+    assert answer == _expected_message(
+        _qos_error("Contacted <address>, <address>, <address>, <address> and <address>")
+    )
+
+
+@pytest.mark.asyncio
+async def test_without_a_node_list_a_url_a_pair_and_a_node_name_reach_the_caller_unchanged(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """No list: byte for byte what Onedata wrote, where a list would replace or mask each part."""
+    _set_env(monkeypatch)
+    text = (
+        f"Contacted https://{NODE_FQDN}:{NODE_PORT}/qos, host='{NODE_FQDN}', port={NODE_PORT}, "
+        f"hostname=other.example, http://unlisted.example/x and the node {NODE_FQDN}:{NODE_PORT} "
+        f"at {NODE_IP}"
+    )
+    answer = await _redacted_answer(monkeypatch, httpx_mock, text, node_names=False)
+
+    assert answer == _expected_message(_qos_error(text))
+    for part in (NODE_FQDN, NODE_PORT, NODE_IP, "host='", "hostname=other.example", "http://"):
+        assert part in answer
+    assert "<address>" not in answer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [None, "", "  ", "{}"])
+async def test_an_unset_empty_or_blank_node_list_is_the_unchanged_mode(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, value: str | None
+) -> None:
+    _set_env(monkeypatch)
+    if value is None:
+        monkeypatch.delenv("ONEDATA_MCP_NODE_NAMES", raising=False)
+    else:
+        monkeypatch.setenv("ONEDATA_MCP_NODE_NAMES", value)
+    text = f"see https://{NODE_FQDN}:{NODE_PORT}/x host={NODE_FQDN} port={NODE_PORT} {NODE_IP}"
+    error = await _post_qos_error(httpx_mock, _qos_error(text))
+
+    assert str(error) == _expected_message(_qos_error(text))
 
 
 @pytest.mark.asyncio
@@ -402,7 +439,7 @@ async def test_a_dotted_file_name_and_unlisted_names_pass_untouched(
 
 
 @pytest.mark.asyncio
-async def test_without_a_node_list_a_body_is_onedatas_text_apart_from_urls_and_pairs(
+async def test_without_a_node_list_a_body_is_onedatas_text_byte_for_byte(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
     """Compose: no list, so Onedata's own text is byte-identical, names and addresses included."""
@@ -456,11 +493,23 @@ async def test_a_known_node_after_a_newline_or_in_a_quoted_pair_is_replaced_or_m
 
 
 def test_a_pair_mask_stops_before_sentence_punctuation_and_closing_brackets() -> None:
-    config = get_oneprovider_config_for("https://provider.example")
+    config = get_oneprovider_config_for(
+        "https://provider.example", node_names=(("node-1.example", "provider-a"),)
+    )
 
     assert (
         redact_endpoints("failed on port=8443. Retry (host=x.example), {port=1}; port='9'.", config)
         == "failed on <address>. Retry (<address>), {<address>}; <address>."
+    )
+
+
+def test_redact_endpoints_without_a_node_list_is_the_identity() -> None:
+    config = get_oneprovider_config_for("https://provider.example")
+    text = f"https://{NODE_FQDN}:{NODE_PORT}/x host={NODE_FQDN} port={NODE_PORT} {NODE_IP}"
+
+    assert redact_endpoints(text, config) == text
+    assert redact_json_text(json.dumps({"d": text, "n": [text]}), config) == json.dumps(
+        {"d": text, "n": [text]}
     )
 
 
@@ -505,16 +554,45 @@ async def test_an_error_id_equal_to_a_known_node_reaches_the_span_as_its_declare
     assert "node17" not in repr(span.to_json())
 
 
+@pytest.mark.asyncio
+async def test_without_a_node_list_the_span_attributes_are_onedatas_ids_unchanged(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """The span follows the body's rule: no list, no replacement."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("test")
+    monkeypatch.setattr(telemetry, "get_tracer", lambda: tracer)
+    monkeypatch.setattr(telemetry, "_telemetry_enabled", True)
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/spaces",
+        status_code=500,
+        json={"error": {"id": "node17", "details": {"errno": "node17"}}},
+    )
+
+    with pytest.raises(OnedataApiError):
+        await request(get_oneprovider_config(), "GET", "/spaces")
+
+    span = next(s for s in exporter.get_finished_spans() if s.name == "onedata.rest GET")
+    assert span.attributes["onedata.error_id"] == "node17"
+    assert span.attributes["onedata.errno"] == "node17"
+
+
 def test_replace_node_names_with_no_list_is_the_identity() -> None:
     assert replace_node_names(f"{NODE_FQDN}:{NODE_PORT}", ()) == f"{NODE_FQDN}:{NODE_PORT}"
 
 
 @pytest.mark.parametrize("unit", ["a.", "ab.", "1.", "ab-", "1:", "1.1.", "host=' ", "http:/"])
-@pytest.mark.parametrize("listed", [False, True])
-def test_redaction_cost_stays_linear_on_hostile_input(unit: str, listed: bool) -> None:
-    """Adversarial `a.a.a. ...` bodies must not cost a rescan from every label."""
+def test_redaction_cost_stays_linear_on_hostile_input(unit: str) -> None:
+    """Adversarial `a.a.a. ...` bodies must not cost a rescan from every label.
+
+    The rules run only with a node list, so the list is given.
+    """
     config = get_oneprovider_config_for(
-        "https://provider.example", node_names=(("node-1.example", "a"),) if listed else ()
+        "https://provider.example", node_names=(("node-1.example", "a"),)
     )
     text = unit * 200_000
     started = time.perf_counter()
@@ -695,6 +773,74 @@ async def test_an_invalid_space_error_redacts_the_id_the_service_echoes(
 
     _assert_host_free(str(excinfo.value))
     assert str(excinfo.value).startswith('Space "<address>" does not exist.')
+
+
+@pytest.mark.asyncio
+async def test_without_a_node_list_an_invalid_space_error_keeps_the_id_the_service_echoes(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    echoed = f"https://{NODE_FQDN}:{NODE_PORT}/x"
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/spaces",
+        json=[],
+        is_reusable=True,
+        is_optional=True,
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/data/dsadas/children",
+        status_code=400,
+        json={
+            "error": {
+                "id": "spaceNotSupportedBy",
+                "details": {"spaceId": echoed, "providerId": "p1"},
+            }
+        },
+    )
+
+    with pytest.raises(OnedataInvalidSpaceError) as excinfo:
+        await files.list_children("dsadas", limit=10, offset=0)
+
+    assert str(excinfo.value).startswith(f'Space "{echoed}" does not exist.')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("node_names", [False, True], ids=["unset", "listed"])
+async def test_a_transport_error_and_a_non_json_body_keep_their_fixed_form_in_both_modes(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, node_names: bool
+) -> None:
+    """Library texts, not Onedata's: host-free whether or not a node list is given."""
+    _set_env(monkeypatch)
+    if node_names:
+        _set_node_names(monkeypatch)
+    httpx_mock.add_exception(
+        httpx.ConnectError(POOL_TEXT),
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/spaces",
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/data/f1",
+        status_code=502,
+        headers={"Content-Type": "text/html"},
+        text=f"<h1>Bad Gateway</h1> https://{NODE_FQDN}:{NODE_PORT} host={NODE_FQDN} {NODE_IP}",
+    )
+
+    with pytest.raises(OnedataApiError) as transport:
+        await request(get_oneprovider_config(), "GET", "/spaces")
+    with pytest.raises(OnedataApiError) as non_json:
+        await request(get_oneprovider_config(), "GET", "/data/f1")
+
+    assert str(transport.value) == (
+        "Onedata API request failed: GET /spaces - connection_error (service: oneprovider)"
+    )
+    assert str(non_json.value) == (
+        "Onedata API request failed: GET /data/f1 (status=502) - http_502 (service: oneprovider)"
+    )
+    _assert_host_free(str(transport.value))
+    _assert_host_free(str(non_json.value))
 
 
 @pytest.mark.asyncio

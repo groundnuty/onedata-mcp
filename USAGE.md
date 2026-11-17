@@ -65,13 +65,18 @@ cp .env.example .env
 
 Transport failures never show a host, address or port: the error says what kind it was
 (`timeout`, `tls_error`, `connection_error`, `http_<status>`) and which service the call was
-for (`onezone` or `oneprovider`). The full text goes to the server's own log at `DEBUG`.
+for (`onezone` or `oneprovider`). The full text goes to the server's own log at `DEBUG`. A
+non-JSON error body (a gateway's HTML page, say) is likewise replaced by `http_<status>` and
+the service name. Both are the same with or without `ONEDATA_MCP_NODE_NAMES`.
 
-An Onedata error body (its error id and description) otherwise reaches the agent unchanged,
-except that URLs and `host=` / `port=` pairs are masked as `<address>`, and any node named in
-`ONEDATA_MCP_NODE_NAMES` is replaced by its declared name. The variable holds a JSON object
-whose keys are the real host names or addresses of the federation's nodes (each optionally
-with a port: `host`, `host:port`, `[ipv6]:port`) and whose values are the declared names:
+An Onedata error body (its error id and description) is Onedata's own text. With
+`ONEDATA_MCP_NODE_NAMES` unset (or empty, or `{}`) it reaches the agent exactly as Onedata
+wrote it: nothing is replaced and nothing is masked. Only when the variable is set does the
+server act on it: any node it names is replaced by its declared name, and URLs and `host=` /
+`hostname=` / `port=` pairs are masked as `<address>` (the masks apply only with the mapping).
+The variable holds a JSON object whose keys are the real host names or addresses of the
+federation's nodes (each optionally with a port: `host`, `host:port`, `[ipv6]:port`) and whose
+values are the declared names:
 
 ```
 ONEDATA_MCP_NODE_NAMES={"node-1.site.example:8443": "provider-a", "10.0.0.5": "provider-a"}
