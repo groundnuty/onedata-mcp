@@ -100,9 +100,7 @@ async def _raise_invalid_space_error_if_needed(error: OnedataApiError, path: str
 
     if requested_space_name:
         # The id came from the service's answer: pass it through the endpoint redaction.
-        requested_space_name = redact_endpoints(
-            requested_space_name, get_oneprovider_config(), host_names=False
-        )
+        requested_space_name = redact_endpoints(requested_space_name, get_oneprovider_config())
     requested_part = (
         f'Space "{requested_space_name}" does not exist.'
         if requested_space_name

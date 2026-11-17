@@ -11,8 +11,10 @@ service name, nothing else.
 
 from __future__ import annotations
 
+import json
 import logging
 import ssl
+import time
 import traceback
 from collections.abc import Callable
 
@@ -26,12 +28,18 @@ from pytest_httpx import HTTPXMock
 
 from onedata_mcp import telemetry
 from onedata_mcp.api import files
-from onedata_mcp.config import OnedataConfig, get_oneprovider_config, get_onezone_config
+from onedata_mcp.config import (
+    OnedataConfig,
+    get_node_names,
+    get_oneprovider_config,
+    get_onezone_config,
+)
 from onedata_mcp.modules import spaces as spaces_module
 from onedata_mcp.utils import (
     OnedataApiError,
     OnedataInvalidSpaceError,
     redact_endpoints,
+    replace_node_names,
     request,
     transport_error_kind,
 )
@@ -54,13 +62,36 @@ def _set_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ONEDATA_ALLOW_INSECURE_TLS", "false")
 
 
-def get_oneprovider_config_for(host_url: str) -> OnedataConfig:
+def get_oneprovider_config_for(
+    host_url: str, node_names: tuple[tuple[str, str], ...] = ()
+) -> OnedataConfig:
     return OnedataConfig(
         base_url=f"{host_url}/api/v3/oneprovider",
         auth_headers={},
         verify_ssl=True,
         service="oneprovider",
+        node_names=node_names,
     )
+
+
+# The deploy's list for the tests: real name (with or without a port) -> declared name.
+ZONE_FQDN = "zone-host.hpc-site.example"
+NODE_IPV6 = "2001:db8::17"
+NODE_NAMES = {
+    f"{NODE_FQDN}:{NODE_PORT}": "oneprovider-a",
+    NODE_IP: "oneprovider-a",
+    ZONE_FQDN: "onezone",
+    NODE_IPV6: "oneprovider-b",
+}
+
+
+def _set_node_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ONEDATA_MCP_NODE_NAMES", json.dumps(NODE_NAMES))
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_node_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ONEDATA_MCP_NODE_NAMES", raising=False)
 
 
 def _assert_host_free(text: str) -> None:
@@ -290,119 +321,313 @@ async def test_a_service_error_page_naming_a_node_is_not_echoed(
     assert excinfo.value.response == {"status_code": 502, "body": excinfo.value.response["body"]}
 
 
-@pytest.mark.asyncio
-async def test_a_structured_onedata_error_is_kept_with_endpoints_redacted(
-    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
-) -> None:
-    """Agents self-correct from Onedata's own error id and description; only endpoints go."""
-    _set_env(monkeypatch)
+def _qos_error(description: str) -> dict:
+    return {"error": {"id": "badQosExpression", "description": description}}
+
+
+def _expected_message(body: dict) -> str:
+    return "Onedata API request failed: POST /qos_requirements (status=400) - " + json.dumps(
+        body, indent=2
+    )
+
+
+async def _post_qos_error(httpx_mock: HTTPXMock, body: dict) -> OnedataApiError:
     httpx_mock.add_response(
         method="POST",
         url="https://provider.example/api/v3/oneprovider/qos_requirements",
         status_code=400,
-        json={
-            "error": {
-                "id": "badQosExpression",
-                "description": (
-                    "Invalid QoS expression near '==': use '=' instead. "
-                    f"Contacted https://{NODE_FQDN}:{NODE_PORT}/qos and {NODE_IP}:{NODE_PORT} "
-                    "and provider.example"
-                ),
-            }
-        },
+        json=body,
     )
-
     with pytest.raises(OnedataApiError) as excinfo:
         await request(get_oneprovider_config(), "POST", "/qos_requirements", json_body={})
-
-    message = str(excinfo.value)
-    assert "badQosExpression" in message
-    assert "Invalid QoS expression near '==': use '=' instead." in message
-    _assert_host_free(message)
-    assert "provider.example" not in message
-    assert excinfo.value.error_id == "badQosExpression"
+    return excinfo.value
 
 
-@pytest.mark.parametrize(
-    "leaky",
-    [
-        "HTTPSConnectionPool(host='node-99.other-site.example', port=8443): Max retries exceeded",
-        "unreachable 2001:db8::17 and fe80::1 and [2001:db8::1]:8443",
-        "unreachable 2001:db8:0:0:0:0:0:17",
-        "contacted node17:8443 and node-99.other-site.example:9443/path",
-        "contacted http://node-99.other-site.example/x and 192.0.2.7",
-    ],
-)
 @pytest.mark.asyncio
-async def test_endpoint_shapes_in_a_service_description_are_redacted(
-    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, leaky: str
+async def test_a_description_naming_a_known_node_shows_its_declared_name(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
-    """A node other than the configured one, in the shapes a transport or a service prints."""
+    """The deploy's list maps a node's name, with the port that follows it, to its declared name."""
     _set_env(monkeypatch)
+    _set_node_names(monkeypatch)
+    error = await _post_qos_error(
+        httpx_mock,
+        _qos_error(
+            f"Invalid QoS expression near '==': use '=' instead. Provider {NODE_FQDN}:{NODE_PORT} "
+            f"could not reach {NODE_IP} or {ZONE_FQDN}, nor [{NODE_IPV6}]:{NODE_PORT}."
+        ),
+    )
+
+    assert str(error) == _expected_message(
+        _qos_error(
+            "Invalid QoS expression near '==': use '=' instead. Provider oneprovider-a "
+            "could not reach oneprovider-a or onezone, nor oneprovider-b."
+        )
+    )
+    for leak in (NODE_FQDN, NODE_PORT, NODE_IP, ZONE_FQDN, NODE_IPV6):
+        assert leak not in str(error)
+    assert error.error_id == "badQosExpression"
+
+
+@pytest.mark.asyncio
+async def test_a_known_node_in_a_url_or_a_pair_reads_as_it_does_on_compose(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """With and without the list the answer is the same: URLs and pairs are masked."""
+    _set_env(monkeypatch)
+    text = f"Contacted https://{NODE_FQDN}:{NODE_PORT}/qos, host='{NODE_FQDN}' and port={NODE_PORT}"
+    with_list = await _redacted_answer(monkeypatch, httpx_mock, text, node_names=True)
+    without_list = await _redacted_answer(monkeypatch, httpx_mock, text, node_names=False)
+
+    assert with_list == without_list
+    assert with_list == _expected_message(
+        _qos_error("Contacted <address>, <address> and <address>")
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_dotted_file_name_and_unlisted_names_pass_untouched(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    _set_node_names(monkeypatch)
+    text = (
+        "No such file /space/notes.txt or data.v2.csv (e.g. a.b), at 12:30:45 on "
+        "2026-11-16T12:30:45Z, v1.2.3-beta, std::string, other-node.site.example and 192.0.2.7, "
+        f"{NODE_FQDN}0 and x{NODE_FQDN} and {NODE_IP}9 are not the listed nodes"
+    )
+    error = await _post_qos_error(httpx_mock, _qos_error(text))
+
+    assert str(error) == _expected_message(_qos_error(text))
+
+
+@pytest.mark.asyncio
+async def test_without_a_node_list_a_body_is_onedatas_text_apart_from_urls_and_pairs(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """Compose: no list, so Onedata's own text is byte-identical, names and addresses included."""
+    _set_env(monkeypatch)
+    plain = _qos_error(
+        f"Invalid near '==' for {NODE_FQDN}:{NODE_PORT} {NODE_IP} {NODE_IPV6} lab.data notes.txt "
+        f"hostname 'x.example' doesn't match 'y.example'; Host: h.example"
+    )
+    error = await _post_qos_error(httpx_mock, plain)
+
+    assert str(error) == _expected_message(plain)
+
+
+async def _redacted_answer(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, text: str, *, node_names: bool
+) -> str:
+    if node_names:
+        _set_node_names(monkeypatch)
+    else:
+        monkeypatch.delenv("ONEDATA_MCP_NODE_NAMES", raising=False)
+    return str(await _post_qos_error(httpx_mock, _qos_error(text)))
+
+
+def test_replace_node_names_matches_whole_names_case_insensitively() -> None:
+    names = (("node1", "short"), ("node1.hpc.example", "long"), ("2001:db8::1", "v6"))
+    replaced = replace_node_names(
+        "NODE1.HPC.EXAMPLE:8443, node1:9000. node10 node1.other.example x-node1 [2001:db8::1]:8443 "
+        "2001:db8::1 2001:db8::10 and node1.",
+        names,
+    )
+
+    assert replaced == (
+        "long, short. node10 node1.other.example x-node1 v6 v6 2001:db8::10 and short."
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_known_node_after_a_newline_or_in_a_quoted_pair_is_replaced_or_masked(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """Redaction reads the decoded strings: `\\n` and `\\"` in the JSON text break no boundary."""
+    _set_env(monkeypatch)
+    monkeypatch.setenv("ONEDATA_MCP_NODE_NAMES", json.dumps({"node17": "provider-a"}))
+    error = await _post_qos_error(
+        httpx_mock, _qos_error('Failed:\nnode17:8443\tand host="node17" failed\nport=9')
+    )
+
+    assert str(error) == _expected_message(
+        _qos_error("Failed:\nprovider-a\tand <address> failed\n<address>")
+    )
+
+
+def test_a_pair_mask_stops_before_sentence_punctuation_and_closing_brackets() -> None:
+    config = get_oneprovider_config_for("https://provider.example")
+
+    assert (
+        redact_endpoints("failed on port=8443. Retry (host=x.example), {port=1}; port='9'.", config)
+        == "failed on <address>. Retry (<address>), {<address>}; <address>."
+    )
+
+
+def test_a_listed_ipv6_address_does_not_match_inside_a_longer_one() -> None:
+    names = (("2001:db8::1", "v6"),)
+
+    assert (
+        replace_node_names(
+            "a 2001:db8::1:2, b 2001:db8::1: c [2001:db8::1]:8443 d 12001:db8::1 e (2001:db8::1) "
+            "f peer:2001:db8::1 unavailable",
+            names,
+        )
+        == "a 2001:db8::1:2, b v6: c v6 d 12001:db8::1 e (v6) f peer:v6 unavailable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_error_id_equal_to_a_known_node_reaches_the_span_as_its_declared_name(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("test")
+    monkeypatch.setattr(telemetry, "get_tracer", lambda: tracer)
+    monkeypatch.setattr(telemetry, "_telemetry_enabled", True)
+    _set_env(monkeypatch)
+    monkeypatch.setenv("ONEDATA_MCP_NODE_NAMES", json.dumps({"node17": "provider-a"}))
     httpx_mock.add_response(
         method="GET",
         url="https://provider.example/api/v3/oneprovider/spaces",
         status_code=500,
-        json={"error": {"id": "internalServerError", "description": leaky}},
+        json={"error": {"id": "node17", "details": {"errno": "node17"}}},
     )
 
-    with pytest.raises(OnedataApiError) as excinfo:
+    with pytest.raises(OnedataApiError):
         await request(get_oneprovider_config(), "GET", "/spaces")
 
-    message = str(excinfo.value)
-    for fragment in ("99.other-site", "node17", "2001:db8", "fe80", "192.0.2.7", "8443", "9443"):
-        assert fragment not in message, f"{fragment!r} leaked into {message!r}"
-    assert "internalServerError" in message
+    span = next(s for s in exporter.get_finished_spans() if s.name == "onedata.rest GET")
+    assert span.attributes["onedata.error_id"] == "provider-a"
+    assert span.attributes["onedata.errno"] == "provider-a"
+    assert "node17" not in repr(span.to_json())
 
 
-def test_redaction_leaves_times_versions_and_prose_alone() -> None:
-    text = (
-        "at 12:30:45 on 2026-11-16T12:30:45Z ratio 3:10, std::string, v1.2.3-beta, "
-        "i.e. p.m. e.g. a.b, "
-        "Invalid QoS expression near '==': use '=' instead (e.g. country=PL)."
+def test_replace_node_names_with_no_list_is_the_identity() -> None:
+    assert replace_node_names(f"{NODE_FQDN}:{NODE_PORT}", ()) == f"{NODE_FQDN}:{NODE_PORT}"
+
+
+@pytest.mark.parametrize("unit", ["a.", "ab.", "1.", "ab-", "1:", "1.1.", "host=' ", "http:/"])
+@pytest.mark.parametrize("listed", [False, True])
+def test_redaction_cost_stays_linear_on_hostile_input(unit: str, listed: bool) -> None:
+    """Adversarial `a.a.a. ...` bodies must not cost a rescan from every label."""
+    config = get_oneprovider_config_for(
+        "https://provider.example", node_names=(("node-1.example", "a"),) if listed else ()
     )
-    assert redact_endpoints(text, get_oneprovider_config_for("https://provider.example")) == text
+    text = unit * 200_000
+    started = time.perf_counter()
+    redact_endpoints(text, config)
+    assert time.perf_counter() - started < 5.0
+
+
+# ---------------------------------------------------------------------------
+# The deploy's input: ONEDATA_MCP_NODE_NAMES
+# ---------------------------------------------------------------------------
+
+
+def test_node_names_unset_or_empty_means_no_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ONEDATA_MCP_NODE_NAMES", raising=False)
+    assert get_node_names() == ()
+    monkeypatch.setenv("ONEDATA_MCP_NODE_NAMES", "  ")
+    assert get_node_names() == ()
+    monkeypatch.setenv("ONEDATA_MCP_NODE_NAMES", "{}")
+    assert get_node_names() == ()
+
+
+def test_node_names_keys_are_hosts_with_or_without_a_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "ONEDATA_MCP_NODE_NAMES",
+        json.dumps(
+            {
+                "Node-1.Site.Example:8443": "provider-a",
+                "node-1.site.example": "provider-a",
+                "10.0.0.5": "provider-a",
+                "[2001:db8::5]:8443": "provider-b",
+                "2001:db8::6": "provider-b",
+            }
+        ),
+    )
+
+    assert get_node_names() == (
+        ("10.0.0.5", "provider-a"),
+        ("2001:db8::5", "provider-b"),
+        ("2001:db8::6", "provider-b"),
+        ("node-1.site.example", "provider-a"),
+    )
 
 
 @pytest.mark.parametrize(
-    "leaky",
+    "value",
     [
-        "hostname 'node-99.other-site.example' doesn't match 'cert.other-site.example'",
-        "hostname 'node-99.other-site.example' doesn't match 'a.other-site'",
-        "hostname 'node-99.other-site.example' doesn't match 'x.example'",
-        "hostname 'node99' doesn't match",
-        "gave up on node-99.other-site.example.",
-        "gave up on 192.0.2.7.",
+        "not json secret-node.example",
+        '["secret-node.example"]',
+        '{"secret-node.example": ""}',
+        '{"secret-node.example": 5}',
+        '{"": "provider-a"}',
+        '{"https://secret-node.example/x": "provider-a"}',
+        '{"secret node.example": "provider-a"}',
+        '{"secret-node.example": "a", "secret-node.example:8443": "b"}',
     ],
 )
-def test_redaction_masks_host_names_and_addresses_with_sentence_punctuation(leaky: str) -> None:
-    redacted = redact_endpoints(leaky, get_oneprovider_config_for("https://provider.example"))
-    for fragment in ("99", "other-site", "192.0.2.7", "x.example", "a.example"):
-        assert fragment not in redacted, f"{fragment!r} survived in {redacted!r}"
+def test_a_malformed_node_list_is_refused_without_echoing_its_value(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("ONEDATA_MCP_NODE_NAMES", value)
+
+    with pytest.raises(ValueError, match="ONEDATA_MCP_NODE_NAMES") as excinfo:
+        get_node_names()
+
+    assert "secret-node" not in str(excinfo.value)
+    assert excinfo.value.__cause__ is None
 
 
-def test_redaction_keeps_a_dotted_name_the_agent_typed_when_asked_to() -> None:
-    config = get_oneprovider_config_for("https://provider.example")
-    assert redact_endpoints("lab.data", config, host_names=False) == "lab.data"
-    assert redact_endpoints("lab.data", config) == "<address>"
-    # URLs and addresses go either way.
-    assert redact_endpoints("https://n.example:8443/x", config, host_names=False) == "<address>"
+def test_the_server_refuses_to_start_on_a_malformed_node_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from onedata_mcp import main as main_module
+
+    monkeypatch.setenv("ONEDATA_MCP_NODE_NAMES", "{")
+
+    with pytest.raises(ValueError, match="ONEDATA_MCP_NODE_NAMES"):
+        main_module._create_onedata_mcp_server()
 
 
-@pytest.mark.parametrize("unit", ["a.", "ab.", "1.", "ab-", "1:", "1.1."])
-def test_redaction_cost_stays_linear_on_hostile_input(unit: str) -> None:
-    """Adversarial `a.a.a. ...` bodies must not cost a rescan from every label."""
-    import time
+def test_both_config_getters_carry_the_node_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_env(monkeypatch)
+    _set_node_names(monkeypatch)
 
-    config = get_oneprovider_config_for("https://provider.example")
-    text = unit * 200_000
-    started = time.perf_counter()
-    redacted = redact_endpoints(text, config)
-    elapsed = time.perf_counter() - started
+    assert get_onezone_config().node_names == get_oneprovider_config().node_names
+    assert ("node-17.hpc-site.example", "oneprovider-a") in get_oneprovider_config().node_names
 
-    assert elapsed < 5.0
-    assert redacted.endswith("...(truncated)")
-    assert len(redacted) < 20_000  # the input was cut at 8192 characters before the work
+
+@pytest.mark.asyncio
+async def test_a_tool_answer_shows_the_declared_name_of_a_known_node(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """Through FastMCP, as the agent sees it."""
+    _set_env(monkeypatch)
+    _set_node_names(monkeypatch)
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/spaces",
+        status_code=500,
+        json={
+            "error": {"id": "internalServerError", "description": f"{NODE_FQDN}:{NODE_PORT} down"}
+        },
+    )
+    mcp = FastMCP(name="onedata-mcp-test")
+    spaces_module.register_module(mcp)
+
+    async with Client(mcp) as client:
+        result = await client.call_tool("list_user_spaces", {}, raise_on_error=False)
+
+    text = "\n".join(c.text for c in result.content if hasattr(c, "text"))
+    assert result.is_error is True
+    assert "oneprovider-a down" in text
+    assert NODE_FQDN not in text
+    assert NODE_PORT not in text
 
 
 @pytest.mark.asyncio
@@ -445,6 +670,7 @@ async def test_an_invalid_space_error_redacts_the_id_the_service_echoes(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
     _set_env(monkeypatch)
+    _set_node_names(monkeypatch)
     httpx_mock.add_response(
         method="GET",
         url="https://provider.example/api/v3/oneprovider/spaces",
@@ -486,8 +712,6 @@ async def test_a_structured_error_without_endpoints_is_unchanged(
 
     with pytest.raises(OnedataApiError) as excinfo:
         await request(get_oneprovider_config(), "GET", "/data/f1")
-
-    import json
 
     assert str(excinfo.value) == (
         "Onedata API request failed: GET /data/f1 (status=404) - " + json.dumps(body, indent=2)

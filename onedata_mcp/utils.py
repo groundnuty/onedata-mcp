@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import logging
 import re
@@ -189,68 +190,92 @@ def transport_failure(
     )
 
 
-# Patterns for the endpoints a service or a transport library prints. Every one
-# that scans a run of name characters starts at the beginning of a token
-# (`(?<![\w.+-])`) and every other repetition is bounded, so a hostile body of
-# `a.a.a.a. ...` costs linear time, not a rescan from each label.
-_TOKEN_START = r"(?<![\w.+-])"
-_URL_RE = re.compile(_TOKEN_START + r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>)\]\\]+")
-# `host='x'`, `port=8443`, `hostname 'x'` (a pool's or a certificate check's repr).
+# What the structured JSON body of a non-2xx answer may not show. Onedata's own error
+# ids and descriptions reach the agent unchanged, except for exactly three things:
+#   1. a node the deploy named in ONEDATA_MCP_NODE_NAMES (its host name or address,
+#      with a port that follows it) is replaced by its DECLARED name, so the text an
+#      agent sees is the same on every deployment of the same layout;
+#   2. a URL is masked;
+#   3. a `host=` or `port=` pair is masked.
+# Anything else, a dotted file name included, passes untouched. Both masks run after
+# the replacement, so a URL or a pair naming a known node reads `<address>` exactly as
+# it does where no list is given (Compose).
+_MASK = "<address>"
+# A URL starts at a token start; the scan of a hostile `a.a.a. ...` body stays linear.
+# Trailing sentence punctuation stays outside the URL.
+_URL_RE = re.compile(r"(?<![\w.+-])[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>)\]\\]*[^\s'\"<>)\]\\.,;:!?]")
+# `host='x'`, `hostname=x`, `port=8443` (a connection pool's repr).
 _KEYWORD_RE = re.compile(
-    r"\b(?:host|hostname|port)(?:\s*[=:]\s*|\s+(?=['\"]))(?:'[^']*'|\"[^\"]*\"|[^\s,;)'\"]+)",
+    r"\b(?:host|hostname|port)\s*=\s*"
+    r"(?:'[^']*'|\"[^\"]*\"|[^\s,;)\]}'\"]*[^\s,;)\]}'\".:!?])",
     re.IGNORECASE,
 )
-# A bracketed IPv6 literal, a bare one (eight groups, or with `::`; a time like
-# 12:30:45 is neither), and an IPv4 address.
-_IPV6_BRACKET_RE = re.compile(r"\[[0-9A-Fa-f:.]{2,45}\](?::\d{1,5})?")
-_IPV6_FULL_RE = re.compile(r"(?<![\w:])(?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}(?![\w:])")
-_IPV6_SHORT_RE = re.compile(
-    r"(?<![\w:])(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6})?::"
-    r"(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6})?(?![\w:])"
-)
-_IPV4_RE = re.compile(_TOKEN_START + r"\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?(?!\w)")
-# `name:port` for a dotted or a single-label name.
-_HOST_PORT_RE = re.compile(
-    _TOKEN_START
-    + r"(?:[A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z0-9-]+)*"
-    + r"|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+):\d{2,5}(?!\w)"
-)
-# A host-name-shaped token: two or more labels, the last alphabetic and of two or more
-# characters. `e.g.`, `p.m.`, `v1.2` and `a.b` are not; `a.example`, `notes.txt` and
-# `node.site.example` are.
-_FQDN_RE = re.compile(_TOKEN_START + r"(?:[A-Za-z0-9][A-Za-z0-9-]*\.)+[A-Za-z][A-Za-z-]+(?![\w-])")
-_ENDPOINT_PATTERNS = (
-    _URL_RE,
-    _KEYWORD_RE,
-    _IPV6_BRACKET_RE,
-    _IPV6_FULL_RE,
-    _IPV6_SHORT_RE,
-    _HOST_PORT_RE,
-    _IPV4_RE,
-)
-# A service's error body is a sentence or two. A longer one is cut, which also
-# bounds the work done on it.
-_MAX_REDACTED_CHARS = 8192
 
 
-def redact_endpoints(text: str, config: OnedataConfig, *, host_names: bool = True) -> str:
-    """Replace URLs, `host:port` pairs, IP addresses, host names and this service's own host.
+@functools.lru_cache(maxsize=8)
+def _node_name_regex(hosts: tuple[str, ...]) -> re.Pattern[str]:
+    """One pattern for the given hosts: the longest first, whole names only.
 
-    Applied to the structured JSON error bodies a service answers with, which are
-    kept in an error message because an agent corrects itself from Onedata's own
-    error id and description. The text is cut at `_MAX_REDACTED_CHARS`. With
-    `host_names=False`, bare dotted names (a space called `lab.data`) are left
-    alone, for a value the agent itself typed that the service echoes back.
+    A host may be followed by a port, which goes with it (`[v6]:8443` for an IPv6
+    address). `node1` does not match inside `node10` or `node1.other.example`.
     """
-    if len(text) > _MAX_REDACTED_CHARS:
-        text = text[:_MAX_REDACTED_CHARS] + "...(truncated)"
-    patterns = _ENDPOINT_PATTERNS + ((_FQDN_RE,) if host_names else ())
-    for pattern in patterns:
-        text = pattern.sub("<address>", text)
-    host = urlparse(config.base_url).hostname
-    if host:
-        text = re.sub(re.escape(host), "<address>", text, flags=re.IGNORECASE)
-    return text
+    ordered = sorted(hosts, key=len, reverse=True)
+    plain = "|".join(re.escape(h) for h in ordered if ":" not in h)
+    bare6 = "|".join(re.escape(h) for h in ordered if ":" in h)
+    every = "|".join(re.escape(h) for h in ordered)
+    named = []
+    if plain:
+        named.append(rf"(?P<plain>{plain})(?::\d{{1,5}})?")
+    named.append(rf"\[(?P<bracket>{every})\](?::\d{{1,5}})?")
+    alternatives = [r"(?<![\w.-])(?:" + "|".join(named) + r")(?![\w-]|\.\w)"]
+    if bare6:
+        # A bare IPv6 address may follow a prose colon (`peer:2001:db8::1`); one that is
+        # followed by `:<hex>` is read as a longer address and left alone.
+        alternatives.append(rf"(?<![\w.-])(?P<bare6>{bare6})(?![\w-]|\.\w|:[0-9A-Fa-f])")
+    return re.compile("|".join(alternatives), re.IGNORECASE)
+
+
+def replace_node_names(text: str, node_names: tuple[tuple[str, str], ...]) -> str:
+    """Replace each known node's name or address in `text` by its declared name."""
+    if not node_names:
+        return text
+    declared = dict(node_names)
+    pattern = _node_name_regex(tuple(declared))
+
+    def _declared_name(match: re.Match[str]) -> str:
+        return declared[match.group(match.lastgroup or "plain").lower()]
+
+    return pattern.sub(_declared_name, text)
+
+
+def redact_endpoints(text: str, config: OnedataConfig) -> str:
+    """Apply the three rules above to a service's error text; every other byte is kept."""
+    text = replace_node_names(text, config.node_names)
+    text = _URL_RE.sub(_MASK, text)
+    return _KEYWORD_RE.sub(_MASK, text)
+
+
+_JSON_STRING_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
+
+
+def redact_json_text(text: str, config: OnedataConfig) -> str:
+    """`redact_endpoints` applied to each string of serialized JSON, as decoded.
+
+    On the serialized text an escape such as `\\n` or `\\"` would sit against a name
+    and break its boundary (`\\nnode17`, `host=\\"x\\"`). A string no rule touches is
+    kept byte for byte.
+    """
+
+    def _one(match: re.Match[str]) -> str:
+        literal = match.group(0)
+        try:
+            decoded = json.loads(literal)
+        except ValueError:  # not JSON (the repr fallback): redact the literal as it is
+            return redact_endpoints(literal, config)
+        redacted = redact_endpoints(decoded, config)
+        return literal if redacted == decoded else json.dumps(redacted)
+
+    return _JSON_STRING_RE.sub(_one, text)
 
 
 def http_failure_message(
@@ -264,13 +289,13 @@ def http_failure_message(
 ) -> str:
     """The message for a non-2xx answer: the status, and the body when it is safe to show.
 
-    A structured (JSON) body is Onedata's own error and is kept, with endpoints
-    redacted. Anything else (an HTML page from a gateway, plain text, bytes) is
-    replaced by `http_<status>` and the service name, because such a page may
-    name the upstream node.
+    A structured (JSON) body is Onedata's own error and reaches the agent unchanged
+    but for the three rules at `redact_endpoints`. Anything else (an HTML page from
+    a gateway, plain text, bytes) is replaced by `http_<status>` and the service
+    name, because such a page may name the upstream node.
     """
     if isinstance(body, dict | list):
-        detail = redact_endpoints(_format_body_for_log(body), config)
+        detail = redact_json_text(_format_body_for_log(body), config)
     else:
         detail = f"http_{status} (service: {config.service})"
     return f"{label}: {method} {path} (status={status}) - {detail}"
@@ -376,9 +401,13 @@ async def request(
                     )
                     if span is not None:
                         if onedata_error.error_id:
-                            span.set_attribute("onedata.error_id", onedata_error.error_id)
+                            span.set_attribute(
+                                "onedata.error_id", redact_endpoints(onedata_error.error_id, config)
+                            )
                         if onedata_error.errno:
-                            span.set_attribute("onedata.errno", onedata_error.errno)
+                            span.set_attribute(
+                                "onedata.errno", redact_endpoints(onedata_error.errno, config)
+                            )
                     _mark_span_error(span, f"HTTP {response.status_code}")
     except Exception as e:
         # Anything else that went wrong around the call: still host-free.

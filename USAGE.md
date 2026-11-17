@@ -56,9 +56,32 @@ cp .env.example .env
 | Variable                       | Meaning                                                                        |
 |--------------------------------|---------------------------------------------------------------------------------|
 | `ONEDATA_ALLOW_INSECURE_TLS`   | Set to `true` only if your federation uses self-signed TLS (development only). |
+| `ONEDATA_MCP_NODE_NAMES`       | JSON object of real node name -> declared name (see below). Unset by default.  |
 | `FASTMCP_LOG_LEVEL`            | Server log level (default `INFO`; `DEBUG` for verbose).                        |
 | `FASTMCP_LOG_FILE`             | If set, logs are also appended to this file.                                   |
 | `MCP_TRANSPORT`                | Set to `http` for the HTTP transport (default is `stdio`). See § 9.            |
+
+### Keeping node names out of error messages
+
+Transport failures never show a host, address or port: the error says what kind it was
+(`timeout`, `tls_error`, `connection_error`, `http_<status>`) and which service the call was
+for (`onezone` or `oneprovider`). The full text goes to the server's own log at `DEBUG`.
+
+An Onedata error body (its error id and description) otherwise reaches the agent unchanged,
+except that URLs and `host=` / `port=` pairs are masked as `<address>`, and any node named in
+`ONEDATA_MCP_NODE_NAMES` is replaced by its declared name. The variable holds a JSON object
+whose keys are the real host names or addresses of the federation's nodes (each optionally
+with a port: `host`, `host:port`, `[ipv6]:port`) and whose values are the declared names:
+
+```
+ONEDATA_MCP_NODE_NAMES={"node-1.site.example:8443": "provider-a", "10.0.0.5": "provider-a"}
+```
+
+Matching is case-insensitive and on whole names; a port that follows a listed name goes with
+it. List every name the federation is reachable by, the configured zone and provider hosts
+included. Leave the variable unset where the real names are already the declared ones (Docker
+Compose). A malformed value stops the server at launch with an error that names the variable
+and the format, never its value.
 
 ### How to get an Onedata token
 
