@@ -36,7 +36,7 @@ That should print the server's startup banner. (The server starts in stdio mode 
 
 ## 3. Configure (environment + tokens)
 
-The server reads its configuration from process environment variables, with a `.env` file in the working directory as a convenience. Copy the template and fill it in:
+The server reads its configuration from process environment variables, with a `.env` file as a convenience: it loads the first one it finds from the directory of its installed `onedata_mcp` package upward to `/` (in a checkout, the repository's own `.env`), never from the working directory of an installed server, and a variable already in the environment is not overridden by it. To read no `.env` at all, see "Reading no `.env` file" below. Copy the template and fill it in:
 
 ```bash
 cp .env.example .env
@@ -57,9 +57,28 @@ cp .env.example .env
 |--------------------------------|---------------------------------------------------------------------------------|
 | `ONEDATA_ALLOW_INSECURE_TLS`   | Set to `true` only if your federation uses self-signed TLS (development only). |
 | `ONEDATA_MCP_NODE_NAMES`       | JSON object of real node name -> declared name (see below). Unset by default.  |
+| `ONEDATA_MCP_DOTENV`           | Set to `0` in the process environment to read no `.env` file (see below).      |
 | `FASTMCP_LOG_LEVEL`            | Server log level (default `INFO`; `DEBUG` for verbose).                        |
 | `FASTMCP_LOG_FILE`             | If set, logs are also appended to this file.                                   |
 | `MCP_TRANSPORT`                | Set to `http` for the HTTP transport (default is `stdio`). See § 9.            |
+
+### Reading no `.env` file
+
+By default `onedata_mcp.config` loads a `.env` when it is imported, with python-dotenv's default search:
+from the directory of the installed `onedata_mcp` package upward to `/`, the first file found. A variable
+already in the process environment is never overridden, but one the launch leaves unset is filled in. So a
+`.env` in any directory above the package, such as the shared home directory of an account several people
+use, can set any `ONEDATA_*` setting (the node names included) with nothing in the launch saying so.
+
+A launch that must say everything it sets puts `ONEDATA_MCP_DOTENV=0` in the server's process
+environment, and then no `.env` is read. Only the value `0` (spaces around it are ignored) switches the
+read off; unset, empty or any other value keeps the default above, so a server launched as before behaves
+as before. The word is read from the process environment before any file is, so it does nothing inside a
+`.env`.
+
+It covers this server's own read. FastMCP, which the server is built on, separately reads a `.env` in the
+**working directory** for its own `FASTMCP_*` settings. A launch that wants no file read anywhere also
+starts the server in an empty working directory of its own.
 
 ### Keeping node names out of error messages
 

@@ -32,7 +32,23 @@ class OnedataRuntimeConfig:
 logger = logging.getLogger(__name__)
 
 
-load_dotenv()
+DOTENV_ENV = "ONEDATA_MCP_DOTENV"
+
+
+def dotenv_enabled() -> bool:
+    """Whether this process may read a `.env` file: always, unless ONEDATA_MCP_DOTENV is `0`.
+
+    python-dotenv's default search starts at the directory of the file that calls it (the
+    installed package) and walks up to `/`, so a `.env` in any ancestor of the package can set
+    a setting the launch left unset. A launch that says everything it sets puts
+    `ONEDATA_MCP_DOTENV=0` in the process environment, and then no `.env` is read. The word is
+    read from the environment only (a `.env` cannot switch itself off: it is read after).
+    """
+    return os.environ.get(DOTENV_ENV, "").strip() != "0"
+
+
+if dotenv_enabled():
+    load_dotenv()
 
 NODE_NAMES_ENV = "ONEDATA_MCP_NODE_NAMES"
 _NODE_NAMES_FORMAT = (
