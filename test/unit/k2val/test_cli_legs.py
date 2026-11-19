@@ -315,7 +315,9 @@ def test_cli_legs_are_off_until_a_wrapper_is_set_and_a_clean_scan_exists(cfg, tm
     assert not ok and "no scan record" in why
 
     def record(matches: int, fp: str | None = None) -> None:
-        rec = build_record(jailed, conf, scan_texts({"prompts": "x" * matches}, ["x"], []), 1, 0)
+        rec = build_record(
+            jailed, conf, scan_texts({"prompts": " ".join(["x"] * matches)}, ["x"], []), 1, 0
+        )
         if fp:
             rec["fingerprint"] = fp
         write_scan_record(tmp_path, None, rec)
