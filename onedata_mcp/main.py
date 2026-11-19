@@ -12,7 +12,7 @@ from onedata_mcp.token_policy import (
     WRITE_TOOL_NAMES,
     resolve_register_write_tools_sync,
 )
-from onedata_mcp.tool_maturity import tools_to_remove
+from onedata_mcp.tool_maturity import registered_surface, tools_to_remove
 
 # Base server instructions — the validated, headline surface. Kept as a module
 # constant so the default (experimental off) is byte-identical.
@@ -123,7 +123,7 @@ def _create_onedata_mcp_server() -> FastMCP:
     # allowlist) prune the exposed surface. With neither set, the full surface
     # stays. Model-invisible; same by-name prune as the read-only-token guard
     # above. See onedata_mcp/tool_maturity.py.
-    for tool_name in tools_to_remove():
+    for tool_name in tools_to_remove(registered_surface(experimental)):
         try:
             mcp.local_provider.remove_tool(tool_name)
         except Exception as exc:  # noqa: BLE001 — best-effort prune; log + continue

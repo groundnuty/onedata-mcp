@@ -9,6 +9,7 @@ from fastmcp import FastMCP
 from pytest_httpx import HTTPXMock
 
 from onedata_mcp import experimental
+from onedata_mcp import tool_maturity as tm
 from onedata_mcp.modules import files, harvesters, metadata, qos, readiness, spaces, transfers
 
 
@@ -148,6 +149,81 @@ async def test_main_build_on(monkeypatch: pytest.MonkeyPatch) -> None:
     srv = main._create_onedata_mcp_server()
     assert srv.instructions == main._EXPERIMENTAL_INSTRUCTIONS
     assert len({t.name for t in await srv.list_tools()}) == 31
+
+
+# --- classification: every tool registered with the flag on is classified ---
+
+
+@pytest.mark.asyncio
+async def test_registered_surface_matches_the_classification_in_both_modes() -> None:
+    for exp in (False, True):
+        registered = {t.name for t in await _build(exp).list_tools()}
+        assert registered == tm.registered_surface(exp), f"experimental={exp}"
+    assert tm.registered_surface(True) == tm.ALL_KNOWN | tm.FLAG_GATED
+
+
+def test_flag_gated_tools_are_experimental_and_upstream_adapted() -> None:
+    """Never panel-validated; adapted from later upstream commits (not in UPSTREAM)."""
+    assert {"list_space_datasets", "set_file_xattrs"} == tm.FLAG_GATED
+    assert not (tm.FLAG_GATED & tm.ALL_KNOWN)  # absent from the default surface
+    for name in tm.FLAG_GATED:
+        assert tm.maturity_of(name) == "experimental"
+        assert tm.origin_of(name) == "upstream"
+        assert name not in tm.STABLE | tm.EXPERIMENTAL | tm.UPSTREAM
+
+
+# --- launch-time selection and the read-only token prune see the new tools ---
+
+
+def _server(monkeypatch: pytest.MonkeyPatch, *, flag: str | None, writable: bool = True):
+    if flag is None:
+        monkeypatch.delenv("ONEDATA_MCP_EXPERIMENTAL", raising=False)
+    else:
+        monkeypatch.setenv("ONEDATA_MCP_EXPERIMENTAL", flag)
+    monkeypatch.setattr("onedata_mcp.main.resolve_register_write_tools_sync", lambda: writable)
+    from onedata_mcp import main
+
+    return main._create_onedata_mcp_server()
+
+
+@pytest.mark.asyncio
+async def test_flag_on_stable_maturity_prunes_the_flag_gated_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ONEDATA_MCP_MATURITY", "stable")
+    srv = _server(monkeypatch, flag="1")
+    assert {t.name for t in await srv.list_tools()} == set(tm.STABLE)
+
+
+@pytest.mark.asyncio
+async def test_flag_on_explicit_tools_can_select_a_flag_gated_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ONEDATA_MCP_TOOLS", "set_file_xattrs, list_user_spaces")
+    srv = _server(monkeypatch, flag="1")
+    assert {t.name for t in await srv.list_tools()} == {"set_file_xattrs", "list_user_spaces"}
+
+
+@pytest.mark.asyncio
+async def test_flag_off_explicit_tools_ignore_a_flag_gated_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ONEDATA_MCP_TOOLS", "set_file_xattrs, list_user_spaces")
+    srv = _server(monkeypatch, flag=None)
+    assert {t.name for t in await srv.list_tools()} == {"list_user_spaces"}
+
+
+@pytest.mark.asyncio
+async def test_read_only_token_prunes_set_file_xattrs_but_keeps_list_space_datasets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from onedata_mcp.token_policy import WRITE_TOOL_NAMES
+
+    writable = {t.name for t in await _server(monkeypatch, flag="1").list_tools()}
+    read_only = {t.name for t in await _server(monkeypatch, flag="1", writable=False).list_tools()}
+    assert {"set_file_xattrs", "list_space_datasets"} <= writable
+    assert read_only == writable - WRITE_TOOL_NAMES - {"set_file_xattrs"}
+    assert "list_space_datasets" in read_only
 
 
 # --- candidate behaviour ---------------------------------------------------
