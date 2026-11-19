@@ -214,6 +214,10 @@ logins appears in it. That allowlist is not yet checked against a real run and i
 - The CLIs' account-level tools still act on the logged-in account. agy auto-approves tools such as knowledge, inbox
   and subagent management, which work on server-side account state. Use dedicated vendor accounts.
 - A token refreshed inside the jail is discarded, and two concurrent trials share one login.
+- The login sits in the jail's home, readable by the CLI's own shell and file tools, and public egress is open on every
+  port. A misbehaving or prompt-injected agent could therefore send that token anywhere on the internet, not only to its
+  vendor. This follows from running the vendor's CLI with its login and internet access; dedicated accounts limit what
+  a stolen token reaches.
 
 **How to verify.**
 1. `make test`: the unit tests of the forwarders, `netns.py`, `keep_home.py`, the bwrap arguments
@@ -238,7 +242,13 @@ logins appears in it. That allowlist is not yet checked against a real run and i
       left, and the staging dir is left for the caller to remove.
 3. A negative control proves the probe can fail: a copy of the jail without the filter and without
    `--disable-host-loopback` fails every row of (4).
-4. `make k2val-jail-smoke` (after the probe): one fixed prompt per CLI ("Reply with the single word OK."), no MCP
+4. Teardown before the release, which the probe's signal cases do not reach (they signal a running probe), was checked
+   by hand on two scratch copies:
+   - a forced network failure (slirp with `--enable-sandbox`) returns exit 3 at once, through a pipe, with the staging
+     dir removed and no bwrap or slirp process left;
+   - a SIGKILL of the script while it waits before the release byte frees the caller's pipe in under a second (the
+     reaper ends the jail). No jail, slirp or forwarder process is left; the staging dir stays for the caller.
+5. `make k2val-jail-smoke` (after the probe): one fixed prompt per CLI ("Reply with the single word OK."), no MCP
    server. It prints the exit code, the parsed final message and the event shapes (field names only).
 
 ## Tools offered per scenario (as the agent study's sets)
