@@ -7,7 +7,7 @@ Used for:
 - OpenRouter (when routing to any OpenAI-compat upstream)
 - Future GLM-4.7-Flash / DeepSeek / etc. via Forge
 
-Pattern adapted from M0rgho's existing test/plgrid/forge_harness.py with
+Pattern adapted from the pre-existing test/plgrid/forge_harness.py with
 two extensions: (a) captures tool_call results into ToolCall.result so
 the oracle has the agent's full view; (b) factors the agent loop into
 something the trial-runner can call uniformly across LLMs.
