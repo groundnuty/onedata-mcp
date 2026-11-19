@@ -444,11 +444,9 @@ def register_module(mcp: FastMCP) -> None:
         ## Provider-name enrichment
 
         The Oneprovider REST returns the distribution keyed by
-        providerId hex strings only. This wrapper performs an inline
-        join with `list_user_spaces` to add a `providerName` field on
-        each provider entry, so callers don't have to chain a
-        secondary lookup. See research/empirical-mcp-server-findings.md
-        M-5.
+        providerId hex strings only. This wrapper adds a
+        `providerName` field on each provider entry, so callers don't
+        have to chain a secondary lookup.
         """
         import asyncio as _asyncio
 
