@@ -15,7 +15,9 @@ class LLMConfig:
 
     name: str  # 'claude-sonnet-4-5', 'llama-3.3-70b', 'qwen-3-32b' etc.
     api_base: str | None = None  # OpenAI-compat: base URL; Anthropic: None
-    api_key: str | None = None
+    # repr=False: a config is easy to print by accident (an error message, a log line), and
+    # the key must not travel with it.
+    api_key: str | None = field(default=None, repr=False)
     model_id: str = ""  # the specific model identifier passed to the SDK
     temperature: float = 1.0
     # Generous cap to keep reasoning-style models (QwQ-32B chain-of-thought,
@@ -31,6 +33,10 @@ class LLMConfig:
     # multi-tool scenarios without enabling indefinite loops.
     max_tool_rounds: int = 40
     extra: dict[str, Any] = field(default_factory=dict)
+    # Optional sampling field the chat-completions API takes directly. None = not sent, so a
+    # config that never sets it makes the same request as before. Other vendor fields
+    # (top_k, repetition_penalty, ...) go in `extra`, which the adapter sends as `extra_body`.
+    top_p: float | None = None
 
 
 @dataclass(frozen=True)

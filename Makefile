@@ -18,6 +18,7 @@
         smoke smoke-d1 smoke-fast \
         sweep sweep-cyfronet sweep-deepseek sweep-claude sweep-all \
         sweep-headline sweep-k8 \
+        k2val k2val-scan \
         conformance inspect-smoke \
         report report-latest rescore \
         show-grid show-grid-rate show-headline show-trial inspect-fail list-runs \
@@ -66,6 +67,13 @@ help:
 	@echo "  Headline runs"
 	@echo "    sweep-k8           K=8 across the full panel (~3-4 hours)"
 	@echo "    sweep-headline     alias for sweep-k8"
+	@echo ""
+	@echo "  K2 validation panel  (design/08; LOCAL Compose federation only)"
+	@echo "    k2val              run the panel. Needs benchmark/k2val/k2val.toml. Examples:"
+	@echo "      make k2val                                  all configs, V1..V7, K=3"
+	@echo "      make k2val K2VAL_MODELS=sonnet-medium,haiku-low K2VAL_SCENARIOS=V2,V5 K2VAL_K=1"
+	@echo "                         (K2VAL_CONFIG=... K2VAL_RID=<run id to resume>)"
+	@echo "    k2val-scan         pre-flight scan for the CLI legs (wave 2; K2VAL_MODELS=gpt-luna-low,..)"
 	@echo ""
 	@echo "  MCP-protocol validation  (paper-grade artifacts)"
 	@echo "    conformance        run modelcontextprotocol/conformance suite v0.1.16+"
@@ -340,6 +348,31 @@ sweep:
 	  --scenario-parallelism $(PARALLEL) \
 	  --run-id "$${RID}" 2>&1 \
 	  | tee "artefacts/$${RID}/sweep.log"
+
+# ---------------------------------------------------------------------------
+# K2 validation panel (design/08)
+# ---------------------------------------------------------------------------
+#
+# Runs against the LOCAL Compose federation only: the panel refuses any host but 127.0.0.1,
+# localhost or *.datahub.test. Config: benchmark/k2val/k2val.toml (copy the .example and set
+# the token and key file paths; it is gitignored). Artefacts: artefacts/k2val/<run id>/
+# (gitignored); the report: research/k2val-<run id>.md.
+K2VAL_CONFIG ?= benchmark/k2val/k2val.toml
+K2VAL_MODELS ?=
+K2VAL_SCENARIOS ?= V1..V7
+K2VAL_K ?= 3
+K2VAL_RID ?=
+
+k2val:
+	uv run python -m benchmark.k2val.run --config $(K2VAL_CONFIG) \
+	  $(if $(K2VAL_MODELS),--models $(K2VAL_MODELS)) \
+	  --scenarios $(K2VAL_SCENARIOS) --k $(K2VAL_K) \
+	  $(if $(K2VAL_RID),--run-id $(K2VAL_RID))
+
+k2val-scan:
+	uv run python -m benchmark.k2val.run scan --config $(K2VAL_CONFIG) \
+	  $(if $(K2VAL_MODELS),--models $(K2VAL_MODELS)) \
+	  $(if $(K2VAL_RID),--run-id $(K2VAL_RID))
 
 # ---------------------------------------------------------------------------
 # MCP-protocol validation

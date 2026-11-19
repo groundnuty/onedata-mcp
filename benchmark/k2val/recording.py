@@ -1,0 +1,78 @@
+"""A recording proxy around the in-process MCP app.
+
+`ToolCall` (the PPAM runtime type) has no timestamps and its result is truncated, and a trial
+cut by the wall cap loses the adapter's own trace. The proxy sits between an adapter and the
+FastMCP app: it enforces the allow-list, bounds each call (the agent study's harness bounds one tool
+call at 300 s), and records every call with its start and end time and its full result.
+The records are what the oracles and the report read; the adapters are unchanged.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from dataclasses import asdict, dataclass
+from typing import Any
+
+from fastmcp.exceptions import ToolError
+
+from benchmark.llm_adapters.openai_compat import _result_to_text
+
+
+@dataclass
+class CallRecord:
+    index: int
+    tool: str
+    arguments: dict
+    started_at: float
+    ended_at: float = 0.0
+    ok: bool = False
+    result_text: str | None = None
+    error: str | None = None
+    source: str = "mcp"  # "mcp" or "builtin" (CLI legs report both)
+
+    def to_json(self) -> dict:
+        return asdict(self)
+
+
+class RecordingApp:
+    def __init__(
+        self,
+        app: Any,
+        *,
+        allowed: frozenset[str],
+        call_cap_s: float = 300.0,
+        clock=time.time,
+    ) -> None:
+        self._app = app
+        self.allowed = allowed
+        self.call_cap_s = call_cap_s
+        self._clock = clock
+        self.calls: list[CallRecord] = []
+
+    async def list_tools(self) -> list[Any]:
+        return await self._app.list_tools()
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        record = CallRecord(
+            index=len(self.calls), tool=name, arguments=dict(arguments), started_at=self._clock()
+        )
+        self.calls.append(record)
+        try:
+            if name not in self.allowed:
+                raise ToolError(f"tool {name!r} is not offered in this scenario")
+            try:
+                result = await asyncio.wait_for(
+                    self._app.call_tool(name, arguments), timeout=self.call_cap_s
+                )
+            except TimeoutError:
+                raise ToolError(f"tool call exceeded {self.call_cap_s:.0f}s") from None
+            record.ok = True
+            record.result_text = _result_to_text(result)
+            return result
+        except Exception as e:
+            record.error = str(e)
+            record.result_text = record.result_text or None
+            raise
+        finally:
+            record.ended_at = self._clock()

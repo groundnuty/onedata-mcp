@@ -223,3 +223,7 @@ artefacts/
 
 # MCP-conformance per-run results
 conformance-results/
+
+# K2 validation panel: local config (paths to token and key files) and per-run artefacts
+benchmark/k2val/k2val.toml
+artefacts/k2val/

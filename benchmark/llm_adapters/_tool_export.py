@@ -38,3 +38,28 @@ def _fastmcp_tool_to_openai(tool: Any) -> dict[str, Any]:
             "parameters": parameters,
         },
     }
+
+
+async def build_anthropic_tools(app: FastMCP, allowed: frozenset[str]) -> list[dict[str, Any]]:
+    """Filter the FastMCP tool catalogue to `allowed` and convert to the Anthropic
+    Messages-API tool list (`name`, `description`, `input_schema`).
+
+    Raises KeyError if `allowed` references a tool not exposed by `app`.
+    """
+    all_tools = await app.list_tools()
+    by_name = {t.name: t for t in all_tools}
+    missing = allowed - set(by_name)
+    if missing:
+        raise KeyError(f"Tools requested but not exposed by MCP server: {sorted(missing)}")
+    return [
+        {
+            "name": by_name[name].name,
+            "description": by_name[name].description or "",
+            "input_schema": (
+                by_name[name].parameters
+                if by_name[name].parameters is not None
+                else {"type": "object", "properties": {}}
+            ),
+        }
+        for name in sorted(allowed)
+    ]

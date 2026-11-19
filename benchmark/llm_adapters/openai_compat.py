@@ -55,12 +55,15 @@ async def _create_with_retry(
     temperature: float,
     max_tokens: int,
     extra_body: dict[str, Any] | None,
+    top_p: float | None = None,
 ) -> Any:
     """chat.completions.create with bounded exponential-backoff retry on
     transient upstream failures. Non-transient errors (auth, malformed
     request, 4xx other than 429) propagate immediately.
     """
     last_exc: Exception | None = None
+    # Optional sampling fields are left out of the request when unset.
+    optional: dict[str, Any] = {} if top_p is None else {"top_p": top_p}
     for attempt in range(RETRY_MAX_ATTEMPTS):
         try:
             return await client.chat.completions.create(
@@ -71,6 +74,7 @@ async def _create_with_retry(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 extra_body=extra_body,
+                **optional,
             )
         except (RateLimitError, APITimeoutError, APIConnectionError) as e:
             last_exc = e
@@ -92,6 +96,9 @@ class OpenAICompatAdapter:
             raise ValueError(f"OpenAI-compat adapter requires api_base; got {config!r}")
         self.config = config
         self._client = AsyncOpenAI(api_key=config.api_key, base_url=config.api_base)
+        # `system_fingerprint` of each response, when the endpoint returns one (read by the
+        # K2 validation panel; kept off `raw_trace`, whose shape the PPAM artefacts carry).
+        self.fingerprints: list[str] = []
 
     async def dispatch(
         self,
@@ -135,6 +142,7 @@ class OpenAICompatAdapter:
                     temperature=self.config.temperature,
                     max_tokens=self.config.max_tokens,
                     extra_body=extra_body,
+                    top_p=self.config.top_p,
                 )
             except Exception as e:  # noqa: BLE001
                 return TrialDispatch(
@@ -148,6 +156,10 @@ class OpenAICompatAdapter:
                     raw_trace={"rounds": rounds_log, "error_round": round_ix},
                     error=f"{type(e).__name__}: {e}",
                 )
+
+            fingerprint = getattr(response, "system_fingerprint", None)
+            if isinstance(fingerprint, str) and fingerprint:
+                self.fingerprints.append(fingerprint)
 
             usage = getattr(response, "usage", None)
             if usage:
