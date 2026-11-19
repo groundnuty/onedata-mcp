@@ -1,0 +1,166 @@
+# Configuration of the K2 validation panel (design/08). Copy to k2val.toml (gitignored) and
+# replace each <... dir> placeholder with a real path. The file holds paths, never secrets:
+# tokens and keys are read from the files it names, when they are needed, and are never
+# logged, printed or persisted.
+#
+# The panel refuses to run unless every federation host below is 127.0.0.1, localhost or
+# *.datahub.test: it writes files and QoS rules and must only ever touch the local Compose
+# federation.
+
+[federation]
+allow_insecure_tls = true            # the Compose federation uses self-signed certificates
+
+[federation.onezone]
+host = "https://onezone.k2val.datahub.test"
+# token_file = "<token dir>/onezone.token"   # unset: the local provider's token is used
+
+[federation.local]                   # the agent's site
+name = "vistula-dc"
+host = "https://oneprovider.vistula.datahub.test"
+token_file = "<token dir>/local-provider.token"
+
+[federation.owner]                   # where the data are written
+name = "nordic-marine-dc"
+host = "https://oneprovider.nordic.datahub.test"
+token_file = "<token dir>/owner-provider.token"
+
+[run]
+max_tool_rounds = 40                 # a cap reached is NO_RESULT, not a failure
+wall_cap_s = 1200                    # 20 minutes per trial
+tool_call_cap_s = 300                # one tool call is bounded at 300 s, as in the agent study
+settle_s = 60                        # how long the federation axis waits for the end state
+concurrency_per_model = 2            # at most 2 trials at once per model (2 is the ceiling)
+artefact_root = "artefacts/k2val"    # gitignored
+research_dir = "research"            # where research/k2val-<run_id>.md is written
+
+[spend]                              # the Haiku configs and the Sonnet control share it
+cap_usd = 50.0
+reserve_usd = 0.50
+
+# Tool sets of the agent study (override only if its sets change).
+# [tools]
+# k1 = [...]
+# k2 = [...]
+
+# ---- Wave 1: the API configs (LLM Lab, Anthropic) ---------------------------------------
+
+[models.sonnet-medium]               # the control: should pass every scenario
+backend = "anthropic"
+control = true
+api_id = "claude-sonnet-5-5"
+space = "k2val-sonnet"
+key_file = "<key dir>/anthropic.key"
+effort = "medium"                    # low | medium | high | xhigh | max
+max_tokens = 16000                   # non-streaming: at most 21333
+[models.sonnet-medium.price]         # USD per Mtok
+input_low = 2.00
+output_low = 10.00
+
+[models.glm]
+backend = "openai_compat"
+api_id = "zai-org/GLM-5.3-Flash"
+space = "k2val-glm"
+base_url = "https://llmlab.plgrid.pl/api/v1"
+key_file = "<key dir>/lk"
+[models.glm.sampling]
+temperature = 1.0
+top_p = 0.95
+
+[models.qwen36]
+backend = "openai_compat"
+api_id = "Qwen/Qwen3.6-35B-A3B"
+space = "k2val-qwen36"
+base_url = "https://llmlab.plgrid.pl/api/v1"
+key_file = "<key dir>/lk"
+[models.qwen36.sampling]
+temperature = 1.0
+
+[models.qwencoder]
+backend = "openai_compat"
+api_id = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+space = "k2val-qwencoder"
+base_url = "https://llmlab.plgrid.pl/api/v1"
+key_file = "<key dir>/lk"
+[models.qwencoder.sampling]          # top_k and repetition_penalty go in extra_body (vLLM)
+temperature = 0.7
+top_p = 0.8
+top_k = 20
+repetition_penalty = 1.05
+
+[models.deepseek]
+backend = "openai_compat"
+api_id = "deepseek-ai/DeepSeek-V4-Flash-0731"
+space = "k2val-deepseek"
+base_url = "https://llmlab.plgrid.pl/api/v1"
+key_file = "<key dir>/lk"
+[models.deepseek.sampling]
+temperature = 1.0
+top_p = 0.95
+
+# The Haiku effort sweep: the same model at three efforts.
+[models.haiku-low]
+backend = "anthropic"
+api_id = "claude-haiku-5-5"
+space = "k2val-haiku-low"
+key_file = "<key dir>/anthropic.key"
+effort = "low"
+[models.haiku-low.price]             # prompt tiers by the size of the call's prompt
+input_low = 0.10
+output_low = 0.50
+input_high = 0.50
+output_high = 2.50
+threshold_tokens = 200000
+
+[models.haiku-medium]
+backend = "anthropic"
+api_id = "claude-haiku-5-5"
+space = "k2val-haiku-medium"
+key_file = "<key dir>/anthropic.key"
+effort = "medium"
+[models.haiku-medium.price]
+input_low = 0.10
+output_low = 0.50
+input_high = 0.50
+output_high = 2.50
+threshold_tokens = 200000
+
+[models.haiku-high]
+backend = "anthropic"
+api_id = "claude-haiku-5-5"
+space = "k2val-haiku-high"
+key_file = "<key dir>/anthropic.key"
+effort = "high"
+[models.haiku-high.price]
+input_low = 0.10
+output_low = 0.50
+input_high = 0.50
+output_high = 2.50
+threshold_tokens = 200000
+
+# ---- Wave 2: the CLI agent legs (disabled until [cli.jail] wrapper is set AND a clean
+# `k2val scan` exists for the config; otherwise the run skips them and says so) -------------
+
+[models.gpt-luna-low]
+backend = "codex"
+binary = "codex"
+api_id = "gpt-5.6-luna"
+reasoning_effort = "low"
+space = "k2val-gpt"
+
+[models.gemini-flash-low]
+backend = "agy"
+binary = "agy"                       # the host binary: the jail runs a staged copy of it
+api_id = "gemini-3.8-flash-low"
+effort = "low"
+space = "k2val-gemini"
+# its MCP server is written into the jail's fresh home (~/.gemini/config/mcp_config.json)
+
+[cli.jail]
+# REQUIRED for the CLI legs: the jail (design/08, "The CLI jail"). Prove it first with
+# `make k2val-jail-probe`. Invoked as
+#   <wrapper> --cli codex|agy --workdir <dir> --mcp-upstream 127.0.0.1:<P> [...] -- <argv...>
+# wrapper = "benchmark/k2val/jail/cli-jail.sh"   # relative to the repository root
+
+[cli.scan]
+# tokens_file = "<scan dir>/tokens.txt"       # one token per line, case-insensitive substring
+# patterns_file = "<scan dir>/patterns.txt"   # one regex per line

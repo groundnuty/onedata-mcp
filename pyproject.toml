@@ -23,6 +23,7 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "anthropic>=2.10.0",
     "mcp[cli]>=1.27.0",
     "openai>=1.88.0",
     "pytest>=8.4.2",
@@ -56,4 +57,5 @@ testpaths = [ "test" ]
 markers = [
     "e2e: End-to-end PLGrid Forge LLM + MCP tests (requires PLGRID_FORGE_* env; some need Onedata)",
     "onedata_integration: requires live Onezone / Oneprovider",
+    "live: runs real local infrastructure (the CLI jail's leak probe); opt-in by env var",
 ]
