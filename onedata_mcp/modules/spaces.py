@@ -60,14 +60,10 @@ def register_module(mcp: FastMCP) -> None:
         """List providers supporting a space, queried from Oneprovider.
 
         `space_id` accepts either the hex spaceId or the space name; an
-        internal lookup resolves names. See research/empirical-mcp-server-
-        findings.md M-3.
+        internal lookup resolves names.
 
         Returns the canonical (providerId, providerName) pairs as the
-        oneprovider sees them. For richer per-provider attributes
-        (geographic location, storage classes, online status), follow up
-        with an onezone /providers/{providerId} call per id — the agent
-        chains the two calls when needed.
+        oneprovider sees them.
         """
         resolved = await resolve_space_id_or_name(space_id)
         return await get_space_providers(resolved)

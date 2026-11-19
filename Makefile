@@ -13,7 +13,7 @@
 #   RID=<existing-id> to attach to an existing run for cross-llm
 #   merging or re-runs.
 
-.PHONY: help install test test-file test-verbose lint format check \
+.PHONY: help install test test-file test-verbose test-readiness-live tools-manifest lint format check \
         spaces-create spaces-support spaces-status \
         smoke smoke-d1 smoke-fast \
         sweep sweep-cyfronet sweep-deepseek sweep-claude sweep-all \
@@ -35,6 +35,9 @@ help:
 	@echo "    lint               ruff check (auto-fix)"
 	@echo "    format             ruff format"
 	@echo "    check              lint + format + test (pre-commit gate)"
+	@echo "    tools-manifest     print tools/list as sorted JSON, no network (ROOT=<checkout>"
+	@echo "                       to import another checkout; set ONEDATA_MCP_TOOLS to pick tools)"
+	@echo "    test-readiness-live  readiness tools against the LOCAL Compose federation only"
 	@echo ""
 	@echo "  Federation provisioning  (run once per panel-LLM addition)"
 	@echo "    spaces-create      create per-LLM Onedata spaces (idempotent)"
@@ -107,6 +110,18 @@ test-file:
 	  exit 1; \
 	fi
 	uv run pytest $(FILE) -v
+
+# Print the server's tools/list as sorted JSON (name, description, inputSchema, annotations),
+# with no network. Run it on two checkouts and diff to see what a change did to the surface:
+#   ONEDATA_MCP_TOOLS=a,b make tools-manifest ROOT=/path/to/other/checkout
+tools-manifest:
+	uv run python scripts/tools_manifest.py $(ROOT)
+
+# Live test of check_readiness / ensure_readiness. It writes a file and a QoS rule, and
+# refuses any host but 127.0.0.1, localhost or *.datahub.test. Needs the usual ONEDATA_*
+# variables and ONEDATA_MCP_LIVE_READINESS_SPACE (see the test's docstring).
+test-readiness-live:
+	ONEDATA_MCP_LIVE_READINESS=1 uv run pytest test/live/test_readiness_live.py -v -s
 
 lint:
 	uv run ruff check benchmark/ onedata_mcp/ test/ --fix

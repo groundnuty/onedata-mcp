@@ -38,6 +38,8 @@ WRITE_TOOL_NAMES = frozenset(
         "remove_qos_requirement",
         # transfers
         "schedule_file_replication",
+        # readiness (places QoS rules; annotated destructiveHint=False, not True)
+        "ensure_readiness",
     }
 )
 

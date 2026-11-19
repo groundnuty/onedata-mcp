@@ -58,10 +58,36 @@ async def resolve_space_id_or_name(value: str) -> str:
     raise ValueError(f"Space {value!r} not found. Available names: {available}")
 
 
+def _space_ids_of_provider_listing(body: Any) -> list[str]:
+    """Return the space ids of Oneprovider's `GET /spaces` answer.
+
+    The answer is a list of the user's spaces, each a `{"name", "spaceId",
+    "providers", ...}` object. Any other shape raises ValueError.
+    """
+    if not isinstance(body, list):
+        raise ValueError(
+            f"Oneprovider GET /spaces answered a {type(body).__name__}, not a list of spaces"
+        )
+    space_ids = [entry.get("spaceId") if isinstance(entry, dict) else None for entry in body]
+    if not all(isinstance(space_id, str) and space_id for space_id in space_ids):
+        raise ValueError("Oneprovider GET /spaces answered an entry without a spaceId")
+    return space_ids
+
+
 async def list_user_spaces() -> list[dict[str, Any]]:
-    config = get_onezone_config()
+    """Return the user's own spaces, each with its details from Onezone.
+
+    The ids come from Oneprovider's `GET /spaces`, which answers any user
+    with the spaces of its own token. Onezone's `GET /spaces` is the admin
+    listing of every space in the zone: it needs the `oz_spaces_list`
+    admin privilege, so a regular user's token got 403 `forbidden` there,
+    and every space name failed to resolve. Each space's details still
+    come from Onezone's `GET /spaces/{id}`, which a member may read, so
+    the returned fields are the same as before.
+    """
+    config = get_oneprovider_config()
     response = await request(config, "GET", "/spaces")
-    space_ids = SpacesListResponse(**response["body"])["spaces"]
+    space_ids = _space_ids_of_provider_listing(response["body"])
 
     details = await asyncio.gather(*(get_space_details(space_id) for space_id in space_ids))
     return [

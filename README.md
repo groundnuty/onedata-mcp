@@ -6,13 +6,13 @@ An [MCP](https://modelcontextprotocol.io/) server that connects assistants to [O
 
 ## Tool surface
 
-The server registers **27 tools** in total (the table below). Three lenses matter:
+The server registers **29 tools** in total (the table below). Three lenses matter:
 
-- **Maturity — 16 `stable` / 11 `experimental`.** `stable` tools were validated against the PPAM 7-LLM K=8 panel (== the HEADLINE benchmark allowlist); `experimental` tools are registered but not yet panel-swept — either added after the paper freeze, or inherited from the upstream base surface and never validated against our panel. See [`onedata_mcp/tool_maturity.py`](onedata_mcp/tool_maturity.py). Origin (`ours`/`upstream`) is a provenance signal — note that panel-validation trumps origin: an upstream tool that survived K=8 is `stable`.
-- **Read-only token — 19 tools.** Running with a `data.readonly` Onedata token prunes the 8 mutating tools (see [`onedata_mcp/token_policy.py`](onedata_mcp/token_policy.py)).
+- **Maturity — 16 `stable` / 13 `experimental`.** `stable` tools were validated against the PPAM 7-LLM K=8 panel (== the HEADLINE benchmark allowlist); `experimental` tools are registered but not yet panel-swept — either added after the paper freeze, or inherited from the upstream base surface and never validated against our panel. See [`onedata_mcp/tool_maturity.py`](onedata_mcp/tool_maturity.py). Origin (`ours`/`upstream`) is a provenance signal — note that panel-validation trumps origin: an upstream tool that survived K=8 is `stable`.
+- **Read-only token — 20 tools.** Running with a `data.readonly` Onedata token prunes the 9 mutating tools (see [`onedata_mcp/token_policy.py`](onedata_mcp/token_policy.py)).
 - **HEADLINE benchmark allowlist — 16 tools.** The subset the PPAM benchmark restricts the agent to (`benchmark/tool_allowlist.py::HEADLINE`); identical to the `stable` set. The benchmark curates *down* to 16 — it does not cap what the server exposes.
 
-You can restrict the exposed surface at launch — see [Selecting tools at launch](#selecting-tools-at-launch). The branch name (`14-tools`) is historical; the authoritative live count is what `tools/list` returns (27).
+You can restrict the exposed surface at launch — see [Selecting tools at launch](#selecting-tools-at-launch). The branch name (`14-tools`) is historical; the authoritative live count is what `tools/list` returns (29).
 
 `Mat.` column: `stable` = panel-validated; `exp·up` = experimental, inherited from upstream (the genuine distrust set); `exp·ours` = experimental, added by this fork post-paper.
 
@@ -45,14 +45,16 @@ You can restrict the exposed surface at launch — see [Selecting tools at launc
 | `get_harvester_index_schema`  | harvesters    | exp·up    |                                                      |
 | `query_harvester_index`       | harvesters    | exp·up    | excluded from headline benchmark allowlist           |
 | `query_by_metadata`           | metadata      | stable    | **NEW** — recursive predicate evaluator (no harvester) |
+| `check_readiness`             | readiness     | exp·ours  | **NEW** — are the declared data complete and readable here, or why not |
+| `ensure_readiness`            | readiness     | exp·ours  | **NEW** — places QoS rules, waits, holds; pruned under a read-only token |
 
 ### Selecting tools at launch
 
-Two env vars restrict which tools the server exposes (model-invisible; they prune the registered surface, they do not alter any tool). With neither set, all 27 are exposed.
+Two env vars restrict which tools the server exposes (model-invisible; they prune the registered surface, they do not alter any tool). With neither set, all 29 are exposed.
 
 | Env var | Effect |
 | ------- | ------ |
-| `ONEDATA_MCP_MATURITY` | Comma-separated maturity tiers to expose. `stable` → only the 16 panel-validated tools; `stable,experimental` (or unset) → all 27. |
+| `ONEDATA_MCP_MATURITY` | Comma-separated maturity tiers to expose. `stable` → only the 16 panel-validated tools; `stable,experimental` (or unset) → all 29. |
 | `ONEDATA_MCP_TOOLS` | Comma-separated explicit tool allowlist (e.g. `list_user_spaces,download_file`). Takes precedence over `ONEDATA_MCP_MATURITY`; unknown names are ignored with a warning. |
 
 ```bash
@@ -61,6 +63,15 @@ ONEDATA_MCP_MATURITY=stable uv run onedata-mcp
 ```
 
 This composes with the read-only-token prune: both simply hide tools, so a read-only token + `ONEDATA_MCP_MATURITY=stable` yields the stable-and-non-mutating intersection.
+
+### Readiness tools
+
+`check_readiness` and `ensure_readiness` (experimental) answer one question: are the data an analysis declares complete and readable at the provider this server talks to? The agent declares them as an `extent`: per dataset (a space name or a directory path), optionally file names or inclusive `YYYY-MM-DD` date ranges that are matched against the `YYYYMMDD` in each file name.
+
+- `check_readiness` is read-only. It answers ready, or not ready with a reason per file group: `being_written` (no other provider holds the whole file yet), `at_other_site`, `in_transfer`, `unreachable` (only at a provider that is down).
+- `ensure_readiness` also places one QoS rule per file (`providerId=<local provider> & anyStorage`, falling back to `providerId=<local provider>` if Onedata rejects it), so the system copies the file here and protects the replica from eviction, then waits up to `deadline_s`. One call waits at most 240 s (`ONEDATA_MCP_ENSURE_MAX_WAIT_S` changes the cap); call it again if the answer is not ready.
+
+A file counts as ready only when this provider holds all of it and another provider does too (or the file was written here). Transfer status and QoS `fulfilled` are not taken as proof. Spec: [`design/07-readiness-tools.md`](design/07-readiness-tools.md). Compare tool surfaces with `make tools-manifest`; the gated live test is `make test-readiness-live` (local Compose federation only).
 
 ## Requirements
 
@@ -75,7 +86,7 @@ uv sync
 
 ## Environment variables
 
-Configuration is loaded from the process environment. [python-dotenv](https://pypi.org/project/python-dotenv/) is used so a `.env` file in the **current working directory** is picked up when the server starts.
+Configuration is loaded from the process environment. [python-dotenv](https://pypi.org/project/python-dotenv/) is used so a `.env` file is picked up when the server starts: the first one found from the directory of the installed `onedata_mcp` package upward to `/` (a checkout's own root `.env`), never overriding a variable already set. Set `ONEDATA_MCP_DOTENV=0` in the process environment to read no `.env` at all (see `USAGE.md`).
 
 1. Copy the example file and edit values:
 

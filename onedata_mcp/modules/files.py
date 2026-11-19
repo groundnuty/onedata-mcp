@@ -3,6 +3,7 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 from fastmcp import Context, FastMCP
+from mcp.shared.exceptions import McpError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
@@ -57,7 +58,16 @@ async def _resolve_with_mcp_root(path_or_id: str, ctx: Optional[Context]) -> str
     if ctx is None:
         return path_or_id
 
-    roots = await ctx.list_roots()
+    try:
+        roots = await ctx.list_roots()
+    except McpError:
+        # The client offers no MCP roots, so a relative path cannot be resolved.
+        # Say how to fix the call instead of surfacing the client's
+        # "List roots not supported" (seen in agent traces, where it ended
+        # the agent's use of the tools).
+        raise ValueError(
+            f"Paths must start with '/': use /<space_name>/<path_to_file> (got {path_or_id!r})."
+        ) from None
     if not roots:
         return path_or_id
 
@@ -444,11 +454,9 @@ def register_module(mcp: FastMCP) -> None:
         ## Provider-name enrichment
 
         The Oneprovider REST returns the distribution keyed by
-        providerId hex strings only. This wrapper performs an inline
-        join with `list_user_spaces` to add a `providerName` field on
-        each provider entry, so callers don't have to chain a
-        secondary lookup. See research/empirical-mcp-server-findings.md
-        M-5.
+        providerId hex strings only. This wrapper adds a
+        `providerName` field on each provider entry, so callers don't
+        have to chain a secondary lookup.
         """
         import asyncio as _asyncio
 

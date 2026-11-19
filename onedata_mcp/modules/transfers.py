@@ -38,8 +38,7 @@ def register_module(mcp: FastMCP) -> None:
         """List transfer ids in a space.
 
         `space_id` accepts either the hex spaceId or the space name; an
-        internal lookup resolves names. See research/empirical-mcp-server-
-        findings.md M-3.
+        internal lookup resolves names.
 
         The response contains transfer ids only; for source / destination /
         bytes / state detail, follow up with get_transfer per id.
@@ -55,8 +54,11 @@ def register_module(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         """Get detail for a single transfer by id.
 
-        Includes type (replication / eviction / migration), source and
-        destination provider ids, file path, byte counts, and timing.
+        Includes type (replication / eviction / migration), the
+        destination provider id (`replicatingProviderId`), file path, byte
+        counts, and timing. The providers the data came from appear only
+        as the keys of the per-provider byte histograms (`minHist`,
+        `hrHist`, `dyHist`, `mthHist`).
         """
         return await get_transfer(transfer_id)
 

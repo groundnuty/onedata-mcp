@@ -51,7 +51,7 @@ def register_module(mcp: FastMCP) -> None:
               }
             }
 
-        See research/empirical-mcp-server-findings.md M-7. The original
+        The original
         flat shape is preserved as `requirements_flat` for callers that
         depend on it.
         """
@@ -98,14 +98,13 @@ def register_module(mcp: FastMCP) -> None:
                 "ALWAYS-SAFE implicit operands: 'providerId=<id>' and "
                 "'storageId=<id>'. Admin-set string attributes (e.g. "
                 "country=PL, type=ssd, geo=EU) ONLY work if a federation "
-                "admin has tagged the storages — discover via list_user_spaces "
-                "to see which providers are actually present, and check the "
+                "admin has tagged the storages — use list_space_providers "
+                "to see which providers support the space, and check the "
                 "specific federation's docs for any admin-attributed tags. "
                 "Operators: '&' (AND), '|' (OR), '\\\\' (exclusion). "
                 "USE SINGLE EQUALS '=' (NOT '=='). "
                 "Avoid 'cloud=...', 'region=...', 'zone=...' unless verified "
-                "— these are common-but-fictional operand names. "
-                "See research/empirical-mcp-server-findings.md M-8."
+                "— these are common-but-fictional operand names."
             )
         ),
         replicas_num: int = Field(

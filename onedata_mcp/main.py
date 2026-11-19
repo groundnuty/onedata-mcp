@@ -4,7 +4,8 @@ import sys
 
 from fastmcp import FastMCP
 
-from onedata_mcp.modules import files, harvesters, metadata, qos, spaces, transfers
+from onedata_mcp.config import get_node_names
+from onedata_mcp.modules import files, harvesters, metadata, qos, readiness, spaces, transfers
 from onedata_mcp.telemetry import TracingMiddleware, setup_metrics, setup_telemetry
 from onedata_mcp.token_policy import (
     WRITE_TOOL_NAMES,
@@ -39,6 +40,10 @@ def _setup_logging() -> logging.Logger:
 
 
 def _create_onedata_mcp_server() -> FastMCP:
+    # Fail at launch, not at the first tool error, on a malformed ONEDATA_MCP_NODE_NAMES
+    # (the error names the variable and the format, never the value).
+    get_node_names()
+
     mcp = FastMCP(
         name="Onedata MCP Server",
         instructions="""
@@ -66,6 +71,7 @@ def _create_onedata_mcp_server() -> FastMCP:
     harvesters.register_module(mcp)
     metadata.register_module(mcp)
     qos.register_module(mcp)
+    readiness.register_module(mcp)
     spaces.register_module(mcp)
     transfers.register_module(mcp)
 
