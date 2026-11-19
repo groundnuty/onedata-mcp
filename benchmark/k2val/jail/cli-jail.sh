@@ -27,14 +27,17 @@
 #
 # The CLI starts only once the filter, slirp and the forwarder are up (bwrap --block-fd); slirp
 # exits with the jail (bwrap --sync-fd -> slirp --exit-fd); the outside forwarder dies with this
-# script (PR_SET_PDEATHSIG); the jail dies with this script (--die-with-parent). The staging dir
-# (home, credentials, binaries) is removed on exit or signal. A SIGKILL of this script skips that
-# removal: set K2VAL_JAIL_TMPDIR to a directory the caller removes (the harness does).
+# script (PR_SET_PDEATHSIG); the jail dies with this script (--die-with-parent). The fresh home
+# (the login copies) is staged in a TMPFS dir, copied from read-only fds: no copy of a login
+# ever touches a disk. The rest (binaries, /etc files, control FIFOs) is staged on disk. Both
+# are removed on exit or signal; a SIGKILL of this script skips that removal: set
+# K2VAL_JAIL_TMPDIR and K2VAL_JAIL_SHMDIR to directories the caller removes (the harness does).
 #
 # Environment: K2VAL_JAIL_TMPDIR (staging root, default /tmp; must be under /tmp, /var/tmp or
-# /dev/shm), K2VAL_JAIL_PYTHON (the Python for the outside helpers, default python3).
+# /dev/shm), K2VAL_JAIL_SHMDIR (the home's root, default /dev/shm; must be a tmpfs, under
+# /dev/shm or /tmp), K2VAL_JAIL_PYTHON (the Python for the outside helpers, default python3).
 # Exit: the CLI's status; 2 for a usage or staging error; 3 if the network could not be set up;
-# 4 if the staging dir (with the login copy) could not be removed.
+# 4 if a staging dir (the home: the login copy) could not be removed.
 set -u -o pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
@@ -93,7 +96,7 @@ neutral_path() {
 }
 
 if [ "$PRINT_ARGS" = 1 ]; then
-  S="<staging>"
+  S="<staging>" H="<home>"
 else
   [ -d "$WORKDIR" ] || die "the work dir does not exist"
   WORKDIR=$(cd "$WORKDIR" && pwd -P)
@@ -103,6 +106,11 @@ else
   [ -d "$ROOT" ] || die "K2VAL_JAIL_TMPDIR does not exist"
   ROOT=$(cd "$ROOT" && pwd -P)
   neutral_path "$ROOT" || die "the staging root must be a neutral temp path (under /tmp, naming no user)"
+  SHMROOT=${K2VAL_JAIL_SHMDIR:-/dev/shm}
+  [ -d "$SHMROOT" ] || die "K2VAL_JAIL_SHMDIR does not exist"
+  SHMROOT=$(cd "$SHMROOT" && pwd -P)
+  neutral_path "$SHMROOT" || die "the home's root must be a neutral temp path (under /dev/shm, naming no user)"
+  [ "$(stat -f -c %T "$SHMROOT")" = tmpfs ] || die "the home's root must be a tmpfs: a login copy may not touch a disk"
   BWRAP=$(command -v bwrap) || die "bwrap not found"
   SLIRP=$(command -v slirp4netns) || die "slirp4netns not found"
   command -v "$PY" >/dev/null || die "no Python for the helpers ($PY)"
@@ -116,14 +124,20 @@ BW_PID="" CHILD_PID="" SLIRP_PID="" FWD_PID="" REAPER_PID="" BLOCK_W="" SYNC_W="
 # that back, top-down and never through a symlink (find -P; `-execdir ... \;` runs, from the
 # parent and by a relative name, before find reads the dir, so any depth works), then remove,
 # then check. Files need no permission to be unlinked, and are left untouched.
-remove_staging() {
-  [ -n "${S:-}" ] && [ -e "$S" ] || return 0
-  find -P "$S" -type d ! -perm -u=rwx -execdir chmod u+rwx {} \; 2>/dev/null
-  rm -rf "$S" 2>/dev/null
-  if [ -e "$S" ]; then
-    echo "cli-jail: ERROR: the staging dir could not be removed and holds a copy of the $CLI login: $S" >&2
+remove_dir() {
+  [ -n "$1" ] && [ -e "$1" ] || return 0
+  find -P "$1" -type d ! -perm -u=rwx -execdir chmod u+rwx {} \; 2>/dev/null
+  rm -rf "$1" 2>/dev/null
+  if [ -e "$1" ]; then
+    echo "cli-jail: ERROR: a staging dir could not be removed (it may hold a copy of the $CLI login): $1" >&2
     return 1
   fi
+}
+remove_staging() {
+  local rc=0
+  remove_dir "${H:-}" || rc=1
+  remove_dir "${S:-}" || rc=1
+  return "$rc"
 }
 
 cleanup() {
@@ -141,36 +155,45 @@ cleanup() {
   exit "$rc"
 }
 
+# One login file into the tmpfs home: read through a read-only fd (the `<` redirection), written
+# owner-only; the source is never opened for writing, and must be a regular file.
+copy_login() {
+  [ -f "$1" ] || return 1
+  (umask 077 && cat < "$1" > "$2")
+}
+
 stage_credentials() {
   local src
   case $CLI in
     codex)
       src=$HOME/.codex
       [ -f "$src/auth.json" ] || die "no codex login ($HOME/.codex/auth.json)"
-      mkdir -m 700 "$S/home/.codex"
-      cp -p "$src/auth.json" "$S/home/.codex/" || die "cannot stage the codex login"
-      [ -f "$src/installation_id" ] && cp -p "$src/installation_id" "$S/home/.codex/"
+      mkdir -m 700 "$H/.codex"
+      copy_login "$src/auth.json" "$H/.codex/auth.json" || die "cannot stage the codex login"
+      [ -f "$src/installation_id" ] && copy_login "$src/installation_id" "$H/.codex/installation_id"
       ;;
     agy)
       src=$HOME/.gemini
       [ -f "$src/antigravity-cli/antigravity-oauth-token" ] || die "no agy login ($HOME/.gemini/antigravity-cli/antigravity-oauth-token)"
-      mkdir -m 700 -p "$S/home/.gemini/antigravity-cli"
-      cp -p "$src/antigravity-cli/antigravity-oauth-token" "$S/home/.gemini/antigravity-cli/" || die "cannot stage the agy login"
-      [ -f "$src/antigravity-cli/installation_id" ] && cp -p "$src/antigravity-cli/installation_id" "$S/home/.gemini/antigravity-cli/"
+      mkdir -m 700 -p "$H/.gemini/antigravity-cli"
+      copy_login "$src/antigravity-cli/antigravity-oauth-token" "$H/.gemini/antigravity-cli/antigravity-oauth-token" \
+        || die "cannot stage the agy login"
+      [ -f "$src/antigravity-cli/installation_id" ] \
+        && copy_login "$src/antigravity-cli/installation_id" "$H/.gemini/antigravity-cli/installation_id"
       for f in google_accounts.json installation_id settings.json; do
-        [ -f "$src/$f" ] && cp -p "$src/$f" "$S/home/.gemini/"
+        [ -f "$src/$f" ] && copy_login "$src/$f" "$H/.gemini/$f"
       done
       ;;
   esac
-  (cd "$S/home" && find . -type f -print0 | sort -z | xargs -0 -r sha256sum) > "$S/ctl/credentials.sha256"
+  (cd "$H" && find . -type f -print0 | sort -z | xargs -0 -r sha256sum) > "$S/ctl/credentials.sha256"
 }
 
 stage_home_files() {
   local hf rel src
   for hf in ${HOME_FILES[@]+"${HOME_FILES[@]}"}; do
     rel=${hf%%=*} src=${hf#*=}
-    [ ! -e "$S/home/$rel" ] || die "--home-file: $rel would replace a staged file"
-    mkdir -p -m 700 "$(dirname "$S/home/$rel")" && cp "$src" "$S/home/$rel" && chmod 600 "$S/home/$rel" \
+    [ ! -e "$H/$rel" ] || die "--home-file: $rel would replace a staged file"
+    mkdir -p -m 700 "$(dirname "$H/$rel")" && copy_login "$src" "$H/$rel" \
       || die "--home-file: cannot stage $rel"
   done
 }
@@ -247,7 +270,7 @@ bwrap_args() {
     --ro-bind "$S/etc/nsswitch.conf" /etc/nsswitch.conf \
     --ro-bind "$S/etc/ca-certificates.crt" /etc/ssl/certs/ca-certificates.crt \
     --proc /proc --dev /dev --tmpfs /tmp \
-    --bind "$S/home" "$JAIL_HOME" \
+    --bind "$H" "$JAIL_HOME" \
     --ro-bind "$S/bin" /opt/cli --ro-bind "$S/k2val" /opt/k2val
   [ -n "$UPSTREAM" ] && printf '%s\0' --ro-bind "$S/sock" /run/k2val
   printf '%s\0' --bind "$WORKDIR" /work --chdir /work --remount-ro / \
@@ -291,7 +314,9 @@ trap 'exit 129' HUP
 
 S=$(mktemp -d "$ROOT/k2val-jail.XXXXXXXX") || die "cannot create the staging dir"
 chmod 700 "$S"
-mkdir -m 700 "$S/home" "$S/bin" "$S/etc" "$S/k2val" "$S/sock" "$S/ctl" || die "cannot stage"
+mkdir -m 700 "$S/bin" "$S/etc" "$S/k2val" "$S/sock" "$S/ctl" || die "cannot stage"
+H=$(mktemp -d "$SHMROOT/k2val-home.XXXXXXXX") || die "cannot create the home in $SHMROOT"
+chmod 700 "$H"
 stage_credentials
 stage_home_files
 stage_binaries
@@ -369,7 +394,7 @@ BW_PID="" CHILD_PID=""  # gone: its pid must not be signalled again
 # keeps a pending SIGTERM from being deferred for long (well under the harness's 10 s grace).
 CHANGED="" REPLACED=""
 while read -r sum rel; do
-  path=$S/home/${rel#./}
+  path=$H/${rel#./}
   if [ -L "$path" ] || [ ! -f "$path" ] || [ "$(stat -c %s -- "$path")" -gt 1048576 ]; then
     REPLACED+="${rel#./} "
   elif [ "$(timeout 2 sha256sum < "$path" 2>/dev/null | cut -d' ' -f1)" != "$sum" ]; then

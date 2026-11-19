@@ -26,6 +26,7 @@ from benchmark.k2val.cli_agents import (
     LAST_MESSAGE_FILE,
     agy_argv,
     codex_argv,
+    jail_home_root,
     jail_scratch,
     parse_agy_events,
     parse_codex_events,
@@ -77,12 +78,13 @@ def smoke_argv(conf: ModelConf) -> list[str]:
 
 async def smoke_one(conf: ModelConf, jail: JailConf, out_dir: Path) -> dict:
     scratch = jail_scratch("k2val-smoke-")
+    home_root = jail_home_root("k2val-smoke-")
     workdir = scratch / "work"
     workdir.mkdir()
     try:
         cmd = jail_cmd(smoke_argv(conf), str(workdir), jail, cli=conf.backend)
         t0 = time.monotonic()
-        run = await run_jailed(cmd, scratch, workdir)
+        run = await run_jailed(cmd, scratch, workdir, home_root)
         lines, rc = run.lines, run.returncode
         elapsed = time.monotonic() - t0
         try:  # /work is jail-written: the hardened read, never read_text
@@ -90,6 +92,7 @@ async def smoke_one(conf: ModelConf, jail: JailConf, out_dir: Path) -> dict:
         except JailFileError as e:
             last_message = f"<not read: {e}>"
     finally:
+        remove_tree(home_root)
         remove_tree(scratch)
     if conf.backend == "codex":
         parsed = parse_codex_events(lines)

@@ -58,6 +58,7 @@ LAST_MESSAGE_FILE = "last_message.txt"
 AGY_MCP_CONFIG = ".gemini/config/mcp_config.json"  # its place in the jail's fresh home
 AGY_MCP_CONFIG_FILE = "agy-mcp-config.json"  # where the adapter writes it, outside /work
 JAIL_TMPDIR_ENV = "K2VAL_JAIL_TMPDIR"
+JAIL_SHMDIR_ENV = "K2VAL_JAIL_SHMDIR"  # where the jail stages the fresh home: a tmpfs
 TERMINATE_GRACE_S = 10.0
 MAX_JAIL_OUTPUT_BYTES = 64 << 20  # the jail's stdout+stderr; a real trial's events are far smaller
 
@@ -325,6 +326,14 @@ def jail_scratch(prefix: str = "k2val-cli-") -> Path:
     return Path(tempfile.mkdtemp(prefix=prefix, dir=root))
 
 
+def jail_home_root(prefix: str = "k2val-cli-") -> Path:
+    """A private TMPFS dir for one trial (K2VAL_JAIL_SHMDIR, else /dev/shm): the jail stages the
+    CLI's fresh home, the login copies, in it, so no copy of a login touches a disk. The caller
+    removes it, so even a SIGKILLed jail leaves nothing behind."""
+    root = os.environ.get(JAIL_SHMDIR_ENV) or "/dev/shm"
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=root))
+
+
 # ---------------------------------------------------------------------------
 # Gating
 # ---------------------------------------------------------------------------
@@ -367,6 +376,7 @@ class CliAdapter:
         if not jail_available(self.cfg.jail):
             raise JailError("no jail configured: the CLI legs never run unjailed")
         scratch = jail_scratch()
+        home_root = jail_home_root()
         workdir = scratch / "work"
         workdir.mkdir()
         prompt = f"{system_prompt}\n\n{user_prompt}"
@@ -383,7 +393,7 @@ class CliAdapter:
                     home_files.append((AGY_MCP_CONFIG, str(config)))
                     argv = agy_argv(self.conf, prompt)
                 upstream = urlsplit(server.url).netloc  # 127.0.0.1:<P>, the same inside the jail
-                run = await self._run(argv, workdir, scratch, upstream, home_files)
+                run = await self._run(argv, workdir, scratch, home_root, upstream, home_files)
             records = server.records()
         finally:
             # /work is jail-written: never follow, block on, or slurp what is there
@@ -392,7 +402,8 @@ class CliAdapter:
                 last_message = (read_jail_file(workdir, LAST_MESSAGE_FILE) or "").strip()
             except JailFileError as e:
                 last_message, refused = "", str(e)
-            remove_tree(scratch)  # loud if anything (a login copy) is left
+            remove_tree(home_root)  # loud if anything (a login copy) is left
+            remove_tree(scratch)
         lines, returncode = run.lines, run.returncode
 
         if self.conf.backend == "codex":
@@ -469,6 +480,7 @@ class CliAdapter:
         argv: list[str],
         workdir: Path,
         scratch: Path,
+        home_root: Path,
         upstream: str | None,
         home_files: list[tuple[str, str]],
     ) -> JailedRun:
@@ -480,19 +492,23 @@ class CliAdapter:
             mcp_upstream=upstream,
             home_files=home_files,
         )
-        return await run_jailed(cmd, scratch, workdir)
+        return await run_jailed(cmd, scratch, workdir, home_root)
 
 
-def jail_env(scratch: Path) -> dict[str, str]:
+def jail_env(scratch: Path, home_root: Path | None = None) -> dict[str, str]:
     """The jail script's own environment: what it needs to find the tools and the CLI's login
-    ($HOME), and where to stage (inside the trial's scratch). The jailed CLI gets none of it."""
-    return {
+    ($HOME), and where to stage: inside the trial's scratch, and the fresh home inside the
+    trial's tmpfs dir. The jailed CLI gets none of it."""
+    env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "LANG": "C.UTF-8",
         "HOME": os.environ.get("HOME", ""),
         JAIL_TMPDIR_ENV: str(scratch),
         "K2VAL_JAIL_PYTHON": sys.executable,
     }
+    if home_root is not None:
+        env[JAIL_SHMDIR_ENV] = str(home_root)
+    return env
 
 
 @dataclass
@@ -514,7 +530,9 @@ async def _stop(proc: asyncio.subprocess.Process) -> None:
             await proc.wait()
 
 
-async def run_jailed(cmd: list[str], scratch: Path, cwd: Path) -> JailedRun:
+async def run_jailed(
+    cmd: list[str], scratch: Path, cwd: Path, home_root: Path | None = None
+) -> JailedRun:
     """Run the jail script, its stdout and stderr merged. The output is jail-written, so it is
     read in chunks and capped at MAX_JAIL_OUTPUT_BYTES: past that the jail is stopped and the run
     marked truncated, instead of the harness filling its memory. On cancellation: `_stop`."""
@@ -524,7 +542,7 @@ async def run_jailed(cmd: list[str], scratch: Path, cwd: Path) -> JailedRun:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         cwd=str(cwd),
-        env=jail_env(scratch),
+        env=jail_env(scratch, home_root),
     )
     assert proc.stdout is not None
     chunks: list[bytes] = []

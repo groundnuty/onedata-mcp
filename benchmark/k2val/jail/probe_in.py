@@ -193,6 +193,14 @@ def check_home(conf: dict) -> None:
         home == "/home/agent" and files == sorted(conf["expected_home_files"]),
         f"HOME={home} files={files}",
     )
+    # the login copies never touch a disk: the home is a bind of a host tmpfs directory
+    fstype = None
+    for line in read("/proc/self/mountinfo").splitlines():
+        left, _, right = line.partition(" - ")
+        fields = left.split()
+        if len(fields) > 4 and fields[4] == home and right:
+            fstype = right.split()[0]
+    emit("home_tmpfs", fstype == "tmpfs", f"{home} is on {fstype}")
 
 
 # --- (4) unreachable, (5) TLS, (6) MCP -----------------------------------------------------------

@@ -627,9 +627,9 @@ def test_the_bwrap_arguments_isolate_the_cli() -> None:
     # read-write: only the fresh home and the work dir; nothing from the host's home or /mnt
     assert sorted((src, dst) for a, src, dst in binds if a == "--bind") == [
         ("/tmp/w", "/work"),
-        ("<staging>/home", "/home/agent"),
+        ("<home>", "/home/agent"),
     ]
-    host_sources = {src for _, src, _ in binds if not src.startswith("<staging>")}
+    host_sources = {src for _, src, _ in binds if not src.startswith(("<staging>", "<home>"))}
     # nothing of the host's /etc: its /etc/ssl holds local CAs and a certificate naming the host
     assert host_sources == {"/usr", "/tmp/w"}
     assert (
@@ -703,6 +703,21 @@ def test_cli_jail_refuses_a_workdir_or_staging_root_that_names_a_private_path(tm
         env = {"K2VAL_JAIL_TMPDIR": str(home_dir)}
         r = run_jail("--cli", "codex", "--workdir", w, "--", "codex", env=env)
         assert r.returncode == 2 and "staging root" in r.stderr
+
+
+def test_cli_jail_refuses_a_home_root_that_is_not_a_tmpfs() -> None:
+    """The login copies may never touch a disk."""
+    with (
+        tempfile.TemporaryDirectory(prefix="k2j-", dir="/tmp") as w,
+        tempfile.TemporaryDirectory(prefix="k2j-", dir="/tmp") as disk,
+    ):
+        fstype = subprocess.run(["stat", "-f", "-c", "%T", disk], capture_output=True, text=True)
+        if fstype.stdout.strip() == "tmpfs":
+            pytest.skip("/tmp is a tmpfs on this host")
+        r = run_jail(
+            "--cli", "codex", "--workdir", w, "--", "codex", env={"K2VAL_JAIL_SHMDIR": disk}
+        )
+        assert r.returncode == 2 and "must be a tmpfs" in r.stderr
 
 
 def test_cli_jail_refuses_a_non_empty_workdir() -> None:

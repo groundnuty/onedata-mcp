@@ -122,7 +122,9 @@ descriptor (`--args`), so no host path shows in the jail's `/proc/1/cmdline`. Th
   subject is the host name. Both CLIs look for that file first (seen in their binaries), and no `openssl.cnf` is
   needed;
 - a private `/tmp`, its own `/proc`, a minimal `/dev`, and a read-only root;
-- `/home/agent`, a fresh home staged per run, holding only that CLI's login, copied from the invoking user:
+- `/home/agent`, a fresh home staged per run in a private 0700 directory on a tmpfs (`K2VAL_JAIL_SHMDIR`, default
+  `/dev/shm`; anything else is refused), so no copy of a login ever touches a disk. It holds only that CLI's login,
+  copied from the invoking user through read-only fds:
   - codex: `~/.codex/auth.json`, `installation_id`;
   - agy: `~/.gemini/antigravity-cli/{antigravity-oauth-token,installation_id}` and
     `~/.gemini/{google_accounts.json,installation_id,settings.json}` if present;
@@ -192,7 +194,9 @@ service on the host's loopback (the Onedata providers, agent channel servers and
   relative names (`find -P ... -execdir chmod`, any depth), then remove (`rm -rf`; `remove_tree` tries Python first),
   then check: anything left is an error (the script exits 4), never silent.
 - A SIGKILL of the script skips that removal. The harness therefore stages inside the trial's scratch dir (its
-  `K2VAL_JAIL_TMPDIR`), removes that dir itself, and cancels with SIGTERM, then SIGKILL after 10 s.
+  `K2VAL_JAIL_TMPDIR`) and puts the home in a per-trial tmpfs dir (its `K2VAL_JAIL_SHMDIR`), removes both itself,
+  and cancels with SIGTERM, then SIGKILL after 10 s. Until that removal, a SIGKILLed jail's login copy sits in RAM
+  only.
 
 **Logins.** If the CLI rewrites a staged login file (a token refresh), the jail names the file on stderr, never its
 content, and discards it with the home. That post-exit check treats the staged paths as jail-written: a path that is
@@ -244,6 +248,7 @@ out: the trace's MCP half is the server's own record, and the CLI's events come 
 - The CLIs' account-level tools still act on the logged-in account. agy auto-approves tools such as knowledge, inbox
   and subagent management, which work on server-side account state. Use dedicated vendor accounts.
 - A token refreshed inside the jail is discarded, and two concurrent trials share one login.
+- The jail's home is in host RAM (a tmpfs): a CLI that writes a lot into its home uses memory, up to the tmpfs's size.
 - The login sits in the jail's home, readable by the CLI's own shell and file tools, and public egress is open on every
   port. A misbehaving or prompt-injected agent could therefore send that token anywhere on the internet, not only to its
   vendor. This follows from running the vendor's CLI with its login and internet access; dedicated accounts limit what
@@ -261,7 +266,8 @@ out: the trace's MCP half is the server's own record, and the CLI's events come 
       no file under `/etc` holds the host or user name (certificates are searched decoded too), and every CA
       certificate there is in the distro's Mozilla set, computed on the host;
    2. the env is exactly the allowed names;
-   3. the home holds exactly that CLI's login files;
+   3. the home holds exactly that CLI's login files and is a tmpfs; while a jail runs, no login file is under the
+      on-disk staging root;
    4. the host's loopback (`127.0.0.1:31443/31444`, `10.0.2.2` on several ports, a canary on the host's
       `127.0.0.1`), a `0.0.0.0` canary via every host IPv4 address, port 22 on those addresses, and the metadata
       service are all unreachable. Each target IS reachable from the host at that moment (or is marked "not

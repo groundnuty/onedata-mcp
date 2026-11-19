@@ -6,20 +6,24 @@ side, and prints a PASS/FAIL table. Entry point: leak-probe.sh.
 Per CLI, with the same jail arguments the harness uses (--cli, --workdir, --mcp-upstream):
 
 1. host paths (the home, /mnt, /Users, ~/.ssh, the repo, the config, token and key files) are
-   absent, no host-identifying string shows in the jail's /proc or /etc, and /opt/cli holds
-   the jail's own copies of the binaries (no symlink, no inode shared with the host);
+   absent, no host-identifying string shows in the jail's /proc or /etc, /opt/cli holds the
+   jail's own copies of the binaries (no symlink, no inode shared with the host), and nothing
+   under /etc names the host or user, its only CAs being the distro's Mozilla set;
 2. the environment holds exactly the allowed variables;
-3. the fresh home holds exactly that CLI's login files;
+3. the fresh home holds exactly that CLI's login files and is a tmpfs; while a jail runs, no
+   login file is under the on-disk staging root;
 4. the host's loopback (127.0.0.1:31443/31444, 10.0.2.2, a canary listener started here) and
    the host's other addresses (a 0.0.0.0 canary via every host IPv4 address, the metadata
-   service) are unreachable, while each target IS reachable from the host at that moment;
-   slirp's DNS relay 10.0.2.3 answers nothing, and no name the host resolves locally (found
-   now: its hostname, under each search domain, its tailnet name) resolves inside;
+   service) are unreachable, while each target IS reachable from the host at that moment; no
+   resolver on or near the host (slirp's relay, the resolved stub, the tailnet's, each one the
+   host is configured with) answers a query for the neutral example.com. The probe never sends
+   a host-derived name to any resolver;
 5. one TLS handshake each to api.openai.com, chatgpt.com, generativelanguage.googleapis.com
    (through the public resolvers);
 6. 127.0.0.1:<P> inside the jail reaches a dummy HTTP server run here as the upstream;
 7. host processes are not visible; and, beyond the brief: no capabilities, no user namespaces,
-   the nft filter can be neither read nor flushed, no terminal, no stray file descriptors;
+   the nft filter can be neither read nor flushed, no terminal, no stray file descriptors, and
+   no fd of any jail process (bwrap's pid 1 included) names a host path;
 8. no staging dir and no process is left after a normal exit, a SIGTERM and a SIGKILL; and
    three hostile runs (the probe plays a tampering CLI): after a chmod 0 of the home, the
    login's dir and /work plus a 3000-deep locked chain, everything is removed; a FIFO and a
@@ -76,6 +80,15 @@ LOGIN_FILES = {
         ".gemini/settings.json",
     ],
 }
+
+
+SHM_ROOT = "/dev/shm"
+
+
+def login_copies_under(root: str, cli: str) -> int:
+    """Files under `root` named like one of `cli`'s login files."""
+    names = {os.path.basename(f) for f in LOGIN_FILES[cli]}
+    return sum(f in names for _, _, files in os.walk(root) for f in files)
 
 
 def expected_home(cli: str, home: str) -> list[str]:
@@ -474,6 +487,7 @@ class CliProbe:
             "LANG": "C.UTF-8",
             "HOME": self.home,
             "K2VAL_JAIL_TMPDIR": root,
+            "K2VAL_JAIL_SHMDIR": self.shm,  # where the jail stages the home (a tmpfs)
         }
         proc = subprocess.Popen(
             cmd,
@@ -498,7 +512,8 @@ class CliProbe:
         deadline = time.monotonic() + 10
         while True:
             left = Leftovers(
-                files=[n for n in os.listdir(root) if os.path.join(root, n) != probe],
+                files=[n for n in os.listdir(root) if os.path.join(root, n) != probe]
+                + [os.path.join(self.shm, n) for n in os.listdir(self.shm)],
                 procs=jail_processes([root, "/opt/k2val/"]),
                 slirps=jail_slirps() - slirp_before,
             )
@@ -518,6 +533,7 @@ class CliProbe:
         canary_lo, canary_any = Canary("127.0.0.1"), Canary("0.0.0.0")
         root = tempfile.mkdtemp(prefix="k2val-probe-root-", dir=NEUTRAL_ROOT)
         workdir = tempfile.mkdtemp(prefix="k2val-probe-work-", dir=NEUTRAL_ROOT)
+        self.shm = tempfile.mkdtemp(prefix="k2val-probe-shm-", dir=SHM_ROOT)
         try:
             conf = self.probe_conf(upstream, canary_lo, canary_any)
             # fd targets may name none of the host strings, nor the staging root or the host
@@ -585,6 +601,7 @@ class CliProbe:
             host_proc.wait()
             force_rmtree(root)
             force_rmtree(workdir)
+            force_rmtree(self.shm)
         return rep
 
     def hostile_case(
@@ -641,6 +658,13 @@ class CliProbe:
         proc, probe = self.run_jail(sleep_conf, root, workdir, upstream)
         started = proc.stdout.readline().strip() == "SLEEPING"
         running = jail_processes([root, "/opt/k2val/"])
+        if sig == signal.SIGTERM:  # while the jail runs: no login copy on the disk
+            on_disk = login_copies_under(root, self.cli)
+            self.report.add(
+                "3 no login copy on disk while the jail runs",
+                started and on_disk == 0,
+                f"{on_disk} login files under the on-disk staging root",
+            )
         proc.send_signal(sig)
         try:
             proc.wait(timeout=30)
@@ -683,6 +707,7 @@ class CliProbe:
             ("work_empty", "1 /work is empty"),
             ("env", "2 env = allowed vars only"),
             ("home", "3 fresh home = this CLI's login files only"),
+            ("home_tmpfs", "3 the fresh home is a tmpfs"),
         ]:
             r = get(i)
             rep.add(prop, r["ok"], r["detail"])

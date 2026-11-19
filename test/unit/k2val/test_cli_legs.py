@@ -544,6 +544,7 @@ def fakes(tmp_path, monkeypatch, cfg):
     cli, jail, cli_log, jail_log = make_fakes(tmp_path)
     monkeypatch.setattr(cli_agents, "McpHttpServer", FakeServer)
     monkeypatch.setenv("K2VAL_JAIL_TMPDIR", str(tmp_path))
+    monkeypatch.setenv("K2VAL_JAIL_SHMDIR", str(tmp_path))
     FakeServer.instances.clear()
     conf = replace(cfg.models["gpt-luna-low"], binary=str(cli))
     jailed = replace(cfg, jail=JailConf(wrapper=str(jail)), models={**cfg.models, conf.name: conf})
@@ -584,9 +585,12 @@ async def test_a_codex_trial_runs_in_the_jail_with_an_empty_workdir_and_a_url_on
         "LANG",
         "HOME",
         "K2VAL_JAIL_TMPDIR",
+        "K2VAL_JAIL_SHMDIR",
         "K2VAL_JAIL_PYTHON",
     }
     assert jail_row["env"]["K2VAL_JAIL_TMPDIR"] == str(scratch)
+    home_root = Path(jail_row["env"]["K2VAL_JAIL_SHMDIR"])  # the fresh home's tmpfs dir
+    assert home_root.parent == tmp_path and home_root != scratch
     assert scratch.parent == tmp_path
     (run,) = log_rows(cli_log)
     assert run["ls"] == [] and run["cwd"].endswith("/work")
@@ -609,6 +613,7 @@ async def test_a_codex_trial_runs_in_the_jail_with_an_empty_workdir_and_a_url_on
     assert [t.tool_name for t in out.tool_calls] == ["check_readiness", "ensure_readiness", "shell"]
     assert FakeServer.instances[0].tools == KNOWN
     assert not scratch.exists()  # the scratch dir (with the work dir) is gone
+    assert not home_root.exists()  # and so is the home's tmpfs dir
 
 
 @pytest.mark.asyncio
