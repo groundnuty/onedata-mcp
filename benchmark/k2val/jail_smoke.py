@@ -33,7 +33,13 @@ from benchmark.k2val.cli_agents import (
     run_jailed,
 )
 from benchmark.k2val.config import ConfigError, JailConf, ModelConf, load_config
-from benchmark.k2val.jail import JailError, jail_available, jail_cmd
+from benchmark.k2val.jail import (
+    JailError,
+    JailFileError,
+    jail_available,
+    jail_cmd,
+    read_jail_file,
+)
 from benchmark.k2val.secrets import redact, say
 
 SMOKE_PROMPT = "Reply with the single word OK."
@@ -76,10 +82,13 @@ async def smoke_one(conf: ModelConf, jail: JailConf, out_dir: Path) -> dict:
     try:
         cmd = jail_cmd(smoke_argv(conf), str(workdir), jail, cli=conf.backend)
         t0 = time.monotonic()
-        lines, rc = await run_jailed(cmd, scratch, workdir)
+        run = await run_jailed(cmd, scratch, workdir)
+        lines, rc = run.lines, run.returncode
         elapsed = time.monotonic() - t0
-        last = workdir / LAST_MESSAGE_FILE
-        last_message = last.read_text(encoding="utf-8").strip() if last.exists() else ""
+        try:  # /work is jail-written: the hardened read, never read_text
+            last_message = (read_jail_file(workdir, LAST_MESSAGE_FILE) or "").strip()
+        except JailFileError as e:
+            last_message = f"<not read: {e}>"
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     if conf.backend == "codex":
@@ -93,6 +102,7 @@ async def smoke_one(conf: ModelConf, jail: JailConf, out_dir: Path) -> dict:
     return {
         "config": conf.name,
         "returncode": rc,
+        "output_truncated": run.truncated,
         "seconds": round(elapsed, 1),
         "final_message_parsed": parsed.final_answer,
         "final_message_file": last_message,

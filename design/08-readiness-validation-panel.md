@@ -183,6 +183,12 @@ out: the trace's MCP half is the server's own record, and the CLI's events come 
   read as a flag. The old `--settings` and `agy mcp add` modes are gone: one rejects `mcpServers`, and the other would
   register the server in a home that is deleted. `mcp_attach = "mcp_add"` is a config error.
 - No wrapper still means no CLI legs.
+- Everything the jail writes is untrusted on the host. `/work/last_message.txt` is read only through `read_jail_file`
+  (`jail/__init__.py`): opened `O_NOFOLLOW|O_NONBLOCK` relative to an `O_NOFOLLOW` directory fd, `fstat`-checked to be
+  a regular file with one link, and at most 1 MiB. A symlink (to a host file, `/proc/self/environ`, `/dev/zero`), a
+  FIFO, a device, a directory or a hard link there is refused unread, and the trial is an adapter error. The jail's
+  stdout and stderr are read in chunks and capped at 64 MiB; past that the jail is stopped and the run marked
+  truncated.
 
 **Event streams, from the two real smokes** (one-word prompt, no MCP server; field names only):
 - codex 0.169 `--json`: `thread.started` {thread_id}; `turn.started`; `item.completed` {item {id, type: agent_message,

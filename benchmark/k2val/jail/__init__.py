@@ -18,8 +18,10 @@ raises, so a CLI is never run unjailed.
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
+import stat
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -28,10 +30,57 @@ from benchmark.k2val.config import JailConf
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CLIS = ("codex", "agy")
 _UPSTREAM = re.compile(r"127\.0\.0\.1:\d{1,5}")
+MAX_JAIL_FILE_BYTES = 1 << 20  # 1 MiB: a jail-written file the host reads is never larger
 
 
 class JailError(RuntimeError):
     """No jail is configured: the CLI legs refuse to run."""
+
+
+class JailFileError(RuntimeError):
+    """A file the jail wrote is not a plain small regular file: it is not read."""
+
+
+def read_jail_file(
+    directory: Path | str, name: str, limit: int = MAX_JAIL_FILE_BYTES
+) -> str | None:
+    """Read `name` in `directory`, a file the jailed CLI could have written (or replaced), without
+    trusting it. None if it is absent. Refused (JailFileError) unless it is a regular file with one
+    link and at most `limit` bytes: a symlink (to a host file, /proc/self/environ, /dev/zero), a
+    FIFO (which would hang the read), a device, a directory or a hard link is never followed or
+    read. The file is opened relative to an O_NOFOLLOW directory fd, O_NOFOLLOW and O_NONBLOCK,
+    and checked with fstat on that same fd."""
+    if not name or "/" in name or name in (".", ".."):
+        raise ValueError(f"a plain file name is required, got {name!r}")
+    dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
+        try:
+            fd = os.open(name, flags, dir_fd=dir_fd)
+        except FileNotFoundError:
+            return None
+        except OSError as e:  # ELOOP: a symlink
+            raise JailFileError(
+                f"{name}: not a regular file ({os.strerror(e.errno or 0)})"
+            ) from None
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise JailFileError(f"{name}: not a regular file")
+            if st.st_nlink != 1:
+                raise JailFileError(f"{name}: a hard link ({st.st_nlink} links)")
+            if st.st_size > limit:
+                raise JailFileError(f"{name}: larger than {limit} bytes")
+            data = b""
+            while len(data) <= limit and (chunk := os.read(fd, 65536)):
+                data += chunk
+            if len(data) > limit:
+                raise JailFileError(f"{name}: larger than {limit} bytes")
+        finally:
+            os.close(fd)
+    finally:
+        os.close(dir_fd)
+    return data.decode("utf-8", errors="replace")
 
 
 _JAIL = JailConf()

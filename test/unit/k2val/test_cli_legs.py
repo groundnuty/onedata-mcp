@@ -714,3 +714,68 @@ async def test_a_cli_that_crashes_or_says_nothing_is_an_adapter_error_not_a_mode
     assert out.finish_reason == "adapter_error"
     assert needle in out.error
     assert out.final_answer == ""
+
+
+# A CLI that plants a symlink where codex writes its last message: the harness reads that file
+# after the run, on the host, where the link would resolve to a host file.
+SYMLINKING_CLI = """#!{python}
+import os
+print('{{"type": "item.completed", "item": {{"type": "agent_message", "text": "Not ready."}}}}')
+os.symlink({secret!r}, "last_message.txt")
+"""
+
+# A CLI that floods its output, then lingers.
+FLOODING_CLI = """#!{python}
+import sys, time
+for _ in range(3000):
+    sys.stdout.write("x" * 1023 + "\\n")
+sys.stdout.flush()
+time.sleep(30)
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_planted_symlink_in_the_work_dir_is_never_followed(fakes, tmp_path) -> None:
+    cfg, conf, cli_log, jail_log = fakes
+    secret = tmp_path / "host.token"
+    secret.write_text("HOST-SECRET-VALUE")
+    cli = tmp_path / "symlinking-cli"
+    cli.write_text(SYMLINKING_CLI.format(python=sys.executable, secret=str(secret)))
+    cli.chmod(cli.stat().st_mode | stat.S_IEXEC)
+
+    out = await CliAdapter(cfg, replace(conf, binary=str(cli)), tmp_path).dispatch(
+        system_prompt="s",
+        user_prompt="u",
+        mcp_app=RecordingApp(object(), allowed=KNOWN),
+        allowed_tools=KNOWN,
+    )
+
+    assert "HOST-SECRET-VALUE" not in json.dumps(
+        [out.final_answer, out.error, out.raw_trace], default=str
+    )
+    assert out.finish_reason == "adapter_error" and "was not read" in out.error
+    assert out.raw_trace["refused_jail_file"]
+
+
+@pytest.mark.asyncio
+async def test_a_flood_of_output_is_capped_and_the_jail_stopped(
+    fakes, tmp_path, monkeypatch
+) -> None:
+    cfg, conf, cli_log, jail_log = fakes
+    monkeypatch.setattr(cli_agents, "MAX_JAIL_OUTPUT_BYTES", 1 << 20)
+    cli = tmp_path / "flooding-cli"
+    cli.write_text(FLOODING_CLI.format(python=sys.executable))
+    cli.chmod(cli.stat().st_mode | stat.S_IEXEC)
+
+    t0 = asyncio.get_running_loop().time()
+    out = await CliAdapter(cfg, replace(conf, binary=str(cli)), tmp_path).dispatch(
+        system_prompt="s",
+        user_prompt="u",
+        mcp_app=RecordingApp(object(), allowed=KNOWN),
+        allowed_tools=KNOWN,
+    )
+
+    assert asyncio.get_running_loop().time() - t0 < 20  # stopped, not waited out
+    assert out.raw_trace["output_truncated"] is True
+    assert "passed" in out.error and out.finish_reason == "adapter_error"
+    assert sum(len(e) + 1 for e in out.raw_trace["events"]) <= (1 << 20) + 1

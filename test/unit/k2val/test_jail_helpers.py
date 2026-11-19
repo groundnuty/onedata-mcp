@@ -5,6 +5,7 @@ test/live/test_k2val_jail_live.py (the leak probe)."""
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import os
 import socket
@@ -16,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from benchmark.k2val.jail import fwd_in, fwd_out, netns
+from benchmark.k2val.jail import JailFileError, fwd_in, fwd_out, netns, read_jail_file
 
 JAIL_DIR = Path(fwd_out.__file__).resolve().parent
 CLI_JAIL = JAIL_DIR / "cli-jail.sh"
@@ -213,6 +214,59 @@ def test_slirp_gets_the_owning_user_namespace() -> None:
 def test_netns_arguments_are_strict(argv) -> None:
     with pytest.raises(ValueError):
         netns.parse(argv)
+
+
+# --- host-side reads of jail-written files -------------------------------------------------
+
+
+def test_a_plain_jail_file_is_read_and_a_missing_one_is_none(tmp_path) -> None:
+    (tmp_path / "last_message.txt").write_text("OK\n")
+    assert read_jail_file(tmp_path, "last_message.txt") == "OK\n"
+    assert read_jail_file(tmp_path, "absent.txt") is None
+    with pytest.raises(ValueError):
+        read_jail_file(tmp_path, "../x")
+
+
+@pytest.mark.parametrize(
+    "plant",
+    [
+        "symlink-to-host-file",
+        "symlink-to-environ",
+        "symlink-to-dev-zero",
+        "fifo",
+        "dir",
+        "hardlink",
+    ],
+)
+def test_a_jail_file_that_is_not_a_plain_file_is_refused_unread(tmp_path, plant) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    secret = tmp_path / "host-secret.token"
+    secret.write_text("HOST-SECRET-VALUE")
+    target = work / "last_message.txt"
+    if plant == "symlink-to-host-file":
+        target.symlink_to(secret)
+    elif plant == "symlink-to-environ":
+        target.symlink_to("/proc/self/environ")
+    elif plant == "symlink-to-dev-zero":
+        target.symlink_to("/dev/zero")
+    elif plant == "fifo":
+        os.mkfifo(target)  # a blocking read here would hang the harness
+    elif plant == "dir":
+        target.mkdir()
+    else:
+        os.link(work / ".." / "host-secret.token", target)
+    with concurrent.futures.ThreadPoolExecutor(1) as pool:
+        future = pool.submit(read_jail_file, work, "last_message.txt")
+        with pytest.raises(JailFileError):
+            future.result(timeout=5)
+
+
+def test_an_oversized_jail_file_is_refused(tmp_path) -> None:
+    (tmp_path / "big").write_bytes(b"x" * 2048)
+    with pytest.raises(JailFileError, match="larger"):
+        read_jail_file(tmp_path, "big", limit=1024)
+    assert read_jail_file(tmp_path, "big", limit=2048) == "x" * 2048
 
 
 # --- cli-jail.sh ------------------------------------------------------------------------------

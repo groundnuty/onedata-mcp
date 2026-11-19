@@ -41,7 +41,13 @@ from urllib.parse import urlsplit
 
 from benchmark._runtime_types import ToolCall
 from benchmark.k2val.config import FederationSecrets, K2valConfig, ModelConf
-from benchmark.k2val.jail import JailError, jail_available, jail_cmd
+from benchmark.k2val.jail import (
+    JailError,
+    JailFileError,
+    jail_available,
+    jail_cmd,
+    read_jail_file,
+)
 from benchmark.k2val.mcp_http import McpHttpServer
 from benchmark.k2val.recording import CallRecord
 from benchmark.k2val.secrets import redact
@@ -53,6 +59,7 @@ AGY_MCP_CONFIG = ".gemini/config/mcp_config.json"  # its place in the jail's fre
 AGY_MCP_CONFIG_FILE = "agy-mcp-config.json"  # where the adapter writes it, outside /work
 JAIL_TMPDIR_ENV = "K2VAL_JAIL_TMPDIR"
 TERMINATE_GRACE_S = 10.0
+MAX_JAIL_OUTPUT_BYTES = 64 << 20  # the jail's stdout+stderr; a real trial's events are far smaller
 
 
 # ---------------------------------------------------------------------------
@@ -376,12 +383,17 @@ class CliAdapter:
                     home_files.append((AGY_MCP_CONFIG, str(config)))
                     argv = agy_argv(self.conf, prompt)
                 upstream = urlsplit(server.url).netloc  # 127.0.0.1:<P>, the same inside the jail
-                lines, returncode = await self._run(argv, workdir, scratch, upstream, home_files)
+                run = await self._run(argv, workdir, scratch, upstream, home_files)
             records = server.records()
         finally:
-            last = workdir / LAST_MESSAGE_FILE
-            last_message = last.read_text(encoding="utf-8").strip() if last.exists() else ""
+            # /work is jail-written: never follow, block on, or slurp what is there
+            refused: str | None = None
+            try:
+                last_message = (read_jail_file(workdir, LAST_MESSAGE_FILE) or "").strip()
+            except JailFileError as e:
+                last_message, refused = "", str(e)
             shutil.rmtree(scratch, ignore_errors=True)
+        lines, returncode = run.lines, run.returncode
 
         if self.conf.backend == "codex":
             parsed = parse_codex_events(lines)
@@ -415,7 +427,11 @@ class CliAdapter:
         if len(mcp_seen) != len(records):
             note = f"cli reported {len(mcp_seen)} MCP calls, the server recorded {len(records)}"
         error = None
-        if returncode not in (0, None):
+        if run.truncated:
+            error = f"the CLI's output passed {MAX_JAIL_OUTPUT_BYTES} bytes; the jail was stopped"
+        elif refused:  # something other than a plain file sits where the CLI writes its answer
+            error = f"the jail's {LAST_MESSAGE_FILE} was not read: {refused}"
+        elif returncode not in (0, None):
             error = parsed.error or f"the CLI exited with status {returncode}"
         elif not parsed.final_answer:
             error = parsed.error or "the CLI ended without a final message"
@@ -442,6 +458,8 @@ class CliAdapter:
                 "builtin_calls": len(builtin),
                 "count_mismatch": note,
                 "unparsed_lines": parsed.unparsed,
+                "output_truncated": run.truncated,
+                "refused_jail_file": refused,
             },
             error=redact(error) if error else None,
         )
@@ -453,7 +471,7 @@ class CliAdapter:
         scratch: Path,
         upstream: str | None,
         home_files: list[tuple[str, str]],
-    ) -> tuple[list[str], int | None]:
+    ) -> JailedRun:
         cmd = jail_cmd(
             argv,
             str(workdir),
@@ -477,9 +495,29 @@ def jail_env(scratch: Path) -> dict[str, str]:
     }
 
 
-async def run_jailed(cmd: list[str], scratch: Path, cwd: Path) -> tuple[list[str], int | None]:
-    """Run the jail script, its stdout and stderr merged. On cancellation: SIGTERM (the script
-    then removes its staging dir and ends the jail), SIGKILL after a grace period."""
+@dataclass
+class JailedRun:
+    lines: list[str]
+    returncode: int | None
+    truncated: bool = False  # the output passed MAX_JAIL_OUTPUT_BYTES and the jail was stopped
+
+
+async def _stop(proc: asyncio.subprocess.Process) -> None:
+    """SIGTERM (the script then removes its staging dir and ends the jail), SIGKILL after a grace
+    period."""
+    if proc.returncode is None:
+        proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), TERMINATE_GRACE_S)
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+
+
+async def run_jailed(cmd: list[str], scratch: Path, cwd: Path) -> JailedRun:
+    """Run the jail script, its stdout and stderr merged. The output is jail-written, so it is
+    read in chunks and capped at MAX_JAIL_OUTPUT_BYTES: past that the jail is stopped and the run
+    marked truncated, instead of the harness filling its memory. On cancellation: `_stop`."""
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdin=asyncio.subprocess.DEVNULL,
@@ -488,18 +526,26 @@ async def run_jailed(cmd: list[str], scratch: Path, cwd: Path) -> tuple[list[str
         cwd=str(cwd),
         env=jail_env(scratch),
     )
+    assert proc.stdout is not None
+    chunks: list[bytes] = []
+    size = 0
+    truncated = False
     try:
-        out, _ = await proc.communicate()
+        while data := await proc.stdout.read(65536):
+            if size + len(data) > MAX_JAIL_OUTPUT_BYTES:
+                chunks.append(data[: MAX_JAIL_OUTPUT_BYTES - size])
+                truncated = True
+                break
+            chunks.append(data)
+            size += len(data)
+        if truncated:
+            await _stop(proc)
+        await proc.wait()
     except asyncio.CancelledError:
-        if proc.returncode is None:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), TERMINATE_GRACE_S)
-            except TimeoutError:
-                proc.kill()
-                await proc.wait()
+        await _stop(proc)
         raise
-    return out.decode("utf-8", errors="replace").splitlines(), proc.returncode
+    lines = b"".join(chunks).decode("utf-8", errors="replace").splitlines()
+    return JailedRun(lines, proc.returncode, truncated)
 
 
 def make_cli_adapter(
