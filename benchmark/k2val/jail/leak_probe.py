@@ -398,8 +398,17 @@ class CliProbe:
             stderr=subprocess.PIPE,
             env=env,
             text=True,
+            start_new_session=True,  # its own process group: a hang is killed whole (kill_group)
         )
         return proc, probe
+
+    @staticmethod
+    def kill_group(proc: subprocess.Popen) -> tuple[str, str]:
+        """SIGKILL the jail script's whole process group (a hung child of it would otherwise keep
+        its pipes open), then collect what it printed."""
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        return proc.communicate()
 
     def leftovers(self, root: str, probe: str, slirp_before: set[int]) -> Leftovers:
         deadline = time.monotonic() + 10
@@ -436,8 +445,7 @@ class CliProbe:
             try:
                 out, err = proc.communicate(timeout=240)
             except subprocess.TimeoutExpired:
-                proc.kill()
-                out, err = proc.communicate()
+                out, err = self.kill_group(proc)
             results = {}
             for line in out.splitlines():
                 with contextlib.suppress(ValueError):
@@ -463,6 +471,14 @@ class CliProbe:
                 root,
                 upstream,
             )
+            self.hostile_case(
+                "hostile-plants",
+                "8 no hang on a FIFO or /dev/zero planted at a login path",
+                conf,
+                root,
+                upstream,
+                expect_in_stderr=tuple(conf["expected_home_files"]),
+            )
         finally:
             upstream.close()
             canary_lo.close()
@@ -473,9 +489,18 @@ class CliProbe:
             force_rmtree(workdir)
         return rep
 
-    def hostile_case(self, mode: str, prop: str, conf: dict, root: str, upstream: Upstream) -> None:
+    def hostile_case(
+        self,
+        mode: str,
+        prop: str,
+        conf: dict,
+        root: str,
+        upstream: Upstream,
+        expect_in_stderr: tuple[str, ...] = (),
+    ) -> None:
         """The probe plays a hostile CLI (`mode`), then exits 0. The jail script must still end
-        in time and remove its staging dir; the work dir must still be removable by its owner."""
+        in time and remove its staging dir; the work dir must still be removable by its owner;
+        and the script's stderr must name each of `expect_in_stderr`."""
         workdir = tempfile.mkdtemp(prefix="k2val-probe-work-", dir=NEUTRAL_ROOT)
         slirp_before = jail_slirps()
         proc, probe = self.run_jail({**conf, "mode": mode}, root, workdir, upstream)
@@ -484,8 +509,7 @@ class CliProbe:
             out, err = proc.communicate(timeout=HOSTILE_TIMEOUT_S)
             hung = False
         except subprocess.TimeoutExpired:
-            proc.kill()
-            out, err = proc.communicate()
+            out, err = self.kill_group(proc)
             hung = True
         elapsed = time.monotonic() - t0
         left = self.leftovers(root, probe, slirp_before)
@@ -493,12 +517,15 @@ class CliProbe:
         for n in left.files:  # whatever the script failed to remove (a FAIL below)
             force_rmtree(os.path.join(root, n))
         work_removed = force_rmtree(workdir)
+        named = [s for s in expect_in_stderr if s in err]
         ok = done and not hung and proc.returncode == 0 and not left.files
-        ok = ok and left.processes_gone and work_removed
+        ok = ok and left.processes_gone and work_removed and len(named) == len(expect_in_stderr)
         detail = (
             f"exit {proc.returncode} after {elapsed:.1f}s{' (HUNG, killed)' if hung else ''}; "
             f"{left.describe()}; work dir removable: {work_removed}"
         )
+        if expect_in_stderr:
+            detail += f"; replaced logins named {len(named)}/{len(expect_in_stderr)}"
         if not done:
             detail = f"hostile probe did not finish: {' | '.join(err.splitlines()[-2:])}; " + detail
         self.report.add(prop, ok, detail)

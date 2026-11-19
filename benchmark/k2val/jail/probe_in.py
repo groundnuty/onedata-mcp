@@ -265,6 +265,24 @@ def hostile_perms_mode(conf: dict) -> int:
     return 0
 
 
+def hostile_plants_mode(conf: dict) -> int:
+    """Replace the staged login files with things the host's post-exit check must not open: a
+    FIFO (a read blocks forever), a symlink to /dev/zero (a read never ends), and symlinks to
+    /proc/self/environ (a host file once the path resolves on the host). Then exit 0."""
+    home = os.environ["HOME"]
+    for i, rel in enumerate(conf["expected_home_files"]):
+        path = os.path.join(home, rel)
+        os.unlink(path)
+        if i == 0:
+            os.mkfifo(path)
+        elif i == 1:
+            os.symlink("/dev/zero", path)
+        else:
+            os.symlink("/proc/self/environ", path)
+    print("HOSTILE-DONE", flush=True)
+    return 0
+
+
 def main() -> int:
     with open(sys.argv[1], encoding="utf-8") as f:
         conf = json.load(f)
@@ -272,6 +290,8 @@ def main() -> int:
         return sleep_mode()
     if conf.get("mode") == "hostile-perms":
         return hostile_perms_mode(conf)
+    if conf.get("mode") == "hostile-plants":
+        return hostile_plants_mode(conf)
     check_paths(conf)
     check_strings(conf)
     check_env(conf)

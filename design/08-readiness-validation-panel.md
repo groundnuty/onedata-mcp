@@ -177,7 +177,9 @@ service on the host's loopback (the Onedata providers, agent channel servers and
   `K2VAL_JAIL_TMPDIR`), removes that dir itself, and cancels with SIGTERM, then SIGKILL after 10 s.
 
 **Logins.** If the CLI rewrites a staged login file (a token refresh), the jail names the file on stderr, never its
-content, and discards it with the home. The host's own login is never written. Nothing of the jail's home is copied
+content, and discards it with the home. That post-exit check treats the staged paths as jail-written: a path that is
+no longer a regular non-symlink file (a FIFO, a symlink to `/dev/zero` or a host file) is named as replaced and never
+opened, and each hash runs under `timeout 10`, so it can neither hang nor defer a SIGTERM for long. The host's own login is never written. Nothing of the jail's home is copied
 out: the trace's MCP half is the server's own record, and the CLI's events come on its stdout.
 
 **Harness wiring.**

@@ -324,12 +324,26 @@ wait "$BW_PID"
 RC=$?
 BW_PID="" CHILD_PID=""  # gone: its pid must not be signalled again
 
-# a login the CLI refreshed inside the jail is discarded with the home: name the file, show
-# nothing of it (sha256sum -c --quiet prints only "<path>: FAILED" lines)
-CHANGED=$(cd "$S/home" && sha256sum --quiet -c "$S/ctl/credentials.sha256" 2>/dev/null \
-  | sed -n 's/: FAILED.*$//p' | tr '\n' ' ')
+# A login the CLI refreshed inside the jail is discarded with the home: name the file, show
+# nothing of it. The staged paths are jail-written by now: each must still be a regular file and
+# not a symlink before it is hashed (a FIFO there would block the read forever, a symlink would
+# resolve to /dev/zero or a host file), and each hash is bounded by `timeout`, so a pending
+# SIGTERM is never deferred for long and the cleanup always runs.
+CHANGED="" REPLACED=""
+while read -r sum rel; do
+  path=$S/home/${rel#./}
+  if [ -L "$path" ] || [ ! -f "$path" ]; then
+    REPLACED+="${rel#./} "
+  elif [ "$(timeout 10 sha256sum < "$path" 2>/dev/null | cut -d' ' -f1)" != "$sum" ]; then
+    CHANGED+="${rel#./} "
+  fi
+done < "$S/ctl/credentials.sha256"
 if [ -n "$CHANGED" ]; then
   echo "cli-jail: warning: $CLI rewrote its login file(s) inside the jail: $CHANGED(a token" \
        "refresh?); the jail's copy is discarded, the host keeps its own" >&2
+fi
+if [ -n "$REPLACED" ]; then
+  echo "cli-jail: warning: login path(s) removed, or replaced inside the jail by something other" \
+       "than a regular file (not read): $REPLACED" >&2
 fi
 exit "$RC"
