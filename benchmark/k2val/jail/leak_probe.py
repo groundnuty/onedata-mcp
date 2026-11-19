@@ -611,6 +611,7 @@ class CliProbe:
             ("root", "1 / holds only the jail's dirs"),
             ("etc", "1 /etc holds only generated + ssl files"),
             ("usr_local", "1 /usr/local hidden"),
+            ("cli_binaries", "1 /opt/cli: own copies (no symlink, no host inode)"),
             ("home_dir", "1 /home holds only the fresh home"),
             ("work_empty", "1 /work is empty"),
             ("env", "2 env = allowed vars only"),

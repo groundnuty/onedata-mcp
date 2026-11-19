@@ -17,6 +17,7 @@ import os
 import signal
 import socket
 import ssl
+import stat
 import struct
 import subprocess
 import sys
@@ -76,6 +77,23 @@ def check_paths(conf: dict) -> None:
     emit(
         "usr_local", listing("/usr/local") == [], f"/usr/local entries={len(listing('/usr/local'))}"
     )
+
+
+def check_cli_binaries() -> None:
+    """/opt/cli holds the jail's own copies: no symlink (its target would name a host path), and
+    no hard link (one inode shared with the host's binary)."""
+    entries = listing("/opt/cli")
+    bad = []
+    for name in entries:
+        st = os.lstat(f"/opt/cli/{name}")
+        if stat.S_ISLNK(st.st_mode):
+            bad.append(f"{name}: a symlink")
+        elif not stat.S_ISREG(st.st_mode):
+            bad.append(f"{name}: not a regular file")
+        elif st.st_nlink != 1:
+            bad.append(f"{name}: {st.st_nlink} links (an inode shared with the host)")
+    emit("cli_binaries", bool(entries) and not bad,
+         f"{len(entries)} files, own copies" if not bad else "; ".join(bad))  # fmt: skip
 
 
 def check_strings(conf: dict) -> None:
@@ -325,6 +343,7 @@ def main() -> int:
     if conf.get("mode") == "hostile-plants":
         return hostile_plants_mode(conf)
     check_paths(conf)
+    check_cli_binaries()
     check_strings(conf)
     check_env(conf)
     check_home(conf)

@@ -125,8 +125,8 @@ descriptor (`--args`), so no host path shows in the jail's `/proc/1/cmdline`. Th
     `~/.gemini/{google_accounts.json,installation_id,settings.json}` if present;
   - plus any `--home-file` (the harness: agy's `mcp_config.json`);
 - `/work`, the empty work dir;
-- `/opt/cli`, a staged copy (a hard link when on the same filesystem) of the CLI binary and, for codex, its sibling
-  helper binaries;
+- `/opt/cli`, a staged copy (`cp -L`: every symlink resolved, no inode shared with the host) of the CLI binary and,
+  for codex, its sibling helper binaries;
 - `/opt/k2val`, the inside forwarder;
 - `/run/k2val`, the socket dir.
 

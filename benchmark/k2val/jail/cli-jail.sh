@@ -174,8 +174,9 @@ stage_home_files() {
   done
 }
 
-# The CLI's binaries, copied (hard-linked when on the same filesystem) to a neutral path, so no
-# host path shows in the jail's mountinfo or in /proc/<pid>/exe.
+# The CLI's binaries, COPIED with every symlink resolved (cp -L) to a neutral path: no host path
+# shows in the jail's mountinfo, /proc/<pid>/exe or a symlink's target in /opt/cli, and no
+# inode is shared with the host's own binaries (a hard link would be).
 stage_binaries() {
   local src real dir f
   if [ ${#ARGV[@]} -gt 0 ]; then src=${ARGV[0]}; else src=$CLI; fi
@@ -186,11 +187,11 @@ stage_binaries() {
     dir=$(dirname "$real")
     for f in "$dir"/codex*; do  # codex and its sibling helper binaries
       [ -f "$f" ] && [ -x "$f" ] || continue
-      ln "$f" "$S/bin/$(basename "$f")" 2>/dev/null || cp "$f" "$S/bin/$(basename "$f")" || die "cannot stage $f"
+      cp -L --reflink=auto "$f" "$S/bin/$(basename "$f")" || die "cannot stage $f"
     done
-    [ -x "$S/bin/codex" ] || ln "$real" "$S/bin/codex" 2>/dev/null || cp "$real" "$S/bin/codex" || die "cannot stage codex"
+    [ -x "$S/bin/codex" ] || cp -L --reflink=auto "$real" "$S/bin/codex" || die "cannot stage codex"
   else
-    ln "$real" "$S/bin/agy" 2>/dev/null || cp "$real" "$S/bin/agy" || die "cannot stage agy"
+    cp -L --reflink=auto "$real" "$S/bin/agy" || die "cannot stage agy"
   fi
 }
 
@@ -272,7 +273,6 @@ cp "$HERE/fwd_in.py" "$S/k2val/" || die "cannot stage the forwarder"
 if [ -n "$PROBE" ]; then
   cp "$HERE/probe_in.py" "$S/k2val/" && cp "$PROBE" "$S/k2val/probe.json" || die "cannot stage the probe"
 fi
-# (no chmod -R here: the staged binaries may be hard links to the host's own files)
 bwrap_args > "$S/ctl/args"
 mkfifo -m 600 "$S/ctl/info" "$S/ctl/block" "$S/ctl/sync" "$S/ctl/slirp-ready" "$S/ctl/fwd-ready" || die "cannot stage"
 
