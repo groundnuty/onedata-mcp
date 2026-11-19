@@ -68,8 +68,8 @@ default.
 | qwencoder | openai_compat, same base and key | `Qwen/Qwen3-Coder-30B-A3B-Instruct` | temperature 0.7, top_p 0.8, top_k 20, repetition_penalty 1.05 (top_k and repetition_penalty go in `extra_body`, as vLLM takes them); non-thinking model |
 | deepseek | openai_compat, same base and key | `deepseek-ai/DeepSeek-V4-Flash-0731` | temperature 1.0, top_p 0.95; nothing else (reasoning at the server default). Chosen because in an earlier study's traces it read "incomplete" as "absent" and claimed done too early, the failure modes V5 and V7 probe |
 | haiku-low, haiku-medium, haiku-high | Anthropic Messages API, key file `anthropic.key` | `claude-haiku-5-5` | the same model at three efforts: `output_config = {effort: "low" / "medium" / "high"}`; no sampling params; `thinking = {type: "adaptive"}`; price tiers ≤200k prompt in/out $0.10/$0.50 per Mtok, above $0.50/$2.50 |
-| gpt-luna-low (wave 2) | Codex CLI 0.169, `codex exec --json --ephemeral -s read-only` | `gpt-5.6-luna` | `-c model_reasoning_effort=low` |
-| gemini-flash-low (wave 2) | Antigravity CLI `agy --print --output-format stream-json --sandbox` | `gemini-3.8-flash-low` | `--effort low` |
+| gpt-luna-low (wave 2) | Codex CLI 0.169, `codex exec --json --ephemeral --dangerously-bypass-approvals-and-sandbox` (in the jail only) | `gpt-5.6-luna` | `-c model_reasoning_effort=low` |
+| gemini-flash-low (wave 2) | Antigravity CLI 1.5.12, `agy --output-format stream-json --dangerously-skip-permissions --print=<prompt>` (in the jail only) | `gemini-3.8-flash-low` | `--effort low` |
 
 - The openai_compat adapter exists (`benchmark/llm_adapters/openai_compat.py`). Extend it only as needed to pass
   `top_p`, `top_k`, `repetition_penalty` and `extra_body`. It already echoes `reasoning_content` back in the assistant
@@ -84,18 +84,162 @@ default.
 - **CLI legs (wave 2).** `gpt-luna-low` and `gemini-flash-low` drive the real agent CLIs, which send everything they see
   to OpenAI or Google. They are disabled by default and run only when ALL of these hold; otherwise the run skips them,
   says so, and continues with the API configs. They never run unjailed.
-  - `[cli.jail] wrapper` is set in `k2val.toml`. The CLI is started through one function,
-    `jail_cmd(argv, workdir) -> list[str]`: a bwrap jail with a fresh empty home, a minimal env, an empty work dir, and
-    no `/mnt`, `/Users`, repo, token or key paths visible. The jail itself is built separately.
+  - `[cli.jail] wrapper` is set in `k2val.toml` (`benchmark/k2val/jail/cli-jail.sh`). The CLI is started through one
+    function, `jail_cmd(argv, workdir, cli=..., mcp_upstream=..., home_files=...) -> list[str]`, into the jail described
+    in "The CLI jail" below.
   - A clean `k2val scan` record exists for the config. The scan collects sample tool answers through the same server
     (`list_space_providers`, `get_file_distribution`, `check_readiness` on a fixture), the tool definitions and the
     prompts, and checks them against a token list file (one token per line, case-insensitive substring) and a regex
     patterns file. It prints only match counts and categories, never the matched text, and writes a record to the run
     directory.
   - The MCP server for a CLI leg runs OUTSIDE the jail, as an HTTP server on `127.0.0.1` (an ephemeral port), started by
-    the harness with the token in its own env. The CLI gets only the loopback URL (codex
-    `-c mcp_servers.onedata.url=...`; agy `--settings` with an http `mcpServers` entry). The user's global codex and agy
-    config is never modified. The trace separates MCP tool calls from the CLI's built-in tool calls and reports both.
+    the harness with the token in its own env. The CLI gets only the URL, `http://127.0.0.1:<P>/mcp`, which the jail
+    serves inside its own network namespace (codex `-c mcp_servers.onedata.url=...`; agy an
+    `mcpServers.onedata.serverUrl` entry in the fresh home's `~/.gemini/config/mcp_config.json`, since agy's
+    `--settings` rejects `mcpServers`). The user's own codex and agy config is never read or modified. The trace
+    separates MCP tool calls from the CLI's built-in tool calls and reports both.
+
+## The CLI jail
+
+Everything a CLI leg sees is sent to OpenAI or Google. The jail (`benchmark/k2val/jail/`) lets it see only an empty work
+dir, a fresh home holding nothing but that CLI's login, and the MCP server's URL.
+
+    cli-jail.sh --cli codex|agy --workdir <dir> [--mcp-upstream 127.0.0.1:<P>] [--home-file <rel>=<file>]...
+                [--keep-home <dir>] -- <cli argv...>
+
+Files: `cli-jail.sh` (the jail), `fwd_out.py` and `fwd_in.py` (the two forwarders), `netns.py` (egress filter and
+slirp attach), `keep_home.py` (`--keep-home`), `leak-probe.sh` with `leak_probe.py` and `probe_in.py` (the proof). All
+the Python is standard library only. No local path is written in any of them: paths come from arguments, `$HOME` and
+`command -v`.
+
+**Filesystem.** bwrap with `--unshare-user/pid/ipc/uts/net/cgroup-try`, `--disable-userns`, `--die-with-parent`,
+`--new-session` (no controlling terminal) and `--hostname jail`. bwrap's own arguments arrive through a file
+descriptor (`--args`), so no host path shows in the jail's `/proc/1/cmdline`. The jail holds:
+- a read-only `/usr`, with `/usr/local` hidden under an empty tmpfs;
+- generated `/etc/{resolv.conf,hosts,passwd,group,nsswitch.conf}`, plus read-only `/etc/ssl` and
+  `/etc/ca-certificates`;
+- a private `/tmp`, its own `/proc`, a minimal `/dev`, and a read-only root;
+- `/home/agent`, a fresh home staged per run, holding only that CLI's login, copied from the invoking user:
+  - codex: `~/.codex/auth.json`, `installation_id`;
+  - agy: `~/.gemini/antigravity-cli/{antigravity-oauth-token,installation_id}` and
+    `~/.gemini/{google_accounts.json,installation_id,settings.json}` if present;
+  - plus any `--home-file` (the harness: agy's `mcp_config.json`);
+- `/work`, the empty work dir;
+- `/opt/cli`, a staged copy (a hard link when on the same filesystem) of the CLI binary and, for codex, its sibling
+  helper binaries;
+- `/opt/k2val`, the inside forwarder;
+- `/run/k2val`, the socket dir.
+
+The work dir and the staging root must be neutral temp paths: under `/tmp`, `/var/tmp` or `/dev/shm`, naming neither
+`$HOME`, the user, nor `Users`. The jail refuses anything else, because bind-mount sources show in its
+`/proc/self/mountinfo`. The harness puts each trial's scratch under `$K2VAL_JAIL_TMPDIR` or `/tmp`, never `$TMPDIR`. The
+CLI runs under `env -i` with exactly `PATH`, `LANG`, `HOME` (and `CODEX_HOME` for codex); bwrap's own `PWD` is
+removed.
+
+**Network: the one change from the bwrap jails used before.** A shared network namespace (`--share-net`) exposes every
+service on the host's loopback (the Onedata providers, agent channel servers and so on). So:
+- the jail gets its own netns (`--unshare-net`), and `slirp4netns --configure --disable-host-loopback --enable-seccomp`
+  is attached to bwrap's child. Its pid comes from `--info-fd`. bwrap's child sits in a user namespace nested inside the
+  one that owns the netns, so slirp is given the owning one by fd (`--userns-path=/proc/self/fd/N`, from
+  `NS_GET_USERNS`). `--enable-sandbox` cannot work there and is not used;
+- DNS is slirp's `10.0.2.3`, through the generated `/etc/resolv.conf`;
+- **an egress filter, beyond the brief.** `--disable-host-loopback` only stops the host's `127.0.0.1`. slirp opens
+  connections from the host, so without a filter the jail reached the host's own LAN, container-bridge and tailnet
+  addresses, services bound to `0.0.0.0`, other machines on those networks, and the cloud metadata service at
+  `169.254.169.254` (all verified open in a prototype). `netns.py filter` joins the netns' owning user namespace, holds
+  `CAP_NET_ADMIN` as an ambient capability for `nft` alone, installs an OUTPUT-hook table, and reads it back to check it.
+  The table accepts loopback and DNS to `10.0.2.3`. It rejects every private, shared (100.64/10), link-local,
+  loopback, reserved and multicast IPv4 range and every IPv4 address of the host, and all IPv6. The rest, public IPv4,
+  is accepted. The jailed process has no capability over that netns, so it can neither read nor flush the table;
+- the MCP server is reached through a UNIX socket:
+  1. the harness's MCP server listens on `127.0.0.1:<P>` outside;
+  2. `fwd_out.py` serves it on `<staging>/sock/mcp.sock` (0600, in a 0700 dir; the upstream must be loopback);
+  3. the socket dir is bind-mounted read-only at `/run/k2val`;
+  4. `fwd_in.py`, under the jail's `/usr/bin/python3`, binds `127.0.0.1:<P>` inside the jail's netns, forks the relay,
+     and execs the CLI. The port listens before the CLI starts, and the URL is the same inside and out (the server's
+     `Host` check passes).
+
+**Start and teardown.**
+- The CLI starts only once the filter, slirp and the forwarder are up. bwrap waits on `--block-fd` for one byte from a
+  FIFO that it also holds open read-write, so EOF can never release it.
+- slirp's `--exit-fd` is bwrap's `--sync-fd`, so slirp ends with the jail.
+- The outside forwarder has `PR_SET_PDEATHSIG` and a parent check.
+- bwrap sets a jailed process's parent-death signal only after the block-fd read. Before the release, a small reaper ends
+  the jail if the script is SIGKILLed.
+- On exit or SIGTERM/INT/HUP the script kills the jail's PID 1, which ends its PID namespace, then bwrap, slirp and the
+  forwarder, and removes the staging dir.
+- A SIGKILL of the script skips that removal. The harness therefore stages inside the trial's scratch dir (its
+  `K2VAL_JAIL_TMPDIR`), removes that dir itself, and cancels with SIGTERM, then SIGKILL after 10 s.
+
+**Logins.** If the CLI rewrites a staged login file (a token refresh), the jail names the file on stderr, never its
+content, and discards it with the home. The host's own login is never written. `--keep-home <dir>` copies out only the
+listed session paths. It never copies a file named like a login, and it deletes the copy if any value of the staged
+logins appears in it. That allowlist is not yet checked against a real run and is not wired into the harness.
+
+**Harness wiring.**
+- codex runs `exec --json --ephemeral --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox`, because bwrap
+  is the sandbox. The last message is written to `/work/last_message.txt`.
+- agy runs `--output-format stream-json --model ... --effort ... --dangerously-skip-permissions --print=<prompt>`, with
+  no `--sandbox` and the MCP server in the fresh home. `--print` takes the prompt as its value, so a prompt can never be
+  read as a flag. The old `--settings` and `agy mcp add` modes are gone: one rejects `mcpServers`, and the other would
+  register the server in a home that is deleted. `mcp_attach = "mcp_add"` is a config error.
+- No wrapper still means no CLI legs.
+
+**Event streams, from the two real smokes** (one-word prompt, no MCP server; field names only):
+- codex 0.169 `--json`: `thread.started` {thread_id}; `turn.started`; `item.completed` {item {id, type: agent_message,
+  text}}; `turn.completed` {usage {input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens,
+  reasoning_output_tokens}}. A non-JSON line, "Reading additional input from stdin...", comes first. The parser already
+  matched this envelope.
+- agy 1.5.12 `stream-json`: every line is `{"event": <kind>, <kind>: {...}}`:
+  - `init` {conversation_id, cwd, model, permission_mode ("always-proceed"), tools};
+  - `step_update` {conversation_id, step_index, step_type (`user_input`, `agent_response`, ...), state (`ACTIVE`,
+    `DONE`), text_delta, usage, duration_seconds};
+  - `result` {conversation_id, status ("SUCCESS"), response, num_turns, duration_seconds, usage {input_tokens,
+    output_tokens, thinking_tokens, cache_read_tokens, total_tokens}}.
+
+  agy reaches MCP servers through its built-in `call_mcp_tool`. The old parser read Gemini-CLI-style `type` events and
+  found neither the answer nor the tokens. It now reads `result.response`, or else the last `agent_response` text, and
+  `result.usage`, with output counted as output plus thinking tokens.
+- Not seen yet: tool-call events. codex `mcp_tool_call`/`command_execution` items and agy tool steps remain
+  UNVERIFIED. The MCP half of every trace is the server's own record, so those parsers only add the built-in calls.
+
+**Residual risks.**
+- The jail sends the vendor everything the CLI sees, by design: the prompts, the tool definitions and the MCP answers.
+  `k2val scan` is the guard there.
+- DNS goes through slirp to the host's resolver, so names only the host can resolve (local or VPN names) may resolve
+  inside too (not tested). The filter still rejects the private addresses they would resolve to.
+- `/usr` is the host's, read-only, and visible. `/proc` shows the kernel version and CPU and memory facts. The staging
+  and work-dir temp paths show in mountinfo.
+- slirp4netns runs on the host without `--enable-sandbox`; a libslirp flaw would act with the user's rights.
+- The CLIs' account-level tools still act on the logged-in account. agy auto-approves tools such as knowledge, inbox
+  and subagent management, which work on server-side account state. Use dedicated vendor accounts.
+- A token refreshed inside the jail is discarded, and two concurrent trials share one login.
+
+**How to verify.**
+1. `make test`: the unit tests of the forwarders, `netns.py`, `keep_home.py`, the bwrap arguments
+   (`cli-jail.sh --print-args`) and the jail's refusals.
+2. `make k2val-jail-probe` (or `make test-k2val-jail-live`): the leak probe runs `probe_in.py` INSIDE the same jail, with
+   the harness's arguments (`--cli`, `--workdir`, `--mcp-upstream`) and no CLI. It prints a PASS/FAIL table and exits 0
+   only if every row passes. Per CLI it checks:
+   1. the home, `/mnt`, `/Users`, `~/.ssh`, the repository, the config and every token/key path are absent; no
+      host-identifying string is in `/proc/{1,self}/{cmdline,environ}`, `mountinfo`, `/etc` or the hostname; `/`,
+      `/etc` and `/home` hold exactly the jail's entries;
+   2. the env is exactly the allowed names;
+   3. the home holds exactly that CLI's login files;
+   4. the host's loopback (`127.0.0.1:31443/31444`, `10.0.2.2` on several ports, a canary on the host's
+      `127.0.0.1`), a `0.0.0.0` canary via every host IPv4 address, port 22 on those addresses, and the metadata
+      service are all unreachable. Each target IS reachable from the host at that moment (or is marked "not
+      listening"), so no row passes vacuously; the canaries count zero connections;
+   5. a verified TLS handshake each to api.openai.com, chatgpt.com and generativelanguage.googleapis.com;
+   6. `127.0.0.1:<P>` inside reaches a dummy upstream that answers with a nonce;
+   7. host processes are not visible (pid 1 is bwrap; a host process with a marker is not seen); also no capabilities,
+      no new user namespaces, nft can neither list nor flush, no `/dev/tty`, only fds 0-2;
+   8. no staging dir, jail process or slirp is left after a normal exit and a SIGTERM; after a SIGKILL no process is
+      left, and the staging dir is left for the caller to remove.
+3. A negative control proves the probe can fail: a copy of the jail without the filter and without
+   `--disable-host-loopback` fails every row of (4).
+4. `make k2val-jail-smoke` (after the probe): one fixed prompt per CLI ("Reply with the single word OK."), no MCP
+   server. It prints the exit code, the parsed final message and the event shapes (field names only).
 
 ## Tools offered per scenario (as the agent study's sets)
 
