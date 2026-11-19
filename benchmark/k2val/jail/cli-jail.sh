@@ -109,7 +109,7 @@ else
 fi
 
 # ---- staging -------------------------------------------------------------------------------
-BW_PID="" CHILD_PID="" SLIRP_PID="" FWD_PID="" REAPER_PID="" BLOCK_W="" SYNC_RW=""
+BW_PID="" CHILD_PID="" SLIRP_PID="" FWD_PID="" REAPER_PID="" BLOCK_W="" SYNC_W="" SYNC_R=""
 
 # The jail can strip the permissions of anything it owns (its home, the login's dir, /work) so
 # that a plain rm -rf fails and leaves the login copy behind. Give every DIRECTORY lacking u+rwx
@@ -301,15 +301,22 @@ if [ -n "$PROBE" ]; then
   cp "$HERE/probe_in.py" "$S/k2val/" && cp "$PROBE" "$S/k2val/probe.json" || die "cannot stage the probe"
 fi
 bwrap_args > "$S/ctl/args"
-mkfifo -m 600 "$S/ctl/info" "$S/ctl/block" "$S/ctl/sync" "$S/ctl/slirp-ready" "$S/ctl/fwd-ready" || die "cannot stage"
+mkfifo -m 600 "$S/ctl/info" "$S/ctl/block" "$S/ctl/slirp-ready" "$S/ctl/fwd-ready" || die "cannot stage"
 
 # Read-write opens of a FIFO never block. The jail holds its own read-write copy of the block
 # FIFO, so it never sees EOF there: it waits for the byte written below, or for the kill.
-exec {BLOCK_W}<>"$S/ctl/block" {SYNC_RW}<>"$S/ctl/sync"
+exec {BLOCK_W}<>"$S/ctl/block"
+# The sync channel (bwrap --sync-fd -> slirp --exit-fd) is an ANONYMOUS pipe: bwrap's pid 1
+# keeps it open for the jail's whole life, and a FIFO's host path would show in the jail's
+# /proc/1/fd. One pipe, reopened through /proc as a write-only and a read-only end.
+exec {SYNC_PIPE}<> <(:)
+exec {SYNC_W}>"/proc/self/fd/$SYNC_PIPE" {SYNC_R}<"/proc/self/fd/$SYNC_PIPE"
+exec {SYNC_PIPE}>&-
 
 env -i "${ENV[@]}" "$BWRAP" --args 3 "${CMD[@]}" \
-  3<"$S/ctl/args" 4>"$S/ctl/info" 5<&"$BLOCK_W" 6>&"$SYNC_RW" {BLOCK_W}>&- {SYNC_RW}>&- &
+  3<"$S/ctl/args" 4>"$S/ctl/info" 5<&"$BLOCK_W" 6>&"$SYNC_W" {BLOCK_W}>&- {SYNC_W}>&- {SYNC_R}>&- &
 BW_PID=$!
+exec {SYNC_W}>&-  # only the jail holds the write end now: slirp ends when the jail does
 
 INFO=$(timeout 30 cat "$S/ctl/info") || die "the jail did not start" 3
 CHILD_PID=$(printf '%s' "$INFO" | sed -n 's/.*"child-pid": *\([0-9][0-9]*\).*/\1/p' | head -n 1)
@@ -318,7 +325,7 @@ CHILD_PID=$(printf '%s' "$INFO" | sed -n 's/.*"child-pid": *\([0-9][0-9]*\).*/\1
 # Until it is released, the jailed process has no parent-death signal (bwrap sets it after the
 # block-fd read). If this script is SIGKILLed before the release, the reaper ends the jail.
 (
-  exec {BLOCK_W}>&- {SYNC_RW}>&- </dev/null >/dev/null 2>&1
+  exec {BLOCK_W}>&- {SYNC_R}>&- </dev/null >/dev/null 2>&1
   trap '' TERM INT HUP
   while kill -0 "$$" 2>/dev/null; do sleep 0.5; done
   kill -KILL "$CHILD_PID" 2>/dev/null
@@ -326,16 +333,16 @@ CHILD_PID=$(printf '%s' "$INFO" | sed -n 's/.*"child-pid": *\([0-9][0-9]*\).*/\1
 REAPER_PID=$!
 
 # 1. the egress filter, in the still-offline netns; 2. slirp; 3. the outside forwarder.
-"$PY" -I "$HERE/netns.py" filter --pid "$CHILD_PID" {BLOCK_W}>&- {SYNC_RW}>&- \
+"$PY" -I "$HERE/netns.py" filter --pid "$CHILD_PID" {BLOCK_W}>&- {SYNC_R}>&- \
   || die "no egress filter: the CLI is not started" 3
 
 "$PY" -I "$HERE/netns.py" slirp --pid "$CHILD_PID" -- \
   "$SLIRP" --configure --mtu=65520 --disable-host-loopback --disable-dns --enable-seccomp \
   --exit-fd 7 --ready-fd 8 "$CHILD_PID" tap0 \
-  7<"$S/ctl/sync" 8>"$S/ctl/slirp-ready" {BLOCK_W}>&- {SYNC_RW}>&- >"$S/ctl/slirp.log" 2>&1 &
+  7<&"$SYNC_R" 8>"$S/ctl/slirp-ready" {BLOCK_W}>&- {SYNC_R}>&- >"$S/ctl/slirp.log" 2>&1 &
 SLIRP_PID=$!
+exec {SYNC_R}>&-  # slirp holds the read end
 [ "$(timeout 30 head -c 1 "$S/ctl/slirp-ready")" = 1 ] || die "slirp4netns did not come up: $(tail -n 3 "$S/ctl/slirp.log" 2>/dev/null | tr '\n' ' ')" 3
-exec {SYNC_RW}>&-  # from now on only the jail holds the sync FIFO open: slirp ends with it
 
 if [ -n "$UPSTREAM" ]; then
   "$PY" -I "$HERE/fwd_out.py" --socket "$S/sock/mcp.sock" --upstream "$UPSTREAM" \

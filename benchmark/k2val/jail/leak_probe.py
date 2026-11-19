@@ -520,6 +520,9 @@ class CliProbe:
         workdir = tempfile.mkdtemp(prefix="k2val-probe-work-", dir=NEUTRAL_ROOT)
         try:
             conf = self.probe_conf(upstream, canary_lo, canary_any)
+            # fd targets may name none of the host strings, nor the staging root or the host
+            # side of /work (both legitimately in mountinfo, so not in forbidden_strings)
+            conf["fd_forbidden"] = [*conf["forbidden_strings"], *both(root), *both(workdir)]
             host_side = self.host_reachability(conf, canary_lo)
             self.resolvers = conf["dns_resolvers"]
             self.host_answering = {r["ip"] for r in self.resolvers if dns_answers(r["ip"])}
@@ -705,6 +708,7 @@ class CliProbe:
         rep.add("6 in-jail 127.0.0.1:P reaches the upstream", r["ok"], r["detail"])
         for i, prop in [
             ("processes", "7 host processes not visible"),
+            ("fd_targets", "7+ no fd of any jail process names a host path"),
             ("caps", "7+ no capabilities"),
             ("no_userns", "7+ no new user namespaces"),
             ("nft_list", "7+ egress filter not readable"),

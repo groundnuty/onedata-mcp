@@ -177,7 +177,8 @@ service on the host's loopback (the Onedata providers, agent channel servers and
 **Start and teardown.**
 - The CLI starts only once the filter, slirp and the forwarder are up. bwrap waits on `--block-fd` for one byte from a
   FIFO that it also holds open read-write, so EOF can never release it.
-- slirp's `--exit-fd` is bwrap's `--sync-fd`, so slirp ends with the jail.
+- slirp's `--exit-fd` is bwrap's `--sync-fd`, so slirp ends with the jail. That channel is an anonymous pipe, not a
+  FIFO: bwrap's pid 1 holds it for the jail's whole life, and a FIFO's host path showed in the jail's `/proc/1/fd`.
 - The outside forwarder has `PR_SET_PDEATHSIG` and a parent check.
 - bwrap sets a jailed process's parent-death signal only after the block-fd read. Before the release, a small reaper ends
   the jail if the script is SIGKILLed.
@@ -273,7 +274,9 @@ out: the trace's MCP half is the server's own record, and the CLI's events come 
       DNS works);
    6. `127.0.0.1:<P>` inside reaches a dummy upstream that answers with a nonce;
    7. host processes are not visible (pid 1 is bwrap; a host process with a marker is not seen); also no capabilities,
-      no new user namespaces, nft can neither list nor flush, no `/dev/tty`, only fds 0-2;
+      no new user namespaces, nft can neither list nor flush, no `/dev/tty`, only fds 0-2; and the target of every
+      fd of every process in the jail (bwrap's pid 1 included) names no host path (home, repo, staging root, the host
+      side of `/work`; pipes, sockets and anon inodes are fine);
    8. no staging dir, jail process or slirp is left after a normal exit and a SIGTERM; after a SIGKILL no process is
       left, and the staging dir is left for the caller to remove. Three hostile runs, where the probe plays a CLI that
       tampers before exiting: after a `chmod 0` of the home, the login's dir and `/work`, plus a 3000-deep chain with a

@@ -294,6 +294,34 @@ def check_processes(conf: dict) -> None:
     )
 
 
+def check_fd_targets(conf: dict) -> None:
+    """The target of every open fd of every process visible in the jail (bwrap's pid 1, the
+    forwarder, the probe): none may name a host path (the home, the repo, the staging root, the
+    host side of /work, ...). Pipes, sockets and anon inodes are fine. Paths are not printed."""
+    forbidden = [s for s in conf["fd_forbidden"] if s]
+    bad, n, unreadable, kinds = [], 0, [], set()
+    for pid in sorted(int(p) for p in listing("/proc") if p.isdigit()):
+        try:
+            fds = os.listdir(f"/proc/{pid}/fd")
+        except OSError as e:
+            unreadable.append(f"pid {pid}: {errno.errorcode.get(e.errno or 0, '?')}")
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink(f"/proc/{pid}/fd/{fd}")
+            except OSError:
+                continue  # closed meanwhile
+            n += 1
+            kinds.add(target.split(":", 1)[0] if not target.startswith("/") else "path")
+            hits = [i for i, s in enumerate(forbidden) if s in target]
+            if hits:
+                bad.append(f"pid {pid} fd {fd}: a host path (forbidden #{hits[0]})")
+    detail = "; ".join(bad) if bad else f"{n} fds, kinds {sorted(kinds)}, no host path"
+    if unreadable:
+        detail += f"; unreadable (so unreadable to the CLI too): {unreadable}"
+    emit("fd_targets", not bad and n > 0, detail)
+
+
 def check_isolation() -> None:
     status = dict(
         line.split(":\t", 1) for line in read("/proc/self/status").splitlines() if ":\t" in line
@@ -432,6 +460,7 @@ def main() -> int:
     check_env(conf)
     check_home(conf)
     check_processes(conf)
+    check_fd_targets(conf)
     check_isolation()
     check_mcp(conf)
     check_unreachable(conf)
