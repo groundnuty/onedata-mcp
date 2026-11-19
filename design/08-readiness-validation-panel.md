@@ -144,7 +144,10 @@ service on the host's loopback (the Onedata providers, agent channel servers and
   `NS_GET_USERNS`). `--enable-sandbox` cannot work there and is not used;
 - DNS goes to public resolvers (`1.1.1.1`, `8.8.8.8` in the generated `/etc/resolv.conf`) over the NATed egress.
   slirp's own resolver `10.0.2.3` is off (`--disable-dns`) and rejected by the filter: it relays to the HOST's
-  resolver, which answered inside the jail for the host's own name and its tailnet name (seen before this change);
+  resolver, which answered inside the jail for the host's own name and its tailnet name (seen before this change).
+  Every other resolver the host is configured with is rejected too, even at a public address: an institution's
+  resolver may answer for internal names (the host's two such resolvers answered inside the jail before this). The
+  jail's own name `jail` is in its `/etc/hosts`, so not even that reaches public DNS;
 - slirp runs with `--disable-dns` and `--enable-seccomp`;
 - **an egress filter, beyond the brief.** `--disable-host-loopback` only stops the host's `127.0.0.1`. slirp opens
   connections from the host, so without a filter the jail reached the host's own LAN, container-bridge and tailnet
@@ -153,9 +156,9 @@ service on the host's loopback (the Onedata providers, agent channel servers and
   `CAP_NET_ADMIN` as an ambient capability for `nft` alone, installs an OUTPUT-hook table, and reads it back to check it.
   The table accepts loopback. It rejects every private, shared (100.64/10), link-local,
   loopback, reserved and multicast IPv4 range, the whole subnet of every host interface (`local/prefixlen`, so the
-  host's neighbours too) and any point-to-point peer, and all IPv6. The rest, public IPv4, is accepted. The host's
-  networks come from `ip -j addr`; if `ip` is missing, fails or times out, the filter and so the jail fail (fail
-  closed). The jailed process has no capability over that netns, so it can neither read nor flush the table;
+  host's neighbours too) and any point-to-point peer, every resolver the host is configured with but the jail's two,
+  and all IPv6. The rest, public IPv4, is accepted. The host's networks come from `ip -j addr`; if `ip` is missing,
+  fails or times out, or `/etc/resolv.conf` cannot be read, the filter and so the jail fail (fail closed). The jailed process has no capability over that netns, so it can neither read nor flush the table;
 - the MCP server is reached through a UNIX socket:
   1. the harness's MCP server listens on `127.0.0.1:<P>` outside;
   2. `fwd_out.py` serves it on `<staging>/sock/mcp.sock` (0600, in a 0700 dir; the upstream must be loopback);
@@ -256,9 +259,11 @@ out: the trace's MCP half is the server's own record, and the CLI's events come 
    4. the host's loopback (`127.0.0.1:31443/31444`, `10.0.2.2` on several ports, a canary on the host's
       `127.0.0.1`), a `0.0.0.0` canary via every host IPv4 address, port 22 on those addresses, and the metadata
       service are all unreachable. Each target IS reachable from the host at that moment (or is marked "not
-      listening"), so no row passes vacuously; the canaries count zero connections. slirp's DNS relay `10.0.2.3`
-      answers no query, and each internal-only name found at probe time (the host's name, that name under each search
-      domain, its tailnet name; only those that resolve on the host) does not resolve inside;
+      listening"), so no row passes vacuously; the canaries count zero connections. No resolver on or near the host
+      answers a query for the neutral `example.com` from inside: slirp's relay `10.0.2.3`, the host's stub
+      `127.0.0.53`, the tailnet's `100.100.100.100`, and every other resolver the host is configured with (its
+      resolv.conf files and `resolvectl dns`; numbered, never printed). The probe never sends a host-derived name to
+      any resolver: inside the jail every lookup goes to public DNS;
    5. a verified TLS handshake each to api.openai.com, chatgpt.com and generativelanguage.googleapis.com (so public
       DNS works);
    6. `127.0.0.1:<P>` inside reaches a dummy upstream that answers with a nonce;

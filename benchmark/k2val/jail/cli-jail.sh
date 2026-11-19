@@ -200,9 +200,11 @@ write_etc() {
   local uid gid
   uid=$(id -u) gid=$(id -g)
   # public resolvers over the NATed egress; never slirp's 10.0.2.3, which relays to the HOST's
-  # resolver and so would answer for local, VPN and tailnet names (the filter drops it too)
+  # resolver and so would answer for local, VPN and tailnet names (the filter drops it too, and
+  # every other resolver the host is configured with). netns.JAIL_RESOLVERS names the same two.
   printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$S/etc/resolv.conf"
-  printf '127.0.0.1\tlocalhost\n::1\tlocalhost\n' > "$S/etc/hosts"
+  # the jail's own name resolves locally, so not even it is ever sent to the public resolvers
+  printf '127.0.0.1\tlocalhost\n127.0.1.1\tjail\n::1\tlocalhost\n' > "$S/etc/hosts"
   printf 'agent:x:%s:%s:agent:%s:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n' \
     "$uid" "$gid" "$JAIL_HOME" > "$S/etc/passwd"
   printf 'agent:x:%s:\nnogroup:x:65534:\n' "$gid" > "$S/etc/group"

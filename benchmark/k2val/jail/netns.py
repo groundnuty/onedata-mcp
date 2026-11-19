@@ -34,6 +34,7 @@ Standard library only.
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import fcntl
 import ipaddress
@@ -45,6 +46,11 @@ import sys
 
 TABLE = "k2val_egress"
 SLIRP_DNS_RELAY = "10.0.2.3"  # rejected, like the rest of 10.0.0.0/8: never an exception
+# The jail's own resolvers (cli-jail.sh writes them into its resolv.conf; a test keeps the two in
+# step). Every OTHER resolver the host is configured with is rejected: it may answer for local,
+# VPN or institution-internal names even when its address is public.
+JAIL_RESOLVERS = ("1.1.1.1", "8.8.8.8")
+HOST_RESOLV_FILES = ("/etc/resolv.conf", "/run/systemd/resolve/resolv.conf")
 NS_GET_USERNS = 0xB701
 CAP_NET_ADMIN = 12
 PR_CAP_AMBIENT = 47
@@ -118,10 +124,56 @@ def host_ipv4_networks(text: str | None = None) -> list[str]:
     return sorted(nets)
 
 
+def _ipv4s(text: str) -> list[str]:
+    out = []
+    for word in text.replace(",", " ").split():
+        with contextlib.suppress(ValueError):
+            if ipaddress.ip_address(word).version == 4:
+                out.append(word)
+    return out
+
+
+def host_nameservers(files: tuple[str, ...] = HOST_RESOLV_FILES) -> list[str]:
+    """Every IPv4 resolver the HOST is configured with: the `nameserver` lines of /etc/resolv.conf
+    (required: unreadable fails closed) and of systemd-resolved's upstream list, plus the
+    per-link servers `resolvectl dns` reports (a VPN's, the tailnet's), when it is there."""
+    found: list[str] = []
+    for i, path in enumerate(files):
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except OSError as e:
+            if i == 0:
+                raise RuntimeError(f"cannot read {path}: {e.strerror}") from None
+            continue
+        for line in text.splitlines():
+            words = line.split()
+            if len(words) >= 2 and words[0] == "nameserver":
+                found += _ipv4s(words[1])
+    if rc := shutil.which("resolvectl"):
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            r = subprocess.run([rc, "dns"], capture_output=True, text=True, timeout=5)
+            for line in r.stdout.splitlines():
+                found += _ipv4s(line.split(":", 1)[1] if ":" in line else "")
+    return sorted(set(found))
+
+
+def resolvers_to_block(nameservers: list[str]) -> list[str]:
+    """The host's resolvers as /32s, but for the jail's own public resolvers."""
+    return [f"{ns}/32" for ns in nameservers if ns not in JAIL_RESOLVERS]
+
+
 def outside_blocked_ranges(networks: list[str]) -> list[str]:
     """The host networks not already inside a blocked range (a public subnet, say)."""
     blocked = [ipaddress.ip_network(n) for n in BLOCKED_V4]
     return [n for n in networks if not any(ipaddress.ip_network(n).subnet_of(b) for b in blocked)]
+
+
+def host_blocked_ranges() -> list[str]:
+    """What the filter adds to BLOCKED_V4 for this host: its interfaces' subnets and its
+    resolvers (but the jail's own). Fails closed (RuntimeError)."""
+    extra = [*host_ipv4_networks(), *resolvers_to_block(host_nameservers())]
+    return sorted(set(outside_blocked_ranges(extra)))
 
 
 def ruleset(extra_blocked: list[str] | tuple[str, ...] = ()) -> str:
@@ -229,7 +281,7 @@ def enter_netns(pid: int) -> None:
 
 
 def install_filter(pid: int) -> None:
-    extra = outside_blocked_ranges(host_ipv4_networks())  # read in the HOST netns, first
+    extra = host_blocked_ranges()  # read in the HOST netns, first
     nft = shutil.which("nft", path=os.environ.get("PATH", "") + SBIN)
     if not nft:
         raise RuntimeError("nft not found")
@@ -283,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         if command == "print":
-            print(ruleset(outside_blocked_ranges(host_ipv4_networks())), end="")
+            print(ruleset(host_blocked_ranges()), end="")
         elif command == "filter":
             install_filter(pid)
         else:

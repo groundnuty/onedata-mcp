@@ -7,8 +7,10 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
+import ipaddress
 import json
 import os
+import re
 import socket
 import stat
 import subprocess
@@ -23,6 +25,7 @@ from benchmark.k2val.jail import (
     JailFileError,
     fwd_in,
     fwd_out,
+    leak_probe,
     netns,
     read_jail_file,
     remove_tree,
@@ -330,6 +333,81 @@ def test_the_filter_fails_closed_without_the_hosts_networks(monkeypatch, failure
         netns.host_ipv4_networks()
     # and the jail's filter step exits non-zero, before touching any namespace
     assert netns.main(["filter", "--pid", "999999"]) == 3
+
+
+# --- the host's resolvers -----------------------------------------------------------------
+
+
+def test_every_host_resolver_but_the_jails_own_is_blocked(tmp_path, monkeypatch) -> None:
+    stub = tmp_path / "resolv.conf"
+    stub.write_text("# stub\nnameserver 127.0.0.53\noptions edns0\nsearch example.internal\n")
+    upstream = tmp_path / "upstream.conf"
+    upstream.write_text("nameserver 192.0.2.10\nnameserver 8.8.8.8\nnameserver 2001:db8::1\n")
+    monkeypatch.setattr(netns.shutil, "which", lambda *a, **k: None)  # no resolvectl
+    found = netns.host_nameservers((str(stub), str(upstream)))
+    assert found == ["127.0.0.53", "192.0.2.10", "8.8.8.8"]  # IPv4 only (all IPv6 is rejected)
+    assert netns.resolvers_to_block(found) == ["127.0.0.53/32", "192.0.2.10/32"]
+
+    # a PUBLIC resolver the host uses (an institution's, say) is blocked too
+    monkeypatch.setattr(netns, "host_ipv4_networks", lambda: ["127.0.0.0/8"])
+    monkeypatch.setattr(netns, "host_nameservers", lambda: ["9.9.9.9", "1.1.1.1", "127.0.0.53"])
+    assert netns.host_blocked_ranges() == ["9.9.9.9/32"]
+    assert "9.9.9.9/32" in netns.ruleset(netns.host_blocked_ranges())
+
+
+def test_per_link_resolvers_are_read_from_resolvectl(tmp_path, monkeypatch) -> None:
+    (tmp_path / "r").write_text("nameserver 127.0.0.53\n")
+    out = "Global:\nLink 2 (eth0): 198.51.100.7 8.8.8.8\nLink 5 (tun0): 100.100.100.100 fd00::53\n"
+    monkeypatch.setattr(netns.shutil, "which", lambda *a, **k: "/x/resolvectl")
+    monkeypatch.setattr(
+        netns.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, out, "")
+    )
+    assert netns.host_nameservers((str(tmp_path / "r"),)) == [
+        "100.100.100.100",
+        "127.0.0.53",
+        "198.51.100.7",
+        "8.8.8.8",
+    ]
+
+
+def test_an_unreadable_resolv_conf_fails_closed(tmp_path) -> None:
+    with pytest.raises(RuntimeError, match="cannot read"):
+        netns.host_nameservers((str(tmp_path / "absent"),))
+
+
+def test_the_jails_resolvers_are_the_same_everywhere() -> None:
+    script = CLI_JAIL.read_text()
+    line = next(x for x in script.splitlines() if "nameserver" in x and "printf" in x)
+    assert re.findall(r"nameserver (\S+?)\\n", line) == list(netns.JAIL_RESOLVERS)
+    assert leak_probe.JAIL_RESOLVERS == netns.JAIL_RESOLVERS
+
+
+def test_the_probe_never_hands_a_host_derived_name_to_a_resolver(monkeypatch) -> None:
+    """Inside the jail every lookup goes to PUBLIC resolvers: the probe must only ever resolve
+    public vendor names and one neutral name, and otherwise use numeric addresses."""
+    monkeypatch.setattr(socket, "gethostname", lambda: "host-of-someone")
+    probe = leak_probe.CliProbe("codex", None)
+    probe.nonce, probe.marker = "n", "m"
+    upstream = leak_probe.Upstream("n")
+    lo, any_ = leak_probe.Canary("127.0.0.1"), leak_probe.Canary("0.0.0.0")
+    try:
+        conf = probe.probe_conf(upstream, lo, any_)
+    finally:
+        upstream.close()
+        lo.close()
+        any_.close()
+    assert "host_only_names" not in conf
+    assert conf["dns_public_name"] == "example.com"
+    assert set(conf["tls_hosts"]) <= {
+        "api.openai.com",
+        "chatgpt.com",
+        "generativelanguage.googleapis.com",
+    }
+    for host in [t["host"] for t in conf["unreachable"]] + [r["ip"] for r in conf["dns_resolvers"]]:
+        ipaddress.ip_address(host)  # numeric: never a name lookup
+    resolver_ips = {r["ip"] for r in conf["dns_resolvers"]}
+    assert {"10.0.2.3", "127.0.0.53", "100.100.100.100"} <= resolver_ips
+    assert not resolver_ips & set(netns.JAIL_RESOLVERS)
 
 
 def _listing(elems: list) -> str:

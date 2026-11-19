@@ -190,18 +190,16 @@ def dns_answers(server: str, name: str, timeout: float = 3.0) -> bool:
 
 
 def check_dns(conf: dict) -> None:
-    relay = conf["dns_relay"]
-    answered = dns_answers(relay, conf["dns_public_name"])
-    emit(
-        "dns_relay", not answered, f"{relay}:53 " + ("ANSWERED" if answered else "answers nothing")
-    )
-    for i, name in enumerate(conf["host_only_names"]):
-        try:
-            socket.getaddrinfo(name, None)
-            resolved = True
-        except OSError:
-            resolved = False
-        emit(f"hostname:{i}", not resolved, "RESOLVED inside" if resolved else "not resolved")
+    """Every resolver on or near the host gets one query for a NEUTRAL public name and must not
+    answer. No host-derived name is ever sent to any resolver."""
+    name = conf["dns_public_name"]
+    for res in conf["dns_resolvers"]:
+        answered = dns_answers(res["ip"], name)
+        emit(
+            f"dns:{res['label']}",
+            not answered,
+            f"{name} -> {'ANSWERED' if answered else 'no answer'}",
+        )
 
 
 def check_mcp(conf: dict) -> None:

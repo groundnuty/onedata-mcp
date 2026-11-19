@@ -34,11 +34,13 @@ from __future__ import annotations
 import argparse
 import contextlib
 import http.server
+import ipaddress
 import json
 import os
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -55,7 +57,9 @@ NEUTRAL_ROOT = "/tmp"
 TLS_HOSTS = ["api.openai.com", "chatgpt.com", "generativelanguage.googleapis.com"]
 HOSTILE_TIMEOUT_S = 60  # a hostile run that has not ended by then is a hang (a FAIL)
 SLIRP_DNS_RELAY = "10.0.2.3"  # slirp's DNS, which relays to the HOST's resolver
-DNS_PUBLIC_NAME = "example.com"
+TAILNET_RESOLVER = "100.100.100.100"
+JAIL_RESOLVERS = ("1.1.1.1", "8.8.8.8")  # as netns.JAIL_RESOLVERS
+DNS_PUBLIC_NAME = "example.com"  # the only name the probe ever sends to a resolver
 METADATA = ("169.254.169.254", 80)
 
 # The login files cli-jail.sh copies (the first of each list is required, the rest if present).
@@ -194,33 +198,58 @@ def host_ipv4_addresses() -> list[str]:
     )
 
 
-def resolves(name: str) -> bool:
+def dns_answers(server: str, name: str = DNS_PUBLIC_NAME, timeout: float = 3.0) -> bool:
+    """Does `server` answer a plain A query for `name` (a NEUTRAL public name: the probe never
+    sends a host-derived name to any resolver)?"""
+    qid = os.getpid() & 0xFFFF
+    qname = b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\0"
+    query = struct.pack(">HHHHHH", qid, 0x0100, 1, 0, 0, 0) + qname + struct.pack(">HH", 1, 1)
     try:
-        socket.getaddrinfo(name, None)
-        return True
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(timeout)
+            s.connect((server, 53))
+            s.send(query)
+            return s.recv(512)[:2] == query[:2]
     except OSError:
         return False
 
 
-def host_only_names() -> list[str]:
-    """Names the HOST resolves through its own resolver but the internet does not: its hostname,
-    the hostname under each search domain of the host's resolv.conf, and its tailnet name if
-    tailscale runs. Only those that resolve on the host now are kept (else the row is vacuous)."""
-    host = socket.gethostname()
-    names = [host]
-    with contextlib.suppress(OSError):
-        for line in Path("/etc/resolv.conf").read_text().splitlines():
-            words = line.split()
-            if words and words[0] in ("search", "domain"):
-                names += [f"{host}.{d.rstrip('.')}" for d in words[1:]]
-    if ts := shutil.which("tailscale"):
-        with contextlib.suppress(OSError, ValueError, subprocess.SubprocessError):
-            out = subprocess.run(
-                [ts, "status", "--json"], capture_output=True, text=True, timeout=5
-            ).stdout
-            if dns := json.loads(out).get("Self", {}).get("DNSName", "").rstrip("."):
-                names.append(dns)
-    return [n for n in dict.fromkeys(names) if resolves(n)]
+def _ipv4s(text: str) -> list[str]:
+    out = []
+    for word in text.replace(",", " ").split():
+        with contextlib.suppress(ValueError):
+            if ipaddress.ip_address(word).version == 4:
+                out.append(word)
+    return out
+
+
+def host_resolvers() -> list[dict]:
+    """Every resolver on or near the host that must not answer the jail, labelled (the host's
+    configured resolvers are numbered, never printed): slirp's relay, the resolved stub, the
+    tailnet resolver, and each nameserver in the host's resolv.conf files and `resolvectl dns`.
+    The jail's own public resolvers are the exception. (As netns.host_nameservers: this file
+    runs with -I and stands alone.)"""
+    found: list[str] = []
+    for path in ("/etc/resolv.conf", "/run/systemd/resolve/resolv.conf"):
+        with contextlib.suppress(OSError):
+            for line in Path(path).read_text().splitlines():
+                words = line.split()
+                if len(words) >= 2 and words[0] == "nameserver":
+                    found += _ipv4s(words[1])
+    if rc := shutil.which("resolvectl"):
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            out = subprocess.run([rc, "dns"], capture_output=True, text=True, timeout=5).stdout
+            for line in out.splitlines():
+                found += _ipv4s(line.split(":", 1)[1] if ":" in line else "")
+    fixed = {
+        SLIRP_DNS_RELAY: f"slirp's relay {SLIRP_DNS_RELAY}",
+        "127.0.0.53": "the host's stub 127.0.0.53",
+        TAILNET_RESOLVER: f"the tailnet's {TAILNET_RESOLVER}",
+    }
+    rows = [{"label": label, "ip": ip} for ip, label in fixed.items()]
+    others = sorted(set(found) - set(fixed) - set(JAIL_RESOLVERS))
+    rows += [{"label": f"host resolver #{i}", "ip": ip} for i, ip in enumerate(others)]
+    return rows
 
 
 def repo_root() -> Path:
@@ -390,9 +419,8 @@ class CliProbe:
             "expected_root": expected_root,
             "expected_etc": EXPECTED_ETC,
             "unreachable": unreachable,
-            "dns_relay": SLIRP_DNS_RELAY,
             "dns_public_name": DNS_PUBLIC_NAME,
-            "host_only_names": host_only_names(),
+            "dns_resolvers": host_resolvers(),
             "tls_hosts": TLS_HOSTS,
             "mcp": {"port": upstream.port, "nonce": self.nonce},
         }
@@ -469,6 +497,8 @@ class CliProbe:
         try:
             conf = self.probe_conf(upstream, canary_lo, canary_any)
             host_side = self.host_reachability(conf, canary_lo)
+            self.resolvers = conf["dns_resolvers"]
+            self.host_answering = {r["ip"] for r in self.resolvers if dns_answers(r["ip"])}
             canary_lo.drain()
             canary_any.drain()
             slirp_before = jail_slirps()
@@ -639,22 +669,10 @@ class CliProbe:
             lo.hits == 0 and any_.hits == 0,
             f"127.0.0.1 canary hits {lo.hits}, 0.0.0.0 canary hits {any_.hits}",
         )
-        r = get("dns_relay")
-        host_dns = resolves(DNS_PUBLIC_NAME)  # the host resolver the relay would reach works now
-        rep.add(
-            f"4 slirp's DNS relay {SLIRP_DNS_RELAY} answers nothing",
-            r["ok"] and host_dns,
-            f"{r['detail']} (the host resolves {DNS_PUBLIC_NAME}: {host_dns})",
-        )
-        names = sorted(k for k in results if k.startswith("hostname:"))
-        for key in names:
-            r = results[key]
-            idx = key.split(":", 1)[1]
-            rep.add(f"4 host-only name #{idx} does not resolve inside", r["ok"],
-                    f"{r['detail']} (it resolves on the host)")  # fmt: skip
-        if not names:
-            rep.add("4 host-only names do not resolve inside", False,
-                    "vacuous: no name was found that the host resolves locally")  # fmt: skip
+        for res in self.resolvers:
+            r = get(f"dns:{res['label']}")
+            on_host = "answers the host" if res["ip"] in self.host_answering else "jail-side only"
+            rep.add(f"4 no DNS answer from {res['label']}", r["ok"], f"{r['detail']} ({on_host})")
         for h in TLS_HOSTS:
             r = get(f"tls:{h}")
             rep.add(f"5 outbound TLS {h}", r["ok"], r["detail"])
