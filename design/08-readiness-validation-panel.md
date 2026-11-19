@@ -149,8 +149,10 @@ service on the host's loopback (the Onedata providers, agent channel servers and
   `169.254.169.254` (all verified open in a prototype). `netns.py filter` joins the netns' owning user namespace, holds
   `CAP_NET_ADMIN` as an ambient capability for `nft` alone, installs an OUTPUT-hook table, and reads it back to check it.
   The table accepts loopback and DNS to `10.0.2.3`. It rejects every private, shared (100.64/10), link-local,
-  loopback, reserved and multicast IPv4 range and every IPv4 address of the host, and all IPv6. The rest, public IPv4,
-  is accepted. The jailed process has no capability over that netns, so it can neither read nor flush the table;
+  loopback, reserved and multicast IPv4 range, the whole subnet of every host interface (`local/prefixlen`, so the
+  host's neighbours too) and any point-to-point peer, and all IPv6. The rest, public IPv4, is accepted. The host's
+  networks come from `ip -j addr`; if `ip` is missing, fails or times out, the filter and so the jail fail (fail
+  closed). The jailed process has no capability over that netns, so it can neither read nor flush the table;
 - the MCP server is reached through a UNIX socket:
   1. the harness's MCP server listens on `127.0.0.1:<P>` outside;
   2. `fwd_out.py` serves it on `<staging>/sock/mcp.sock` (0600, in a 0700 dir; the upstream must be loopback);

@@ -19,8 +19,10 @@ it. The jail script runs it while the netns is still offline, and starts nothing
 
 The ruleset (OUTPUT hook): loopback accepted (the in-jail forwarder); DNS to slirp's resolver
 10.0.2.3 accepted; every private, shared, link-local, loopback, reserved and multicast IPv4
-range rejected, plus every IPv4 address of the host itself; all IPv6 rejected; the rest (public
-IPv4) accepted.
+range rejected, plus the whole subnet of every host interface (local/prefixlen, so the host's
+neighbours too) and any point-to-point peer; all IPv6 rejected; the rest (public IPv4) accepted.
+The host's networks come from `ip -j addr`: if `ip` is missing, fails or times out, the filter
+fails, and so does the jail (fail closed).
 
 `slirp`. Opens the owning user namespace, keeps that fd open across exec, and execs the given
 slirp4netns command with `--userns-path=/proc/self/fd/<fd>` added (slirp would otherwise join
@@ -76,36 +78,54 @@ BLOCKED_V4 = (
 # --- the ruleset --------------------------------------------------------------------------------
 
 
-def host_ipv4_addresses() -> list[str]:
-    """Every IPv4 address on the host's interfaces (via `ip -j`); empty if `ip` is missing."""
+def ip_addr_json() -> str:
+    """`ip -j -4 addr show` of the HOST. Fails closed (RuntimeError): without the host's own
+    networks the filter would be incomplete, and the jail must then not start."""
     ip = shutil.which("ip", path=os.environ.get("PATH", "") + SBIN)
     if not ip:
-        return []
+        raise RuntimeError("`ip` not found: the host's own networks cannot be listed")
     try:
-        out = subprocess.run(
+        r = subprocess.run(
             [ip, "-j", "-4", "addr", "show"], capture_output=True, text=True, timeout=10
-        ).stdout
-        rows = json.loads(out or "[]")
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return []
-    return sorted(
-        {
-            a["local"]
-            for row in rows
-            for a in row.get("addr_info", [])
-            if a.get("family") == "inet" and a.get("local")
-        }
-    )
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        raise RuntimeError(f"`ip -j addr` failed: {e}") from None
+    if r.returncode != 0:
+        raise RuntimeError(f"`ip -j addr` exited {r.returncode}")
+    return r.stdout
 
 
-def outside_blocked_ranges(addresses: list[str]) -> list[str]:
-    """The host addresses not already inside a blocked range (a public address, say)."""
-    nets = [ipaddress.ip_network(n) for n in BLOCKED_V4]
-    return [a for a in addresses if not any(ipaddress.ip_address(a) in n for n in nets)]
+def host_ipv4_networks(text: str | None = None) -> list[str]:
+    """Every IPv4 network on the host's interfaces, as its subnet (local/prefixlen: the host's
+    neighbours too), plus a point-to-point peer as /32. Fails closed (RuntimeError)."""
+    try:
+        rows = json.loads(ip_addr_json() if text is None else text)
+        nets: set[str] = set()
+        for row in rows:
+            for a in row.get("addr_info", []):
+                if a.get("family") != "inet" or not a.get("local"):
+                    continue
+                prefix = int(a.get("prefixlen", 32))
+                nets.add(str(ipaddress.ip_network(f"{a['local']}/{prefix}", strict=False)))
+                peer = a.get("address")
+                if peer and peer != a["local"]:
+                    nets.add(str(ipaddress.ip_network(f"{peer}/32")))
+    except (ValueError, TypeError, AttributeError, KeyError) as e:
+        raise RuntimeError(f"cannot read the host's networks from `ip -j addr`: {e}") from None
+    if not nets:
+        raise RuntimeError("`ip -j addr` listed no IPv4 network (not even loopback)")
+    return sorted(nets)
+
+
+def outside_blocked_ranges(networks: list[str]) -> list[str]:
+    """The host networks not already inside a blocked range (a public subnet, say)."""
+    blocked = [ipaddress.ip_network(n) for n in BLOCKED_V4]
+    return [n for n in networks if not any(ipaddress.ip_network(n).subnet_of(b) for b in blocked)]
 
 
 def ruleset(extra_blocked: list[str] | tuple[str, ...] = ()) -> str:
-    blocked = ", ".join([*BLOCKED_V4, *(f"{a}/32" for a in extra_blocked)])
+    """The table; `extra_blocked` are CIDR networks (the host's own, outside BLOCKED_V4)."""
+    blocked = ", ".join([*BLOCKED_V4, *extra_blocked])
     return f"""table inet {TABLE} {{
     set blocked_v4 {{
         type ipv4_addr
@@ -210,7 +230,7 @@ def enter_netns(pid: int) -> None:
 
 
 def install_filter(pid: int) -> None:
-    extra = outside_blocked_ranges(host_ipv4_addresses())  # read in the HOST netns, first
+    extra = outside_blocked_ranges(host_ipv4_networks())  # read in the HOST netns, first
     nft = shutil.which("nft", path=os.environ.get("PATH", "") + SBIN)
     if not nft:
         raise RuntimeError("nft not found")
@@ -262,11 +282,10 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as e:
         print(f"netns: {e}", file=sys.stderr)
         return 2
-    if command == "print":
-        print(ruleset(outside_blocked_ranges(host_ipv4_addresses())), end="")
-        return 0
     try:
-        if command == "filter":
+        if command == "print":
+            print(ruleset(outside_blocked_ranges(host_ipv4_networks())), end="")
+        elif command == "filter":
             install_filter(pid)
         else:
             exec_slirp(pid, rest)  # does not return

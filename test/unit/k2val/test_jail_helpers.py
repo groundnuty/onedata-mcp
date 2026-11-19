@@ -267,17 +267,67 @@ async def test_an_idle_connection_is_closed(kind, short_dir) -> None:
 
 
 def test_the_ruleset_rejects_every_blocked_range_and_allows_only_slirp_dns() -> None:
-    rules = netns.ruleset(["203.0.113.9"])
+    rules = netns.ruleset(["93.184.216.0/24"])
     for net in netns.BLOCKED_V4:
         assert net in rules
-    assert "203.0.113.9/32" in rules
+    assert "93.184.216.0/24" in rules
     chain = rules[rules.index("chain output") :]
     assert chain.index('oifname "lo" accept') < chain.index("ip daddr @blocked_v4 reject")
     assert chain.index("ip daddr 10.0.2.3 udp dport 53 accept") < chain.index("@blocked_v4")
     assert "meta nfproto ipv6 reject" in chain
     for must_block in ("169.254.169.254", "100.64.0.1", "10.0.2.2", "172.17.0.1", "192.168.1.1"):
-        assert not netns.outside_blocked_ranges([must_block])  # inside a blocked range already
-    assert netns.outside_blocked_ranges(["8.8.8.8", "10.1.2.3"]) == ["8.8.8.8"]
+        assert not netns.outside_blocked_ranges([f"{must_block}/32"])  # already blocked
+    assert netns.outside_blocked_ranges(["8.8.8.0/24", "10.1.2.0/24"]) == ["8.8.8.0/24"]
+
+
+IP_ADDR = json.dumps(
+    [
+        {"ifname": "lo", "addr_info": [{"family": "inet", "local": "127.0.0.1", "prefixlen": 8}]},
+        {  # a public subnet: its neighbours must be blocked too, not only the host's /32
+            "ifname": "eth0",
+            "addr_info": [{"family": "inet", "local": "93.184.216.34", "prefixlen": 24}],
+        },
+        {
+            "ifname": "eth1",
+            "addr_info": [{"family": "inet", "local": "192.168.5.7", "prefixlen": 24}],
+        },
+        {  # a point-to-point tunnel with a public peer
+            "ifname": "tun0",
+            "addr_info": [
+                {"family": "inet", "local": "10.8.0.2", "address": "198.18.0.9", "prefixlen": 32},
+                {"family": "inet", "local": "5.6.7.8", "address": "45.33.32.156", "prefixlen": 32},
+            ],
+        },
+    ]
+)
+
+
+def test_every_host_subnet_and_peer_outside_the_blocked_ranges_is_blocked() -> None:
+    nets = netns.host_ipv4_networks(IP_ADDR)
+    assert "93.184.216.0/24" in nets and "192.168.5.0/24" in nets and "127.0.0.0/8" in nets
+    assert netns.outside_blocked_ranges(nets) == [
+        "45.33.32.156/32",
+        "5.6.7.8/32",
+        "93.184.216.0/24",
+    ]
+
+
+@pytest.mark.parametrize("failure", ["missing", "exit 1", "timeout", "bad json", "empty"])
+def test_the_filter_fails_closed_without_the_hosts_networks(monkeypatch, failure) -> None:
+    def run(*a, **k):
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired("ip", 10)
+        out = {"bad json": "not json", "empty": "[]"}.get(failure, IP_ADDR)
+        return subprocess.CompletedProcess(a, 1 if failure == "exit 1" else 0, out, "")
+
+    monkeypatch.setattr(
+        netns.shutil, "which", lambda *a, **k: None if failure == "missing" else "/x/ip"
+    )
+    monkeypatch.setattr(netns.subprocess, "run", run)
+    with pytest.raises(RuntimeError):
+        netns.host_ipv4_networks()
+    # and the jail's filter step exits non-zero, before touching any namespace
+    assert netns.main(["filter", "--pid", "999999"]) == 3
 
 
 def _listing(elems: list) -> str:
