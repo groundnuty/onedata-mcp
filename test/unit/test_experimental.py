@@ -9,7 +9,7 @@ from fastmcp import FastMCP
 from pytest_httpx import HTTPXMock
 
 from onedata_mcp import experimental
-from onedata_mcp.modules import files, harvesters, metadata, qos, spaces, transfers
+from onedata_mcp.modules import files, harvesters, metadata, qos, readiness, spaces, transfers
 
 
 def _build(exp: bool) -> FastMCP:
@@ -19,6 +19,7 @@ def _build(exp: bool) -> FastMCP:
     harvesters.register_module(m, experimental=exp)
     metadata.register_module(m)
     qos.register_module(m)
+    readiness.register_module(m)
     spaces.register_module(m, experimental=exp)
     transfers.register_module(m)
     return m
@@ -44,26 +45,33 @@ def test_gate_off_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     assert experimental.experimental_enabled() is False
 
 
-# --- surface: off is byte-identical (26), on adds exactly the 2 tools (28) --
+# --- surface: off is the base surface (29), on adds exactly the 2 tools (31) --
 
 
 @pytest.mark.asyncio
-async def test_flag_off_registers_26_validated_tools() -> None:
+async def test_flag_off_registers_the_29_base_tools() -> None:
     tools = {t.name for t in await _build(False).list_tools()}
-    assert len(tools) == 26
+    assert len(tools) == 29
     assert "set_file_xattrs" not in tools
     assert "list_space_datasets" not in tools
 
 
 @pytest.mark.asyncio
-async def test_flag_on_registers_28_tools() -> None:
+async def test_flag_on_registers_31_tools() -> None:
     off = {t.name for t in await _build(False).list_tools()}
     on = {t.name for t in await _build(True).list_tools()}
-    assert len(on) == 28
+    assert len(on) == 31
     assert on - off == {"set_file_xattrs", "list_space_datasets"}
 
 
 # --- main.py wiring: instructions + counts select on the flag ---------------
+
+
+@pytest.fixture(autouse=True)
+def _no_launch_time_selection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The main.py tests count tools; keep the caller's tool selection out of them."""
+    monkeypatch.delenv("ONEDATA_MCP_TOOLS", raising=False)
+    monkeypatch.delenv("ONEDATA_MCP_MATURITY", raising=False)
 
 
 @pytest.mark.asyncio
@@ -74,7 +82,7 @@ async def test_main_build_off(monkeypatch: pytest.MonkeyPatch) -> None:
 
     srv = main._create_onedata_mcp_server()
     assert srv.instructions == main._BASE_INSTRUCTIONS
-    assert len({t.name for t in await srv.list_tools()}) == 26
+    assert len({t.name for t in await srv.list_tools()}) == 29
 
 
 @pytest.mark.asyncio
@@ -85,7 +93,7 @@ async def test_main_build_on(monkeypatch: pytest.MonkeyPatch) -> None:
 
     srv = main._create_onedata_mcp_server()
     assert srv.instructions == main._EXPERIMENTAL_INSTRUCTIONS
-    assert len({t.name for t in await srv.list_tools()}) == 28
+    assert len({t.name for t in await srv.list_tools()}) == 31
 
 
 # --- candidate behaviour ---------------------------------------------------
