@@ -174,7 +174,15 @@ async def verify_p3(ctx: RunContext, trace: AgentTrace) -> OracleResult:
     # Tool-use correctness (depends on trace only).
     def _eu_2plus(args: dict) -> bool:
         expr = args.get("expression", "") or ""
-        rep = args.get("replicas_num", 0) or 0
+        # replicas_num may arrive as int (2), str ("2"), or float ("2.0");
+        # some models pass it as a string. Coerce defensively — a model that
+        # specified 2 replicas as "2" satisfies the intent and must not crash
+        # the oracle or be penalised for the JSON type.
+        rep_raw = args.get("replicas_num", 0) or 0
+        try:
+            rep = int(rep_raw)
+        except (TypeError, ValueError):
+            rep = 0
         return any(tok in expr for tok in EU_TOKENS) and rep >= 2
 
     added_qos = bool(find_calls(trace, "add_file_qos_requirement", _eu_2plus))
@@ -191,7 +199,7 @@ async def verify_p3(ctx: RunContext, trace: AgentTrace) -> OracleResult:
     federation_pass = False
     fed_diag: list[str] = []
     deadline = time.time() + DYNAMIC_DEADLINE_SECONDS
-    space_id = await _space_id()
+    space_id = await _space_id(ctx.space_id, ctx.space_name)
     try:
         while time.time() < deadline:
             if await _any_transfer_for_file(
@@ -423,9 +431,21 @@ async def verify_p6(ctx: RunContext, trace: AgentTrace) -> OracleResult:
 # ---------------------------------------------------------------------------
 
 
-async def _space_id() -> str:
+async def _space_id(space_id: str | None = None, space_name: str | None = None) -> str:
+    """Resolve the space id for federation-level transfer queries.
+
+    Prefers the trial's already-resolved per-LLM `space_id` (populated on
+    RunContext by prepare_trial); this is the space where the trial's
+    transfers actually live. Falls back to resolving by name, then to the
+    shared default — the pre-per-LLM behaviour. Passing the ctx space id
+    avoids the shared-space lookup that fails when only per-LLM spaces exist.
+    """
+    if space_id:
+        return space_id
     from benchmark.fixture_runner import _resolve_space_id_async
 
+    if space_name:
+        return await _resolve_space_id_async(space_name)
     return await _resolve_space_id_async()
 
 

@@ -63,7 +63,7 @@ def _stub_federation(
 ) -> None:
     import benchmark.oracles.placement as p
 
-    async def _fake_space_id() -> str:
+    async def _fake_space_id(*_args: object, **_kwargs: object) -> str:
         return "stub-space-id"
 
     async def _fake_any_transfer(_space_id: str, _state: str, _file_id: str) -> bool:
@@ -133,3 +133,103 @@ async def test_p3_fails_when_no_qos_call_regardless_of_federation(
     result = await verify_p3(_ctx(), trace)
     assert result.mcp_pass is False
     assert "no add_file_qos_requirement" in result.diagnosis
+
+
+def _trace_with_string_replicas() -> AgentTrace:
+    """A model that passes replicas_num as the STRING "2" (issue #16 —
+    Llama-3.3-70B / Qwen3-Coder did this, crashing the oracle with
+    TypeError: '>=' not supported between 'str' and 'int')."""
+    return AgentTrace(
+        final_answer="Set QoS to 2 EU replicas.",
+        tool_calls=(
+            ToolCall(
+                tool_name="add_file_qos_requirement",
+                arguments={
+                    "expression": "country=PL",
+                    "file_id_or_path": P3_PATH,
+                    "replicas_num": "2",  # <-- string, not int
+                },
+                succeeded=True,
+            ),
+            ToolCall(
+                tool_name="list_space_transfers",
+                arguments={"space_id": "any", "state": "ongoing"},
+                succeeded=True,
+            ),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_p3_accepts_string_replicas_num_without_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (issue #16): replicas_num='2' must be coerced, not crash,
+    and must count as replicas>=2 (the model specified 2)."""
+    _stub_federation(monkeypatch, transfer_seen=True)
+    result = await verify_p3(_ctx(), _trace_with_string_replicas())
+    assert result.mcp_pass is True
+    assert result.federation_pass is True
+
+
+@pytest.mark.asyncio
+async def test_p3_garbage_replicas_num_does_not_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-numeric replicas_num coerces to 0 (fails the >=2 test) but must
+    not raise."""
+    _stub_federation(monkeypatch, transfer_seen=False, fulfilled=False)
+    trace = AgentTrace(
+        final_answer="",
+        tool_calls=(
+            ToolCall(
+                tool_name="add_file_qos_requirement",
+                arguments={
+                    "expression": "country=PL",
+                    "file_id_or_path": P3_PATH,
+                    "replicas_num": "lots",
+                },
+                succeeded=True,
+            ),
+        ),
+    )
+    result = await verify_p3(_ctx(), trace)  # must not raise
+    assert result.mcp_pass is False
+
+
+@pytest.mark.asyncio
+async def test_p3_uses_ctx_space_id_without_shared_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (issue #16): with per-LLM spaces (no shared default space),
+    verify_p3 must resolve the federation query via ctx.space_id, NOT re-resolve
+    the shared default (which raises RuntimeError when it doesn't exist)."""
+    import benchmark.oracles.placement as p
+
+    # Any call to the shared-name resolver must fail loudly — the fix must not
+    # reach it when ctx.space_id is provided.
+    async def _boom(*_a: object, **_k: object) -> str:
+        raise AssertionError("must not fall back to shared-space resolution")
+
+    monkeypatch.setattr("benchmark.fixture_runner._resolve_space_id_async", _boom)
+
+    seen: dict[str, str] = {}
+
+    async def _fake_any_transfer(space_id: str, _state: str, _file_id: str) -> bool:
+        seen["space_id"] = space_id
+        return True
+
+    monkeypatch.setattr(p, "_any_transfer_for_file", _fake_any_transfer)
+    monkeypatch.setattr(p, "DYNAMIC_DEADLINE_SECONDS", 0.5)
+    monkeypatch.setattr(p, "DYNAMIC_POLL_INTERVAL", 0.05)
+
+    per_llm_path = "/ppam_2026_mcp_tests_llama_3_3_70b/p3/result.bin"
+    ctx = RunContext(
+        scenario_id="P3",
+        fixture_paths={per_llm_path: P3_FILE_ID},
+        space_name="ppam_2026_mcp_tests_llama_3_3_70b",
+        space_id="per-llm-space-id-123",
+    )
+    result = await verify_p3(ctx, _trace_with_correct_calls(final_answer="done"))
+    assert result.federation_pass is True
+    assert seen["space_id"] == "per-llm-space-id-123"  # used ctx, not a lookup

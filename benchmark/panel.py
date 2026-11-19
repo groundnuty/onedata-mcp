@@ -89,6 +89,11 @@ def build_panel() -> tuple[tuple[PanelEntry, ...], tuple[str, ...]]:
         for name, model_id in (
             ("qwen3.6-35b", "Qwen/Qwen3.6-35B-A3B"),
             ("glm-4.7-flash", "zai-org/GLM-4.7-Flash"),
+            # Journal-extension cross-comparison legs (issue #16, added
+            # 2026-07-06). Both re-enabled/available on Forge as of that date.
+            # experimental maturity — NOT in the frozen PPAM HEADLINE-16.
+            ("llama-3.3-70b", "meta-llama/Llama-3.3-70B-Instruct"),
+            ("qwen3-coder-30b", "Qwen/Qwen3-Coder-30B-A3B-Instruct"),
         ):
             panel.append(
                 PanelEntry(
