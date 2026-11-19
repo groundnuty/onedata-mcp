@@ -235,7 +235,6 @@ def test_jail_cmd_builds_the_wrapper_call() -> None:
         cli="agy",
         mcp_upstream="127.0.0.1:41999",
         home_files=[(AGY_MCP_CONFIG, "/tmp/s/agy-mcp-config.json")],
-        keep_home="/tmp/keep",
     ) == [
         "/path/to/cli-jail.sh",
         "--cli",
@@ -246,8 +245,6 @@ def test_jail_cmd_builds_the_wrapper_call() -> None:
         "127.0.0.1:41999",
         "--home-file",
         ".gemini/config/mcp_config.json=/tmp/s/agy-mcp-config.json",
-        "--keep-home",
-        "/tmp/keep",
         "--",
         "agy",
         "--print=x",
@@ -261,6 +258,14 @@ def test_jail_cmd_builds_the_wrapper_call() -> None:
         "--",
         "codex",
     ]
+
+
+def test_there_is_no_way_to_copy_the_jails_home_out() -> None:
+    """--keep-home is gone: the trace's MCP half is the server's record, the CLI's events come
+    on stdout, and nothing of the jail's home is ever copied to the host."""
+    with pytest.raises(TypeError):
+        jail_cmd(["codex"], "/tmp/w", JailConf("/j"), cli="codex", keep_home="/tmp/k")
+    assert not (REPO_ROOT / "benchmark/k2val/jail/keep_home.py").exists()
 
 
 def test_a_relative_wrapper_is_taken_from_the_repository_root() -> None:

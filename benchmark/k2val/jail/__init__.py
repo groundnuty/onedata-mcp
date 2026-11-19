@@ -10,7 +10,7 @@ The wrapper comes from `[cli.jail] wrapper` in `k2val.toml` (a path relative to 
 root, or absolute) and is invoked as
 
     <wrapper> --cli codex|agy --workdir <dir> [--mcp-upstream 127.0.0.1:<P>]
-              [--home-file <rel>=<file>]... [--keep-home <dir>] -- <argv...>
+              [--home-file <rel>=<file>]... -- <argv...>
 
 Nothing in the CLI legs starts a process except through `jail_cmd`; with no wrapper set it
 raises, so a CLI is never run unjailed.
@@ -63,7 +63,6 @@ def jail_cmd(
     cli: str,
     mcp_upstream: str | None = None,
     home_files: Iterable[tuple[str, str]] = (),
-    keep_home: str | None = None,
 ) -> list[str]:
     """`argv` wrapped to run in the jail with `workdir` (empty) as /work. `mcp_upstream`
     (`127.0.0.1:<P>`) is the MCP server the jail relays to; `home_files` are (path in the fresh
@@ -85,6 +84,4 @@ def jail_cmd(
         cmd += ["--mcp-upstream", mcp_upstream]
     for rel, src in home_files:
         cmd += ["--home-file", f"{rel}={src}"]
-    if keep_home:
-        cmd += ["--keep-home", keep_home]
     return [*cmd, "--", *argv]

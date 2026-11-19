@@ -1,6 +1,6 @@
 """The CLI jail's helpers, without bwrap: the two forwarders, the netns ruleset and its check,
-the --keep-home copy, and cli-jail.sh's argument building and refusals. The live proof of the
-jail itself is test/live/test_k2val_jail_live.py (the leak probe)."""
+and cli-jail.sh's argument building and refusals. The live proof of the jail itself is
+test/live/test_k2val_jail_live.py (the leak probe)."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from benchmark.k2val.jail import fwd_in, fwd_out, keep_home, netns
+from benchmark.k2val.jail import fwd_in, fwd_out, netns
 
 JAIL_DIR = Path(fwd_out.__file__).resolve().parent
 CLI_JAIL = JAIL_DIR / "cli-jail.sh"
@@ -215,46 +215,6 @@ def test_netns_arguments_are_strict(argv) -> None:
         netns.parse(argv)
 
 
-# --- --keep-home ------------------------------------------------------------------------------
-
-
-SECRET = "refresh-SECRET-abcdef0123456789"
-
-
-def _homes(tmp_path: Path) -> tuple[Path, Path]:
-    home, staged = tmp_path / "home", tmp_path / "staged"
-    for root in (home, staged):
-        (root / ".codex").mkdir(parents=True)
-        (root / ".codex" / "auth.json").write_text(json.dumps({"tokens": {"refresh": SECRET}}))
-    (home / ".codex" / "sessions").mkdir()
-    (home / ".codex" / "sessions" / "run.jsonl").write_text('{"type": "turn.started"}\n')
-    (home / ".codex" / "sessions" / "oauth-cache.json").write_text("{}")
-    (home / ".codex" / "config.toml").write_text('model = "x"\n')  # not a session path
-    return home, staged
-
-
-def test_keep_home_copies_session_files_only(tmp_path) -> None:
-    home, staged = _homes(tmp_path)
-    out = tmp_path / "kept"
-    rc = keep_home.main(
-        ["--cli", "codex", "--home", str(home), "--out", str(out), "--staged", str(staged)]
-    )
-    assert rc == 0
-    kept = sorted(str(p.relative_to(out)) for p in out.rglob("*") if p.is_file())
-    assert kept == [".codex/sessions/run.jsonl"]  # no login file, nothing outside the allowlist
-
-
-def test_keep_home_keeps_nothing_when_a_login_value_leaked_into_a_session(tmp_path) -> None:
-    home, staged = _homes(tmp_path)
-    (home / ".codex" / "sessions" / "leak.jsonl").write_text(f'{{"echo": "{SECRET}"}}\n')
-    out = tmp_path / "kept"
-    rc = keep_home.main(
-        ["--cli", "codex", "--home", str(home), "--out", str(out), "--staged", str(staged)]
-    )
-    assert rc == 1
-    assert not out.exists()
-
-
 # --- cli-jail.sh ------------------------------------------------------------------------------
 
 
@@ -334,6 +294,9 @@ def test_without_an_upstream_there_is_no_socket_and_no_forwarder() -> None:
         (["--cli", "codex", "--", "x"], "--workdir is required"),
         (["--cli", "codex", "--workdir", "/tmp"], "no CLI command"),
         (["--cli", "codex", "--workdir", "/tmp", "--bogus", "--", "x"], "unknown argument"),
+        # removed: nothing of the jail's home is ever copied out
+        (["--cli", "codex", "--workdir", "/tmp", "--keep-home", "/tmp/k", "--", "x"],
+         "unknown argument"),
         (
             ["--cli", "codex", "--workdir", "/tmp", "--mcp-upstream", "10.0.0.1:80", "--", "x"],
             "127.0.0.1",

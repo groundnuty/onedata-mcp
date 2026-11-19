@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # cli-jail.sh: run ONE agent CLI (codex or agy) in a jail that shows it nothing private.
 #
-#   cli-jail.sh --cli codex|agy --workdir <dir> [--mcp-upstream 127.0.0.1:<P>] [--keep-home <dir>] \
+#   cli-jail.sh --cli codex|agy --workdir <dir> [--mcp-upstream 127.0.0.1:<P>] \
 #               [--home-file <rel path>=<file>] -- <cli argv...>
 #   cli-jail.sh --probe <probe.json> --cli ... --workdir ... [--mcp-upstream ...]   (leak-probe.sh)
 #   cli-jail.sh --print-args --cli ... --workdir ... [--mcp-upstream ...] -- <argv>  (stages nothing)
@@ -41,15 +41,15 @@ JAIL_HOME=/home/agent
 
 die() { echo "cli-jail: $*" >&2; exit "${2:-2}"; }
 
-CLI="" WORKDIR="" UPSTREAM="" KEEP_HOME="" PROBE="" PRINT_ARGS=0
+CLI="" WORKDIR="" UPSTREAM="" PROBE="" PRINT_ARGS=0
 ARGV=() HOME_FILES=()
 while [ $# -gt 0 ]; do
   case $1 in
-    --cli|--workdir|--mcp-upstream|--keep-home|--probe|--home-file)
+    --cli|--workdir|--mcp-upstream|--probe|--home-file)
       [ $# -ge 2 ] || die "$1 needs a value"
       case $1 in
         --cli) CLI=$2 ;; --workdir) WORKDIR=$2 ;; --mcp-upstream) UPSTREAM=$2 ;;
-        --keep-home) KEEP_HOME=$2 ;; --probe) PROBE=$2 ;; --home-file) HOME_FILES+=("$2") ;;
+        --probe) PROBE=$2 ;; --home-file) HOME_FILES+=("$2") ;;
       esac
       shift 2 ;;
     --print-args) PRINT_ARGS=1; shift ;;
@@ -101,7 +101,6 @@ else
   [ -d "$ROOT" ] || die "K2VAL_JAIL_TMPDIR does not exist"
   ROOT=$(cd "$ROOT" && pwd -P)
   neutral_path "$ROOT" || die "the staging root must be a neutral temp path (under /tmp, naming no user)"
-  [ -z "$KEEP_HOME" ] || [ ! -e "$KEEP_HOME" ] || [ -z "$(ls -A "$KEEP_HOME")" ] || die "--keep-home must be empty or absent"
   BWRAP=$(command -v bwrap) || die "bwrap not found"
   SLIRP=$(command -v slirp4netns) || die "slirp4netns not found"
   command -v "$PY" >/dev/null || die "no Python for the helpers ($PY)"
@@ -145,8 +144,6 @@ stage_credentials() {
       ;;
   esac
   (cd "$S/home" && find . -type f -print0 | sort -z | xargs -0 -r sha256sum) > "$S/ctl/credentials.sha256"
-  # the logins as staged, for --keep-home's check that none of their values is copied out
-  [ -z "$KEEP_HOME" ] || cp -rp "$S/home" "$S/ctl/staged-home" || die "cannot stage"
 }
 
 stage_home_files() {
@@ -317,9 +314,5 @@ CHANGED=$(cd "$S/home" && sha256sum --quiet -c "$S/ctl/credentials.sha256" 2>/de
 if [ -n "$CHANGED" ]; then
   echo "cli-jail: warning: $CLI rewrote its login file(s) inside the jail: $CHANGED(a token" \
        "refresh?); the jail's copy is discarded, the host keeps its own" >&2
-fi
-if [ -n "$KEEP_HOME" ]; then
-  "$PY" -I "$HERE/keep_home.py" --cli "$CLI" --home "$S/home" --out "$KEEP_HOME" \
-    --staged "$S/ctl/staged-home" || echo "cli-jail: --keep-home: nothing kept" >&2
 fi
 exit "$RC"

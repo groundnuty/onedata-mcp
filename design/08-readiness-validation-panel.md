@@ -105,10 +105,10 @@ Everything a CLI leg sees is sent to OpenAI or Google. The jail (`benchmark/k2va
 dir, a fresh home holding nothing but that CLI's login, and the MCP server's URL.
 
     cli-jail.sh --cli codex|agy --workdir <dir> [--mcp-upstream 127.0.0.1:<P>] [--home-file <rel>=<file>]...
-                [--keep-home <dir>] -- <cli argv...>
+                -- <cli argv...>
 
 Files: `cli-jail.sh` (the jail), `fwd_out.py` and `fwd_in.py` (the two forwarders), `netns.py` (egress filter and
-slirp attach), `keep_home.py` (`--keep-home`), `leak-probe.sh` with `leak_probe.py` and `probe_in.py` (the proof). All
+slirp attach), `leak-probe.sh` with `leak_probe.py` and `probe_in.py` (the proof). All
 the Python is standard library only. No local path is written in any of them: paths come from arguments, `$HOME` and
 `command -v`.
 
@@ -172,9 +172,8 @@ service on the host's loopback (the Onedata providers, agent channel servers and
   `K2VAL_JAIL_TMPDIR`), removes that dir itself, and cancels with SIGTERM, then SIGKILL after 10 s.
 
 **Logins.** If the CLI rewrites a staged login file (a token refresh), the jail names the file on stderr, never its
-content, and discards it with the home. The host's own login is never written. `--keep-home <dir>` copies out only the
-listed session paths. It never copies a file named like a login, and it deletes the copy if any value of the staged
-logins appears in it. That allowlist is not yet checked against a real run and is not wired into the harness.
+content, and discards it with the home. The host's own login is never written. Nothing of the jail's home is copied
+out: the trace's MCP half is the server's own record, and the CLI's events come on its stdout.
 
 **Harness wiring.**
 - codex runs `exec --json --ephemeral --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox`, because bwrap
@@ -220,7 +219,7 @@ logins appears in it. That allowlist is not yet checked against a real run and i
   a stolen token reaches.
 
 **How to verify.**
-1. `make test`: the unit tests of the forwarders, `netns.py`, `keep_home.py`, the bwrap arguments
+1. `make test`: the unit tests of the forwarders, `netns.py`, the bwrap arguments
    (`cli-jail.sh --print-args`) and the jail's refusals.
 2. `make k2val-jail-probe` (or `make test-k2val-jail-live`): the leak probe runs `probe_in.py` INSIDE the same jail, with
    the harness's arguments (`--cli`, `--workdir`, `--mcp-upstream`) and no CLI. It prints a PASS/FAIL table and exits 0
