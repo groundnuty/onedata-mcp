@@ -18,6 +18,7 @@ raises, so a CLI is never run unjailed.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shlex
@@ -48,31 +49,43 @@ class JailCleanupError(RuntimeError):
 def _unlock_dirs(path: str) -> None:
     """u+rwx back on `path` and every directory below it, top-down, never through a symlink:
     the jail may have stripped them (chmod 0) so that removal fails. Files are left alone (an
-    unlink needs no permission on the file)."""
-    try:
-        st = os.lstat(path)
-    except OSError:
-        return
-    if not stat.S_ISDIR(st.st_mode):
-        return
-    os.chmod(path, stat.S_IMODE(st.st_mode) | stat.S_IRWXU)
-    with os.scandir(path) as entries:
-        subdirs = [e.path for e in entries if e.is_dir(follow_symlinks=False)]
-    for d in subdirs:
-        _unlock_dirs(d)
+    unlink needs no permission on the file). Iterative; a path too long to use is skipped (the
+    fallback in `remove_tree` handles any depth)."""
+    stack = [path]
+    while stack:
+        p = stack.pop()
+        try:
+            st = os.lstat(p)
+            if not stat.S_ISDIR(st.st_mode):
+                continue
+            if stat.S_IMODE(st.st_mode) & stat.S_IRWXU != stat.S_IRWXU:
+                os.chmod(p, stat.S_IMODE(st.st_mode) | stat.S_IRWXU)
+            with os.scandir(p) as entries:
+                stack += [e.path for e in entries if e.is_dir(follow_symlinks=False)]
+        except OSError:
+            continue
 
 
 def remove_tree(path: Path | str) -> None:
     """Remove a directory the jail could write into (the trial's scratch, its work dir, a jail's
-    staging dir left by a SIGKILL), whatever the jail did to its permissions. Raises
-    JailCleanupError if anything is left: it may hold a copy of a CLI login."""
+    staging dir left by a SIGKILL), whatever the jail did to its permissions or depth. Raises
+    JailCleanupError if anything is left: it may hold a copy of a CLI login.
+
+    Python first; if anything is left (a chain deeper than Python's recursive rmtree, or longer
+    than PATH_MAX), GNU find -execdir and rm -rf, which walk any depth by relative names."""
     import shutil
+    import subprocess
 
     p = str(path)
     if not os.path.lexists(p):
         return
     _unlock_dirs(p)
-    shutil.rmtree(p, ignore_errors=True)
+    with contextlib.suppress(RecursionError):  # too deep for Python: the fallback below
+        shutil.rmtree(p, ignore_errors=True)
+    if os.path.lexists(p):
+        unlock = ["find", "-P", p, "-type", "d", "!", "-perm", "-u=rwx"]
+        for cmd in ([*unlock, "-execdir", "chmod", "u+rwx", "{}", ";"], ["rm", "-rf", "--", p]):
+            subprocess.run(cmd, capture_output=True, timeout=600, check=False)
     if os.path.lexists(p):
         raise JailCleanupError(f"could not remove {p} (it may hold a copy of a CLI login)")
 

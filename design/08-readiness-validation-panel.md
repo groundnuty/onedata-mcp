@@ -179,16 +179,19 @@ service on the host's loopback (the Onedata providers, agent channel servers and
   forwarder, and removes the staging dir. During that cleanup further signals are ignored, so a second SIGTERM cannot
   cut it short.
 - The jail can strip the permissions of what it owns (its home, the login's dir, `/work`: `chmod 0`) so that a plain
-  `rm -rf` fails and leaves the login copy behind. Both removals, the script's (staging dir) and the harness's
-  (`remove_tree`, the trial's scratch with `/work`), first give every directory back `u+rwx`, top-down and never
-  through a symlink, then remove, then check: anything left is an error (the script exits 4), never silent.
+  `rm -rf` fails and leaves the login copy behind; it can also build a chain deeper than `PATH_MAX` and than Python's
+  recursive `rmtree`. Both removals, the script's (staging dir) and the harness's (`remove_tree`, the trial's scratch
+  with `/work`), first give every directory lacking `u+rwx` that back, top-down and never through a symlink, by
+  relative names (`find -P ... -execdir chmod`, any depth), then remove (`rm -rf`; `remove_tree` tries Python first),
+  then check: anything left is an error (the script exits 4), never silent.
 - A SIGKILL of the script skips that removal. The harness therefore stages inside the trial's scratch dir (its
   `K2VAL_JAIL_TMPDIR`), removes that dir itself, and cancels with SIGTERM, then SIGKILL after 10 s.
 
 **Logins.** If the CLI rewrites a staged login file (a token refresh), the jail names the file on stderr, never its
 content, and discards it with the home. That post-exit check treats the staged paths as jail-written: a path that is
-no longer a regular non-symlink file (a FIFO, a symlink to `/dev/zero` or a host file) is named as replaced and never
-opened, and each hash runs under `timeout 10`, so it can neither hang nor defer a SIGTERM for long. The host's own login is never written. Nothing of the jail's home is copied
+no longer a regular non-symlink file of at most 1 MiB (a FIFO, a symlink to `/dev/zero` or a host file, a huge sparse
+file) is named as replaced and never opened. A real login is a few KiB, so each hash takes milliseconds; `timeout 2`
+is only the backstop, which keeps a pending SIGTERM well inside the harness's 10 s grace. The host's own login is never written. Nothing of the jail's home is copied
 out: the trace's MCP half is the server's own record, and the CLI's events come on its stdout.
 
 **Harness wiring.**
@@ -262,12 +265,13 @@ out: the trace's MCP half is the server's own record, and the CLI's events come 
    7. host processes are not visible (pid 1 is bwrap; a host process with a marker is not seen); also no capabilities,
       no new user namespaces, nft can neither list nor flush, no `/dev/tty`, only fds 0-2;
    8. no staging dir, jail process or slirp is left after a normal exit and a SIGTERM; after a SIGKILL no process is
-      left, and the staging dir is left for the caller to remove. Two hostile runs, where the probe plays a CLI that
-      tampers before exiting: after a `chmod 0` of the home, the login's dir and `/work`, every login copy is still
-      removed; after a FIFO and a `/dev/zero` symlink replace the login files, the script still ends at once and names
-      them.
-   Each row added after the first review (`/opt/cli`, the DNS rows, the two hostile runs) failed on the code before
-   its fix, as the commit messages record.
+      left, and the staging dir is left for the caller to remove. Three hostile runs, where the probe plays a CLI that
+      tampers before exiting: after a `chmod 0` of the home, the login's dir and `/work`, plus a 3000-deep chain with a
+      locked bottom in each, everything is still removed; after a FIFO and a `/dev/zero` symlink replace the login
+      files, the script still ends at once and names them; a 64 GiB sparse file at a login path is not hashed (the
+      script ends within 5 s).
+   Each row added after the first review (`/opt/cli`, the DNS rows, the hostile runs) failed on the code before its
+   fix, as the commit messages record.
 3. A negative control proves the probe can fail: a copy of the jail without the filter and without
    `--disable-host-loopback` fails every reachability row of (4).
 4. Teardown before the release, which the probe's signal cases do not reach (they signal a running probe), was checked

@@ -112,12 +112,13 @@ fi
 BW_PID="" CHILD_PID="" SLIRP_PID="" FWD_PID="" REAPER_PID="" BLOCK_W="" SYNC_RW=""
 
 # The jail can strip the permissions of anything it owns (its home, the login's dir, /work) so
-# that a plain rm -rf fails and leaves the login copy behind. Give every DIRECTORY back u+rwx,
-# top-down and never through a symlink (find -P; `-exec ... \;` runs before find reads the dir),
-# then remove, then check. Files need no permission to be unlinked, and are left untouched.
+# that a plain rm -rf fails and leaves the login copy behind. Give every DIRECTORY lacking u+rwx
+# that back, top-down and never through a symlink (find -P; `-execdir ... \;` runs, from the
+# parent and by a relative name, before find reads the dir, so any depth works), then remove,
+# then check. Files need no permission to be unlinked, and are left untouched.
 remove_staging() {
   [ -n "${S:-}" ] && [ -e "$S" ] || return 0
-  find -P "$S" -type d -exec chmod u+rwx {} \; 2>/dev/null
+  find -P "$S" -type d ! -perm -u=rwx -execdir chmod u+rwx {} \; 2>/dev/null
   rm -rf "$S" 2>/dev/null
   if [ -e "$S" ]; then
     echo "cli-jail: ERROR: the staging dir could not be removed and holds a copy of the $CLI login: $S" >&2
@@ -328,16 +329,17 @@ RC=$?
 BW_PID="" CHILD_PID=""  # gone: its pid must not be signalled again
 
 # A login the CLI refreshed inside the jail is discarded with the home: name the file, show
-# nothing of it. The staged paths are jail-written by now: each must still be a regular file and
-# not a symlink before it is hashed (a FIFO there would block the read forever, a symlink would
-# resolve to /dev/zero or a host file), and each hash is bounded by `timeout`, so a pending
-# SIGTERM is never deferred for long and the cleanup always runs.
+# nothing of it. The staged paths are jail-written by now: each must still be a regular file, not
+# a symlink, and at most 1 MiB before it is hashed (a FIFO there would block the read forever, a
+# symlink would resolve to /dev/zero or a host file, a huge sparse file would take minutes). A
+# login file is a few KiB, so each hash takes milliseconds; `timeout 2` is only the backstop that
+# keeps a pending SIGTERM from being deferred for long (well under the harness's 10 s grace).
 CHANGED="" REPLACED=""
 while read -r sum rel; do
   path=$S/home/${rel#./}
-  if [ -L "$path" ] || [ ! -f "$path" ]; then
+  if [ -L "$path" ] || [ ! -f "$path" ] || [ "$(stat -c %s -- "$path")" -gt 1048576 ]; then
     REPLACED+="${rel#./} "
-  elif [ "$(timeout 10 sha256sum < "$path" 2>/dev/null | cut -d' ' -f1)" != "$sum" ]; then
+  elif [ "$(timeout 2 sha256sum < "$path" 2>/dev/null | cut -d' ' -f1)" != "$sum" ]; then
     CHANGED+="${rel#./} "
   fi
 done < "$S/ctl/credentials.sha256"
@@ -347,6 +349,6 @@ if [ -n "$CHANGED" ]; then
 fi
 if [ -n "$REPLACED" ]; then
   echo "cli-jail: warning: login path(s) removed, or replaced inside the jail by something other" \
-       "than a regular file (not read): $REPLACED" >&2
+       "than a small regular file (not read): $REPLACED" >&2
 fi
 exit "$RC"

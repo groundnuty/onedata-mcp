@@ -480,9 +480,30 @@ def test_remove_tree_removes_dirs_the_jail_stripped_of_permissions(tmp_path) -> 
     outside.chmod(0o700)
 
 
+def test_remove_tree_removes_a_chain_deeper_than_path_max_with_a_locked_bottom(tmp_path) -> None:
+    """Python's recursive rmtree raises RecursionError here, and absolute paths pass PATH_MAX:
+    the fallback (find -execdir, rm -rf) walks by relative names."""
+    top = tmp_path / "deep"
+    top.mkdir()
+    fd = os.open(top, os.O_RDONLY)
+    for _ in range(3000):
+        os.mkdir("d", dir_fd=fd)
+        nfd = os.open("d", os.O_RDONLY, dir_fd=fd)
+        os.close(fd)
+        fd = nfd
+    os.close(os.open("f", os.O_CREAT | os.O_WRONLY, 0o600, dir_fd=fd))
+    os.fchmod(fd, 0)
+    os.close(fd)
+
+    remove_tree(top)
+
+    assert not top.exists()
+
+
 def test_remove_tree_is_loud_when_something_is_left(tmp_path, monkeypatch) -> None:
     (tmp_path / "d").mkdir()
     monkeypatch.setattr("shutil.rmtree", lambda *a, **k: None)
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: None)  # no fallback either
     with pytest.raises(JailCleanupError, match="login"):
         remove_tree(tmp_path / "d")
 

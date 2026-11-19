@@ -301,11 +301,29 @@ def _lock(path: str) -> None:
     os.chmod(path, 0)
 
 
+def _deep_lock(top: str, depth: int = 3000) -> None:
+    """A chain of `depth` dirs (past PATH_MAX, and deeper than a recursive remover goes) whose
+    bottom holds a file and is chmod 0. Built by relative names, as only a relative walk can."""
+    os.mkdir(top)
+    fd = os.open(top, os.O_RDONLY)
+    for _ in range(depth):
+        os.mkdir("d", dir_fd=fd)
+        nfd = os.open("d", os.O_RDONLY, dir_fd=fd)
+        os.close(fd)
+        fd = nfd
+    os.close(os.open("f", os.O_CREAT | os.O_WRONLY, 0o600, dir_fd=fd))
+    os.fchmod(fd, 0)
+    os.close(fd)
+
+
 def hostile_perms_mode(conf: dict) -> int:
     """Strip permissions in the home (the login's own dir, a new dir, the home itself) and in
-    /work, then exit 0. The host must still remove every copy of the login."""
+    /work, and leave a 3000-deep chain with a locked bottom in each, then exit 0. The host must
+    still remove every copy of the login, and everything else."""
     home = os.environ["HOME"]
     login_dir = os.path.join(home, conf["expected_home_files"][0].split("/")[0])
+    _deep_lock(os.path.join(home, "deep"))
+    _deep_lock(os.path.join("/work", "deep"))
     _lock(os.path.join(home, "locked"))
     _lock(os.path.join("/work", "locked"))
     os.chmod(login_dir, 0)
@@ -333,6 +351,17 @@ def hostile_plants_mode(conf: dict) -> int:
     return 0
 
 
+def hostile_huge_mode(conf: dict) -> int:
+    """Replace the first login file with a 64 GiB sparse regular file (no disk used): hashing it
+    would take minutes and defer a SIGTERM past the harness's grace. Then exit 0."""
+    path = os.path.join(os.environ["HOME"], conf["expected_home_files"][0])
+    os.unlink(path)
+    with open(path, "wb") as f:
+        f.truncate(64 << 30)
+    print("HOSTILE-DONE", flush=True)
+    return 0
+
+
 def main() -> int:
     with open(sys.argv[1], encoding="utf-8") as f:
         conf = json.load(f)
@@ -342,6 +371,8 @@ def main() -> int:
         return hostile_perms_mode(conf)
     if conf.get("mode") == "hostile-plants":
         return hostile_plants_mode(conf)
+    if conf.get("mode") == "hostile-huge":
+        return hostile_huge_mode(conf)
     check_paths(conf)
     check_cli_binaries()
     check_strings(conf)

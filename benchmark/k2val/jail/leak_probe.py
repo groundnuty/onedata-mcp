@@ -6,17 +6,25 @@ side, and prints a PASS/FAIL table. Entry point: leak-probe.sh.
 Per CLI, with the same jail arguments the harness uses (--cli, --workdir, --mcp-upstream):
 
 1. host paths (the home, /mnt, /Users, ~/.ssh, the repo, the config, token and key files) are
-   absent, and no host-identifying string shows in the jail's /proc or /etc;
+   absent, no host-identifying string shows in the jail's /proc or /etc, and /opt/cli holds
+   the jail's own copies of the binaries (no symlink, no inode shared with the host);
 2. the environment holds exactly the allowed variables;
 3. the fresh home holds exactly that CLI's login files;
 4. the host's loopback (127.0.0.1:31443/31444, 10.0.2.2, a canary listener started here) and
    the host's other addresses (a 0.0.0.0 canary via every host IPv4 address, the metadata
    service) are unreachable, while each target IS reachable from the host at that moment;
-5. one TLS handshake each to api.openai.com, chatgpt.com, generativelanguage.googleapis.com;
+   slirp's DNS relay 10.0.2.3 answers nothing, and no name the host resolves locally (found
+   now: its hostname, under each search domain, its tailnet name) resolves inside;
+5. one TLS handshake each to api.openai.com, chatgpt.com, generativelanguage.googleapis.com
+   (through the public resolvers);
 6. 127.0.0.1:<P> inside the jail reaches a dummy HTTP server run here as the upstream;
 7. host processes are not visible; and, beyond the brief: no capabilities, no user namespaces,
    the nft filter can be neither read nor flushed, no terminal, no stray file descriptors;
-8. no staging dir and no process is left after a normal exit, a SIGTERM and a SIGKILL.
+8. no staging dir and no process is left after a normal exit, a SIGTERM and a SIGKILL; and
+   three hostile runs (the probe plays a tampering CLI): after a chmod 0 of the home, the
+   login's dir and /work plus a 3000-deep locked chain, everything is removed; a FIFO and a
+   /dev/zero symlink at the login paths neither hang the script nor are opened; a 64 GiB sparse
+   file there is not hashed (the script ends within 5 s).
 
 Exit 0 only if every row passes. Prints no credential and no host path.
 """
@@ -31,7 +39,6 @@ import os
 import shutil
 import signal
 import socket
-import stat
 import subprocess
 import sys
 import tempfile
@@ -270,22 +277,13 @@ def jail_processes(markers: list[str]) -> list[int]:
 
 
 def force_rmtree(path: str) -> bool:
-    """Remove a tree a jail wrote into, even with its permissions stripped: give every directory
-    (never following a symlink) back u+rwx, top-down, then remove. True if it is gone."""
-
-    def unlock(p: str) -> None:
-        with contextlib.suppress(OSError):
-            st = os.lstat(p)
-            if not stat.S_ISDIR(st.st_mode):
-                return
-            os.chmod(p, stat.S_IMODE(st.st_mode) | stat.S_IRWXU)
-            for entry in os.scandir(p):
-                if entry.is_dir(follow_symlinks=False):
-                    unlock(entry.path)
-
+    """Remove a tree a jail wrote into, even with its permissions stripped or deeper than
+    PATH_MAX: GNU find -execdir gives every directory lacking u+rwx that back (top-down, by
+    relative names, never through a symlink), then rm -rf. True if it is gone."""
     if os.path.lexists(path):
-        unlock(path)
-        shutil.rmtree(path, ignore_errors=True)
+        unlock = ["find", "-P", path, "-type", "d", "!", "-perm", "-u=rwx"]
+        for cmd in ([*unlock, "-execdir", "chmod", "u+rwx", "{}", ";"], ["rm", "-rf", "--", path]):
+            subprocess.run(cmd, capture_output=True, timeout=600, check=False)
     return not os.path.lexists(path)
 
 
@@ -500,10 +498,19 @@ class CliProbe:
                 self.signal_case(sig, conf, root, workdir, upstream)
             self.hostile_case(
                 "hostile-perms",
-                "8 login copies removed after chmod 000 (home, login dir, /work)",
+                "8 all removed after chmod 000 + a 3000-deep locked chain",
                 conf,
                 root,
                 upstream,
+            )
+            self.hostile_case(
+                "hostile-huge",
+                "8 no slow hash of a 64 GiB sparse file at a login path",
+                conf,
+                root,
+                upstream,
+                expect_in_stderr=(conf["expected_home_files"][0],),
+                max_seconds=5,
             )
             self.hostile_case(
                 "hostile-plants",
@@ -531,10 +538,11 @@ class CliProbe:
         root: str,
         upstream: Upstream,
         expect_in_stderr: tuple[str, ...] = (),
+        max_seconds: float = HOSTILE_TIMEOUT_S,
     ) -> None:
         """The probe plays a hostile CLI (`mode`), then exits 0. The jail script must still end
-        in time and remove its staging dir; the work dir must still be removable by its owner;
-        and the script's stderr must name each of `expect_in_stderr`."""
+        within `max_seconds` and remove its staging dir; the work dir must still be removable by
+        its owner; and the script's stderr must name each of `expect_in_stderr`."""
         workdir = tempfile.mkdtemp(prefix="k2val-probe-work-", dir=NEUTRAL_ROOT)
         slirp_before = jail_slirps()
         proc, probe = self.run_jail({**conf, "mode": mode}, root, workdir, upstream)
@@ -552,8 +560,9 @@ class CliProbe:
             force_rmtree(os.path.join(root, n))
         work_removed = force_rmtree(workdir)
         named = [s for s in expect_in_stderr if s in err]
-        ok = done and not hung and proc.returncode == 0 and not left.files
-        ok = ok and left.processes_gone and work_removed and len(named) == len(expect_in_stderr)
+        ok = done and not hung and elapsed < max_seconds and proc.returncode == 0
+        ok = ok and not left.files and left.processes_gone and work_removed
+        ok = ok and len(named) == len(expect_in_stderr)
         detail = (
             f"exit {proc.returncode} after {elapsed:.1f}s{' (HUNG, killed)' if hung else ''}; "
             f"{left.describe()}; work dir removable: {work_removed}"
