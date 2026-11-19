@@ -14,20 +14,14 @@ from onedata_mcp.api.harvesters import (
 def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
     """Register onedata harvesters module tools with the MCP server.
 
-    The ``query`` parameter always accepts a dict OR a JSON-object string
-    (operational tolerance, model-invisible robustness). When ``experimental``
-    is set, the query tool's docstring is enriched with schema-first guidance
-    (gated behind ONEDATA_MCP_EXPERIMENTAL — see onedata-mcp#1).
+    The api layer always accepts a ``query`` given as a dict OR a JSON-object
+    string (``coerce_harvesters_index_query``; a dict passes through unchanged).
+    What the model sees of ``query_harvester_index`` changes only when
+    ``experimental`` is set (ONEDATA_MCP_EXPERIMENTAL — see onedata-mcp#1): the
+    parameter is declared as an object or a string, and the description carries
+    schema-first guidance. With the flag off the tool is registered exactly as
+    before.
     """
-
-    query_doc = (
-        "Execute a query against a specific harvester index.\n\n"
-        "Call get_harvester_index_schema first and read mappings.properties "
-        "for the field names and nested shapes; build term / bool filters from "
-        "those declared paths."
-        if experimental
-        else "Execute a query against a specific harvester index."
-    )
 
     @mcp.tool(name="list_user_harvesters", annotations=ToolAnnotations(readOnlyHint=True))
     async def mcp_list_user_harvesters() -> list[dict[str, Any]]:
@@ -48,20 +42,45 @@ def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
         """
         return await get_harvester_index_schema(harvester_id, index_id)
 
-    @mcp.tool(
-        name="query_harvester_index",
-        description=query_doc,
-        annotations=ToolAnnotations(readOnlyHint=True),
-    )
-    async def mcp_query_harvester_index(
-        harvester_id: str = Field(description="Harvester id"),
-        index_id: str = Field(description="Harvester index id"),
-        query: dict[str, Any] | str = Field(
+    if experimental:
+
+        @mcp.tool(
+            name="query_harvester_index",
             description=(
-                "Plugin-specific query payload for the index "
-                '(for example: {"method": "get", "path": "resource_id"}). '
-                "May also be a JSON-object string."
-            )
-        ),
-    ) -> dict[str, Any]:
-        return await query_harvester_index(harvester_id, index_id, query)
+                "Execute a query against a specific harvester index.\n\n"
+                "Call get_harvester_index_schema first and read mappings.properties "
+                "for the field names and nested shapes; build term / bool filters from "
+                "those declared paths."
+            ),
+            annotations=ToolAnnotations(readOnlyHint=True),
+        )
+        async def mcp_query_harvester_index_tolerant(
+            harvester_id: str = Field(description="Harvester id"),
+            index_id: str = Field(description="Harvester index id"),
+            query: dict[str, Any] | str = Field(
+                description=(
+                    "Plugin-specific query payload for the index "
+                    '(for example: {"method": "get", "path": "resource_id"}). '
+                    "May also be a JSON-object string."
+                )
+            ),
+        ) -> dict[str, Any]:
+            return await query_harvester_index(harvester_id, index_id, query)
+
+    else:
+
+        @mcp.tool(name="query_harvester_index", annotations=ToolAnnotations(readOnlyHint=True))
+        async def mcp_query_harvester_index(
+            harvester_id: str = Field(description="Harvester id"),
+            index_id: str = Field(description="Harvester index id"),
+            query: dict[str, Any] = Field(
+                description=(
+                    "Plugin-specific query payload for the index "
+                    '(for example: {"method": "get", "path": "resource_id"})'
+                )
+            ),
+        ) -> dict[str, Any]:
+            """
+            Execute a query against a specific harvester index.
+            """
+            return await query_harvester_index(harvester_id, index_id, query)

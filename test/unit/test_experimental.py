@@ -64,6 +64,60 @@ async def test_flag_on_registers_31_tools() -> None:
     assert on - off == {"set_file_xattrs", "list_space_datasets"}
 
 
+# --- the harvester query tool: flag off is exactly the base definition ------
+
+_BASE_QUERY_SCHEMA = {
+    "additionalProperties": True,
+    "description": (
+        "Plugin-specific query payload for the index "
+        '(for example: {"method": "get", "path": "resource_id"})'
+    ),
+    "type": "object",
+}
+_BASE_QUERY_DESCRIPTION = "Execute a query against a specific harvester index."
+
+
+async def _query_tool(exp: bool):
+    tools = {t.name: t for t in await _build(exp).list_tools()}
+    return tools["query_harvester_index"]
+
+
+@pytest.mark.asyncio
+async def test_flag_off_query_harvester_index_is_the_base_definition() -> None:
+    tool = await _query_tool(False)
+    assert tool.description == _BASE_QUERY_DESCRIPTION
+    assert tool.parameters["properties"]["query"] == _BASE_QUERY_SCHEMA
+
+
+@pytest.mark.asyncio
+async def test_flag_on_query_harvester_index_accepts_a_json_string() -> None:
+    tool = await _query_tool(True)
+    query = tool.parameters["properties"]["query"]
+    assert {"type": "string"} in query["anyOf"]
+    assert tool.description.startswith(_BASE_QUERY_DESCRIPTION)
+    assert "get_harvester_index_schema" in tool.description
+
+
+@pytest.mark.asyncio
+async def test_query_harvester_index_forwards_a_json_string_as_an_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The api layer coerces a string payload, with the flag off or on."""
+    from onedata_mcp.api import harvesters as api_h
+
+    seen: list[dict] = []
+
+    async def fake_request(config, method, path, json_body=None, **kwargs):  # noqa: ANN001
+        seen.append(json_body)
+        return {"body": {"hits": []}}
+
+    monkeypatch.setattr(api_h, "request", fake_request)
+    monkeypatch.setattr(api_h, "get_onezone_config", lambda: object())
+    await api_h.query_harvester_index("h", "i", '{"method": "get"}')
+    await api_h.query_harvester_index("h", "i", {"method": "get"})
+    assert seen == [{"method": "get"}, {"method": "get"}]
+
+
 # --- main.py wiring: instructions + counts select on the flag ---------------
 
 
