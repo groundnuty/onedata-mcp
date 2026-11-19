@@ -2,20 +2,25 @@
 
 DISABLED by default. A leg runs only when `[cli.jail] wrapper` is set AND the latest scan for
 the config is clean (`leg_enabled`); otherwise the run skips it, says so, and goes on with the
-API configs. Neither CLI is ever started except through `jail_cmd`, and their MCP server runs
-outside the jail on loopback (`mcp_http.McpHttpServer`): the CLI is given a URL and nothing else.
+API configs. Neither CLI is ever started except through `jail_cmd` (`jail/cli-jail.sh`). Their
+MCP server runs outside the jail on 127.0.0.1:<P> (`mcp_http.McpHttpServer`); the jail relays
+127.0.0.1:<P> inside its own network namespace to it, so the CLI is given the same URL and
+nothing else. bwrap is the sandbox: codex runs with its own sandbox and approvals off, agy with
+tool permissions auto-approved, both only inside the jail.
 
-What is pinned and what is not (offline, with no real CLI session):
+What is pinned and what is not:
 
 - the flags below come from `codex exec --help` (0.169) and `agy --help` (1.5.12);
-- codex's `--json` event names (`thread.started`, `item.completed`, `turn.completed`, ...) are
-  present in the binary; the item payload fields are written from the documented exec schema
-  and are UNVERIFIED;
-- agy's `stream-json` schema is NOT known: `parse_agy_events` is written against the
-  Gemini-CLI-style events (`init`, `message`, `tool_use`, `tool_result`, `result`) and is
-  UNVERIFIED. The MCP calls do not depend on either parser: the loopback server records every
-  call itself, and that record is the trace's MCP half. The parsers supply the final answer,
-  the token counts, and the CLI's built-in tool calls.
+- agy takes MCP servers only from `~/.gemini/config/mcp_config.json` (`mcpServers.<name>.
+  serverUrl`, the file `agy mcp add` writes); its `--settings` rejects `mcpServers`. The jail
+  copies that file, written by the adapter, into the fresh home (`--home-file`);
+- checked against real jailed runs (a one-word prompt, no MCP server): the codex `--json`
+  and agy `stream-json` envelopes of a plain answer; see design/08;
+- NOT yet seen in a real run: the tool-call events (codex `mcp_tool_call` /
+  `command_execution` items, agy tool events); their payload fields are UNVERIFIED. The MCP
+  calls do not depend on either parser: the loopback server records every call itself, and
+  that record is the trace's MCP half. The parsers supply the final answer, the token counts,
+  and the CLI's built-in tool calls.
 """
 
 from __future__ import annotations
@@ -25,24 +30,29 @@ import json
 import os
 import re
 import shutil
+import sys
+import tempfile
 import time
-import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from benchmark._runtime_types import ToolCall
 from benchmark.k2val.config import FederationSecrets, K2valConfig, ModelConf
 from benchmark.k2val.jail import JailError, jail_available, jail_cmd
-from benchmark.k2val.mcp_http import McpHttpServer, new_scratch
+from benchmark.k2val.mcp_http import McpHttpServer
 from benchmark.k2val.recording import CallRecord
 from benchmark.k2val.secrets import redact
 from benchmark.llm_adapters._protocol import LLMConfig, TrialDispatch
 
 MCP_SERVER_NAME = "onedata"
 LAST_MESSAGE_FILE = "last_message.txt"
-SETTINGS_FILE = "agy-settings.json"
+AGY_MCP_CONFIG = ".gemini/config/mcp_config.json"  # its place in the jail's fresh home
+AGY_MCP_CONFIG_FILE = "agy-mcp-config.json"  # where the adapter writes it, outside /work
+JAIL_TMPDIR_ENV = "K2VAL_JAIL_TMPDIR"
+TERMINATE_GRACE_S = 10.0
 
 
 # ---------------------------------------------------------------------------
@@ -163,58 +173,88 @@ def parse_codex_events(lines: Iterable[str]) -> ParsedRun:
     return run
 
 
+AGY_MCP_CALL_TOOL = "call_mcp_tool"  # agy's built-in tool that calls a configured MCP server's
+AGY_TEXT_STEPS = ("user_input", "agent_response")
+
+
 def _is_mcp_tool_name(name: str, known: frozenset[str]) -> bool:
     """agy may prefix an MCP tool with its server name; a name ending in a known tool is MCP."""
-    return any(
+    return name == AGY_MCP_CALL_TOOL or any(
         name == k or re.fullmatch(rf"(?:mcp[_.:-]+)?{MCP_SERVER_NAME}[_.:-]+{k}", name)
         for k in known
     )
 
 
+def _agy_tool_event(step: dict, known_tools: frozenset[str]) -> CliEvent:
+    """A tool step of agy's stream (UNVERIFIED: no real tool call seen yet). The tool name is
+    read from `tool_name`/`name`/`tool`, else the step type; `call_mcp_tool` is agy's route to an
+    MCP server, with the MCP tool's own name in its arguments when given."""
+    name = step.get("tool_name") or step.get("name") or step.get("tool") or step["step_type"]
+    raw_args = step.get("arguments", step.get("args", step.get("input", {})))
+    args = raw_args if isinstance(raw_args, dict) else {"value": raw_args}
+    if name == AGY_MCP_CALL_TOOL:
+        name = args.get("tool_name") or args.get("name") or name
+    return CliEvent("mcp" if _is_mcp_tool_name(name, known_tools) else "builtin", name, args)
+
+
 def parse_agy_events(lines: Iterable[str], known_tools: frozenset[str]) -> ParsedRun:
-    """`agy --print --output-format stream-json`, read as Gemini-CLI-style events (UNVERIFIED):
-    `message` (assistant text), `tool_use` {tool_name, tool_id, parameters}, `tool_result`
-    {tool_id, status, output}, `result` {stats}, `error`."""
+    """`agy --output-format stream-json --print=...`, as seen in a real jailed run (agy 1.5.12).
+    Each line is `{"event": <kind>, <kind>: {...}}`:
+
+    - `init` {conversation_id, cwd, model, permission_mode, tools};
+    - `step_update` {conversation_id, step_index, step_type, state, text_delta?, usage?,
+      duration_seconds?}: one step goes ACTIVE -> DONE over several updates; the answer streams
+      as `text_delta`s of `agent_response` steps;
+    - `result` {conversation_id, status ("SUCCESS"), response, num_turns, duration_seconds,
+      usage {input_tokens, output_tokens, thinking_tokens, cache_read_tokens, total_tokens}}.
+
+    The final answer is `result.response` (else the last `agent_response` text); the tokens
+    are `result.usage` (output = output + thinking tokens). Steps of any other type are read as
+    tool calls: that part is UNVERIFIED (see `_agy_tool_event`)."""
     run = ParsedRun()
-    pending: dict[str, CliEvent] = {}
-    answer: list[str] = []
+    texts: dict[int, list[str]] = {}
+    tools: dict[int, CliEvent] = {}
+    response: str | None = None
     for ev in _json_lines(lines):
         if ev is None:
             run.unparsed += 1
             continue
-        kind = ev.get("type")
-        if kind == "message" and ev.get("role", "assistant") == "assistant":
-            text = ev.get("content") or ev.get("text") or ""
-            if ev.get("delta"):
-                answer.append(text)
-            else:
-                answer = [text]
-        elif kind == "tool_use":
-            name = ev.get("tool_name") or ev.get("name") or "?"
-            event = CliEvent(
-                "mcp" if _is_mcp_tool_name(name, known_tools) else "builtin",
-                name,
-                ev.get("parameters") or ev.get("input") or {},
-            )
-            run.events.append(event)
-            pending[ev.get("tool_id") or ev.get("id") or str(len(run.events))] = event
-        elif kind == "tool_result":
-            event = pending.get(ev.get("tool_id") or ev.get("id") or "")
-            if event is not None:
-                out = ev.get("output")
-                event.result = out if isinstance(out, str) or out is None else json.dumps(out)
-                event.ok = ev.get("status", "success") in ("success", "ok")
-                if not event.ok:
-                    event.error = event.result
+        kind = ev.get("event")
+        body = ev.get(kind) if isinstance(ev.get(kind), dict) else {}
+        if kind == "step_update":
+            index, step_type = body.get("step_index"), body.get("step_type")
+            if step_type == "agent_response":
+                texts.setdefault(index, []).append(body.get("text_delta") or "")
+            elif step_type and step_type not in AGY_TEXT_STEPS:
+                if index not in tools:
+                    tools[index] = _agy_tool_event(body, known_tools)
+                    run.events.append(tools[index])
+                event = tools[index]
+                state = str(body.get("state", "")).upper()
+                if "output" in body or "result" in body:
+                    out = body.get("output", body.get("result"))
+                    event.result = out if isinstance(out, str) or out is None else json.dumps(out)
+                if state in ("ERROR", "FAILED", "CANCELLED"):
+                    event.ok = False
+                    event.error = body.get("error") or event.result or state.lower()
         elif kind == "result":
-            stats = ev.get("stats") or {}
-            run.tokens_in += int(stats.get("input_tokens") or stats.get("input") or 0)
-            run.tokens_out += int(stats.get("output_tokens") or stats.get("output") or 0)
-            if ev.get("status") not in (None, "success"):
-                run.error = (ev.get("error") or {}).get("message") or str(ev.get("status"))
+            response = body.get("response")
+            usage = body.get("usage") or {}
+            run.tokens_in = int(usage.get("input_tokens") or 0)
+            run.tokens_out = int(usage.get("output_tokens") or 0) + int(
+                usage.get("thinking_tokens") or 0
+            )
+            if body.get("status") not in (None, "SUCCESS"):
+                error = body.get("error")
+                message = error.get("message") if isinstance(error, dict) else error
+                run.error = message or f"agy status {body.get('status')}"
         elif kind == "error":
-            run.error = ev.get("message") or str(ev)
-    run.final_answer = "".join(answer)
+            body = body or ev
+            run.error = body.get("message") or str(body)
+    if response is not None:
+        run.final_answer = response.strip()
+    elif texts:
+        run.final_answer = "".join(texts[max(texts, key=lambda i: (i is not None, i or 0))]).strip()
     return run
 
 
@@ -223,50 +263,59 @@ def parse_agy_events(lines: Iterable[str], known_tools: frozenset[str]) -> Parse
 # ---------------------------------------------------------------------------
 
 
-def codex_argv(conf: ModelConf, url: str, prompt: str) -> list[str]:
-    """`codex exec --json --ephemeral -s read-only`, model and effort, the MCP server by URL
-    (a per-invocation override: the user's codex config is never modified). The last message
-    goes to a file in the (empty) work dir."""
+def codex_argv(conf: ModelConf, url: str | None, prompt: str) -> list[str]:
+    """`codex exec --json --ephemeral`, model and effort, the MCP server by URL (a per-invocation
+    override; the jail's codex home holds no config.toml at all). Codex's own sandbox and
+    approvals are off: bwrap is the sandbox. The last message goes to a file in /work.
+    `url=None` attaches no MCP server (the jail smoke)."""
+    mcp = ["-c", f'mcp_servers.{MCP_SERVER_NAME}.url="{url}"'] if url else []
     return [
         conf.binary,
         "exec",
         "--json",
         "--ephemeral",
-        "-s",
-        "read-only",
         "--skip-git-repo-check",
+        "--dangerously-bypass-approvals-and-sandbox",
         "-m",
         conf.api_id,
         "-c",
         f'model_reasoning_effort="{conf.reasoning_effort}"',
-        "-c",
-        f'mcp_servers.{MCP_SERVER_NAME}.url="{url}"',
+        *mcp,
         "-o",
         LAST_MESSAGE_FILE,
         prompt,
     ]
 
 
-def agy_settings(url: str) -> dict:
-    """Session-only settings declaring the loopback server as an http MCP server."""
-    return {"mcpServers": {MCP_SERVER_NAME: {"url": url}}}
+def agy_mcp_config(url: str) -> dict:
+    """agy's `mcp_config.json` (the shape `agy mcp add` writes), naming one http server."""
+    return {"mcpServers": {MCP_SERVER_NAME: {"disabled": False, "serverUrl": url}}}
 
 
-def agy_argv(conf: ModelConf, settings_path: str, prompt: str) -> list[str]:
-    argv = [
+def agy_argv(conf: ModelConf, prompt: str) -> list[str]:
+    """`agy` in print mode with stream-json events, tool permissions auto-approved (bwrap is the
+    sandbox, so agy's own `--sandbox` is not used). `--print` takes the prompt as its value:
+    written `--print=<prompt>`, so a prompt can never be read as a flag. The MCP server is not
+    on the command line: it is in the fresh home's mcp_config.json."""
+    return [
         conf.binary,
-        "--print",
         "--output-format",
         "stream-json",
-        "--sandbox",
         "--model",
         conf.api_id,
         "--effort",
         conf.reasoning_effort or conf.effort or "low",
+        "--dangerously-skip-permissions",
+        f"--print={prompt}",
     ]
-    if conf.mcp_attach == "settings":
-        argv += ["--settings", settings_path]
-    return [*argv, prompt]
+
+
+def jail_scratch(prefix: str = "k2val-cli-") -> Path:
+    """A private scratch dir for one CLI trial, under a NEUTRAL temp root (K2VAL_JAIL_TMPDIR, else
+    /tmp, never $TMPDIR): the jail shows its bind sources in /proc/self/mountinfo. The jail's
+    own staging goes inside it too, so removing it removes everything, even after a SIGKILL."""
+    root = os.environ.get(JAIL_TMPDIR_ENV) or "/tmp"
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=root))
 
 
 # ---------------------------------------------------------------------------
@@ -310,32 +359,26 @@ class CliAdapter:
     ) -> TrialDispatch:
         if not jail_available(self.cfg.jail):
             raise JailError("no jail configured: the CLI legs never run unjailed")
-        scratch = new_scratch()
+        scratch = jail_scratch()
         workdir = scratch / "work"
         workdir.mkdir()
         prompt = f"{system_prompt}\n\n{user_prompt}"
         t0 = time.perf_counter()
-        added_name: str | None = None
         server = McpHttpServer(self.cfg.path or "", allowed_tools, scratch)
         try:
             async with server:
+                home_files: list[tuple[str, str]] = []
                 if self.conf.backend == "codex":
                     argv = codex_argv(self.conf, server.url, prompt)
                 else:
-                    settings = workdir / SETTINGS_FILE
-                    settings.write_text(json.dumps(agy_settings(server.url)), encoding="utf-8")
-                    argv = agy_argv(self.conf, str(settings), prompt)
-                    if self.conf.mcp_attach == "mcp_add":
-                        added_name = f"k2val-{uuid.uuid4().hex[:8]}"
-                        await self._agy_mcp(["add", added_name, server.url], workdir)
-                lines, returncode = await self._run(argv, workdir)
-                if added_name:
-                    await self._agy_mcp(["remove", added_name], workdir)
-                    added_name = None
+                    config = scratch / AGY_MCP_CONFIG_FILE
+                    config.write_text(json.dumps(agy_mcp_config(server.url)), encoding="utf-8")
+                    home_files.append((AGY_MCP_CONFIG, str(config)))
+                    argv = agy_argv(self.conf, prompt)
+                upstream = urlsplit(server.url).netloc  # 127.0.0.1:<P>, the same inside the jail
+                lines, returncode = await self._run(argv, workdir, scratch, upstream, home_files)
             records = server.records()
         finally:
-            if added_name:  # the CLI ended abnormally: still remove the per-run registration
-                await self._agy_mcp(["remove", added_name], workdir)
             last = workdir / LAST_MESSAGE_FILE
             last_message = last.read_text(encoding="utf-8").strip() if last.exists() else ""
             shutil.rmtree(scratch, ignore_errors=True)
@@ -403,37 +446,60 @@ class CliAdapter:
             error=redact(error) if error else None,
         )
 
-    async def _run(self, argv: list[str], workdir: Path) -> tuple[list[str], int | None]:
-        cmd = jail_cmd(argv, str(workdir), self.cfg.jail)
-        env = {"PATH": os.environ.get("PATH", ""), "LANG": "C.UTF-8"}
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=str(workdir),
-            env=env,
+    async def _run(
+        self,
+        argv: list[str],
+        workdir: Path,
+        scratch: Path,
+        upstream: str | None,
+        home_files: list[tuple[str, str]],
+    ) -> tuple[list[str], int | None]:
+        cmd = jail_cmd(
+            argv,
+            str(workdir),
+            self.cfg.jail,
+            cli=self.conf.backend,
+            mcp_upstream=upstream,
+            home_files=home_files,
         )
-        try:
-            out, _ = await proc.communicate()
-        except asyncio.CancelledError:
-            proc.kill()
-            await proc.wait()
-            raise
-        return out.decode("utf-8", errors="replace").splitlines(), proc.returncode
+        return await run_jailed(cmd, scratch, workdir)
 
-    async def _agy_mcp(self, args: list[str], workdir: Path) -> None:
-        """`agy mcp add|remove` under a unique per-run name, through the jail too."""
-        cmd = jail_cmd([self.conf.binary, "mcp", *args], str(workdir), self.cfg.jail)
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-            cwd=str(workdir),
-            env={"PATH": os.environ.get("PATH", "")},
-        )
-        await proc.wait()
+
+def jail_env(scratch: Path) -> dict[str, str]:
+    """The jail script's own environment: what it needs to find the tools and the CLI's login
+    ($HOME), and where to stage (inside the trial's scratch). The jailed CLI gets none of it."""
+    return {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "LANG": "C.UTF-8",
+        "HOME": os.environ.get("HOME", ""),
+        JAIL_TMPDIR_ENV: str(scratch),
+        "K2VAL_JAIL_PYTHON": sys.executable,
+    }
+
+
+async def run_jailed(cmd: list[str], scratch: Path, cwd: Path) -> tuple[list[str], int | None]:
+    """Run the jail script, its stdout and stderr merged. On cancellation: SIGTERM (the script
+    then removes its staging dir and ends the jail), SIGKILL after a grace period."""
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        cwd=str(cwd),
+        env=jail_env(scratch),
+    )
+    try:
+        out, _ = await proc.communicate()
+    except asyncio.CancelledError:
+        if proc.returncode is None:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), TERMINATE_GRACE_S)
+            except TimeoutError:
+                proc.kill()
+                await proc.wait()
+        raise
+    return out.decode("utf-8", errors="replace").splitlines(), proc.returncode
 
 
 def make_cli_adapter(

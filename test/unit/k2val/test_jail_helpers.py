@@ -1,0 +1,372 @@
+"""The CLI jail's helpers, without bwrap: the two forwarders, the netns ruleset and its check,
+the --keep-home copy, and cli-jail.sh's argument building and refusals. The live proof of the
+jail itself is test/live/test_k2val_jail_live.py (the leak probe)."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import socket
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from benchmark.k2val.jail import fwd_in, fwd_out, keep_home, netns
+
+JAIL_DIR = Path(fwd_out.__file__).resolve().parent
+CLI_JAIL = JAIL_DIR / "cli-jail.sh"
+
+
+async def _echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    while data := await reader.read(65536):
+        writer.write(b"echo:" + data)
+        await writer.drain()
+    writer.close()
+
+
+@pytest.fixture
+def short_dir():
+    """A short directory for UNIX sockets (their paths are limited to about 108 bytes)."""
+    with tempfile.TemporaryDirectory(prefix="k2j-", dir="/tmp") as d:
+        yield Path(d)
+
+
+# --- the outside forwarder ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", ["127.0.0.1:8080", "localhost:1"])
+def test_fwd_out_upstream_is_loopback_only(value) -> None:
+    assert fwd_out.parse_upstream(value)[0] == "127.0.0.1"
+
+
+@pytest.mark.parametrize(
+    "value", ["10.0.0.1:80", "0.0.0.0:80", "example.org:443", "127.0.0.1", "127.0.0.1:0", ":80"]
+)
+def test_fwd_out_refuses_other_upstreams(value) -> None:
+    with pytest.raises(ValueError):
+        fwd_out.parse_upstream(value)
+
+
+@pytest.mark.asyncio
+async def test_fwd_out_relays_the_socket_to_the_upstream(short_dir) -> None:
+    upstream = await asyncio.start_server(_echo, "127.0.0.1", 0)
+    port = upstream.sockets[0].getsockname()[1]
+    sock_path = str(short_dir / "mcp.sock")
+    ready_r, ready_w = os.pipe()
+    stop = asyncio.Event()
+    task = asyncio.create_task(fwd_out.serve(sock_path, "127.0.0.1", port, ready_w, stop))
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, os.read, ready_r, 1)
+        assert stat.S_IMODE(os.stat(sock_path).st_mode) == 0o600  # owner only
+        reader, writer = await asyncio.open_unix_connection(sock_path)
+        writer.write(b"POST /mcp HTTP/1.1\r\n")
+        await writer.drain()
+        assert await reader.readexactly(25) == b"echo:POST /mcp HTTP/1.1\r\n"
+        writer.close()
+    finally:
+        stop.set()
+        await task
+        upstream.close()
+        os.close(ready_r)
+    assert not os.path.exists(sock_path)  # removed on stop
+
+
+# --- the inside forwarder -----------------------------------------------------------------
+
+
+def test_fwd_in_arguments_are_strict() -> None:
+    assert fwd_in.parse_args(
+        ["--listen", "127.0.0.1:4000", "--socket", "/run/k2val/mcp.sock", "--", "/opt/cli/x", "-a"]
+    ) == (("127.0.0.1", 4000), "/run/k2val/mcp.sock", ["/opt/cli/x", "-a"])
+    for bad in (
+        ["--listen", "0.0.0.0:4000", "--socket", "/s", "--", "x"],  # only the jail's loopback
+        ["--listen", "127.0.0.1:4000", "--socket", "/s"],  # no command
+        ["--listen", "127.0.0.1:4000", "--socket", "/s", "--"],
+        ["--listen", "127.0.0.1:4000", "--", "x"],
+        ["--listen", "127.0.0.1:4000", "--socket", "/s", "--extra", "1", "--", "x"],
+    ):
+        with pytest.raises(ValueError):
+            fwd_in.parse_args(bad)
+
+
+CLIENT = """
+import socket, sys
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=5)
+s.sendall(b"hello")
+s.shutdown(socket.SHUT_WR)
+print(s.recv(100).decode())
+"""
+
+
+@pytest.mark.asyncio
+async def test_fwd_in_listens_before_it_execs_the_command_and_relays_to_the_socket(
+    short_dir,
+) -> None:
+    """The real launcher: bind, fork the relay, exec the command (here a client of the port)."""
+    sock_path = str(short_dir / "mcp.sock")
+    server = await asyncio.start_unix_server(_echo, path=sock_path)
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-I",
+        str(JAIL_DIR / "fwd_in.py"),
+        "--listen",
+        f"127.0.0.1:{port}",
+        "--socket",
+        sock_path,
+        "--",
+        sys.executable,
+        "-c",
+        CLIENT,
+        str(port),
+        stdout=asyncio.subprocess.PIPE,
+    )
+    out, _ = await asyncio.wait_for(proc.communicate(), 20)
+    server.close()
+    assert proc.returncode == 0
+    assert out.decode().strip() == "echo:hello"
+
+
+# --- the egress filter ----------------------------------------------------------------------
+
+
+def test_the_ruleset_rejects_every_blocked_range_and_allows_only_slirp_dns() -> None:
+    rules = netns.ruleset(["203.0.113.9"])
+    for net in netns.BLOCKED_V4:
+        assert net in rules
+    assert "203.0.113.9/32" in rules
+    chain = rules[rules.index("chain output") :]
+    assert chain.index('oifname "lo" accept') < chain.index("ip daddr @blocked_v4 reject")
+    assert chain.index("ip daddr 10.0.2.3 udp dport 53 accept") < chain.index("@blocked_v4")
+    assert "meta nfproto ipv6 reject" in chain
+    for must_block in ("169.254.169.254", "100.64.0.1", "10.0.2.2", "172.17.0.1", "192.168.1.1"):
+        assert not netns.outside_blocked_ranges([must_block])  # inside a blocked range already
+    assert netns.outside_blocked_ranges(["8.8.8.8", "10.1.2.3"]) == ["8.8.8.8"]
+
+
+def _listing(elems: list) -> str:
+    return json.dumps(
+        {
+            "nftables": [
+                {"table": {"family": "inet", "name": netns.TABLE}},
+                {"set": {"name": "blocked_v4", "elem": elems}},
+                {"chain": {"name": "output", "hook": "output"}},
+                {"rule": {"expr": [{"match": {}}, {"reject": None}]}},
+                {"rule": {"expr": [{"match": {}}, {"reject": None}]}},
+            ]
+        }
+    )
+
+
+def _prefix(net: str) -> dict:
+    addr, length = net.split("/")
+    return {"prefix": {"addr": addr, "len": int(length)}}
+
+
+def test_the_table_check_reads_back_merged_ranges() -> None:
+    elems = [_prefix(n) for n in netns.BLOCKED_V4 if n not in ("224.0.0.0/4", "240.0.0.0/4")]
+    elems.append({"range": ["224.0.0.0", "255.255.255.255"]})  # nft auto-merges 224/4 + 240/4
+    elems.append("203.0.113.9")
+    netns.check_table(_listing(elems), ["203.0.113.9"])
+
+    missing = [e for e in elems if e != _prefix("169.254.0.0/16")]
+    with pytest.raises(RuntimeError, match="169.254.0.0/16"):
+        netns.check_table(_listing(missing), [])
+    no_chain = json.loads(_listing(elems))
+    no_chain["nftables"] = [r for r in no_chain["nftables"] if "chain" not in r]
+    with pytest.raises(RuntimeError, match="output chain"):
+        netns.check_table(json.dumps(no_chain), [])
+
+
+def test_slirp_gets_the_owning_user_namespace() -> None:
+    assert netns.slirp_argv(["/usr/bin/slirp4netns", "--configure", "42", "tap0"], 7) == [
+        "/usr/bin/slirp4netns",
+        "--userns-path=/proc/self/fd/7",
+        "--configure",
+        "42",
+        "tap0",
+    ]
+    with pytest.raises(ValueError):
+        netns.slirp_argv(["slirp4netns", "--userns-path=/x"], 7)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        [],
+        ["filter"],
+        ["filter", "--pid", "1"],
+        ["filter", "--pid", "x"],
+        ["filter", "--pid", "42", "extra"],
+        ["slirp", "--pid", "42"],
+        ["slirp", "--pid", "42", "slirp4netns"],
+        ["bogus", "--pid", "42"],
+    ],
+)
+def test_netns_arguments_are_strict(argv) -> None:
+    with pytest.raises(ValueError):
+        netns.parse(argv)
+
+
+# --- --keep-home ------------------------------------------------------------------------------
+
+
+SECRET = "refresh-SECRET-abcdef0123456789"
+
+
+def _homes(tmp_path: Path) -> tuple[Path, Path]:
+    home, staged = tmp_path / "home", tmp_path / "staged"
+    for root in (home, staged):
+        (root / ".codex").mkdir(parents=True)
+        (root / ".codex" / "auth.json").write_text(json.dumps({"tokens": {"refresh": SECRET}}))
+    (home / ".codex" / "sessions").mkdir()
+    (home / ".codex" / "sessions" / "run.jsonl").write_text('{"type": "turn.started"}\n')
+    (home / ".codex" / "sessions" / "oauth-cache.json").write_text("{}")
+    (home / ".codex" / "config.toml").write_text('model = "x"\n')  # not a session path
+    return home, staged
+
+
+def test_keep_home_copies_session_files_only(tmp_path) -> None:
+    home, staged = _homes(tmp_path)
+    out = tmp_path / "kept"
+    rc = keep_home.main(
+        ["--cli", "codex", "--home", str(home), "--out", str(out), "--staged", str(staged)]
+    )
+    assert rc == 0
+    kept = sorted(str(p.relative_to(out)) for p in out.rglob("*") if p.is_file())
+    assert kept == [".codex/sessions/run.jsonl"]  # no login file, nothing outside the allowlist
+
+
+def test_keep_home_keeps_nothing_when_a_login_value_leaked_into_a_session(tmp_path) -> None:
+    home, staged = _homes(tmp_path)
+    (home / ".codex" / "sessions" / "leak.jsonl").write_text(f'{{"echo": "{SECRET}"}}\n')
+    out = tmp_path / "kept"
+    rc = keep_home.main(
+        ["--cli", "codex", "--home", str(home), "--out", str(out), "--staged", str(staged)]
+    )
+    assert rc == 1
+    assert not out.exists()
+
+
+# --- cli-jail.sh ------------------------------------------------------------------------------
+
+
+def run_jail(*args: str, env: dict | None = None) -> subprocess.CompletedProcess:
+    base = {"PATH": os.environ["PATH"], "HOME": os.environ["HOME"], "LANG": "C.UTF-8"}
+    return subprocess.run(
+        ["bash", str(CLI_JAIL), *args],
+        capture_output=True,
+        text=True,
+        env={**base, **(env or {})},
+        timeout=30,
+    )
+
+
+def print_args(*args: str) -> tuple[list[str], list[str], list[str]]:
+    r = run_jail("--print-args", *args)
+    assert r.returncode == 0, r.stderr
+    lines = r.stdout.splitlines()
+    i, j = lines.index("--- env"), lines.index("--- command")
+    return lines[:i], lines[i + 1 : j], lines[j + 1 :]
+
+
+def test_the_bwrap_arguments_isolate_the_cli() -> None:
+    args, env, command = print_args(
+        "--cli", "codex", "--workdir", "/tmp/w", "--mcp-upstream", "127.0.0.1:41999",
+        "--", "codex", "exec", "--json", "hi",
+    )  # fmt: skip
+    for flag in (
+        "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-net",
+        "--disable-userns", "--die-with-parent", "--new-session", "--info-fd", "--block-fd",
+        "--sync-fd",
+    ):  # fmt: skip
+        assert flag in args
+    assert "--share-net" not in args and "--unshare-all" not in args
+    assert args[args.index("--hostname") + 1] == "jail"
+    pairs = list(zip(args, args[1:], args[2:], strict=False))
+    bind_flags = ("--bind", "--ro-bind", "--ro-bind-try")
+    binds = [(a, src, dst) for a, src, dst in pairs if a in bind_flags]
+    # read-write: only the fresh home and the work dir; nothing from the host's home or /mnt
+    assert sorted((src, dst) for a, src, dst in binds if a == "--bind") == [
+        ("/tmp/w", "/work"),
+        ("<staging>/home", "/home/agent"),
+    ]
+    host_sources = {src for _, src, _ in binds if not src.startswith("<staging>")}
+    assert host_sources == {"/usr", "/etc/ssl", "/etc/ca-certificates", "/tmp/w"}
+    assert ("--ro-bind", "<staging>/sock", "/run/k2val") in binds
+    assert args[args.index("--tmpfs") + 1] == "/usr/local"  # hidden
+    assert env == [
+        "PATH=/usr/bin:/bin",
+        "LANG=C.UTF-8",
+        "HOME=/home/agent",
+        "CODEX_HOME=/home/agent/.codex",
+    ]
+    assert command[:3] == ["/usr/bin/env", "-u", "PWD"]
+    assert command[3:9] == [
+        "/usr/bin/python3",
+        "-I",
+        "/opt/k2val/fwd_in.py",
+        "--listen",
+        "127.0.0.1:41999",
+        "--socket",
+    ]
+    assert command[-4:] == ["/opt/cli/codex", "exec", "--json", "hi"]  # the staged binary
+
+
+def test_without_an_upstream_there_is_no_socket_and_no_forwarder() -> None:
+    args, env, command = print_args("--cli", "agy", "--workdir", "/tmp/w", "--", "agy", "-p=x")
+    assert "/run/k2val" not in args
+    assert env == ["PATH=/usr/bin:/bin", "LANG=C.UTF-8", "HOME=/home/agent"]
+    assert command == ["/usr/bin/env", "-u", "PWD", "/opt/cli/agy", "-p=x"]
+
+
+@pytest.mark.parametrize(
+    ("args", "needle"),
+    [
+        (["--cli", "claude", "--workdir", "/tmp", "--", "x"], "--cli must be"),
+        (["--cli", "codex", "--", "x"], "--workdir is required"),
+        (["--cli", "codex", "--workdir", "/tmp"], "no CLI command"),
+        (["--cli", "codex", "--workdir", "/tmp", "--bogus", "--", "x"], "unknown argument"),
+        (
+            ["--cli", "codex", "--workdir", "/tmp", "--mcp-upstream", "10.0.0.1:80", "--", "x"],
+            "127.0.0.1",
+        ),
+        (["--cli", "codex", "--workdir", "/tmp", "--home-file", "../x=/etc/hosts", "--", "x"],
+         "plain relative path"),
+        (["--cli", "codex", "--workdir", "/tmp", "--home-file", "/abs=/etc/hosts", "--", "x"],
+         "plain relative path"),
+        (["--cli", "codex", "--workdir", "/tmp", "--home-file", "a/./b=/etc/hosts", "--", "x"],
+         "plain relative path"),
+        (["--cli", "codex", "--workdir", "/tmp", "--home-file", "a=/nonexistent", "--", "x"],
+         "not a regular file"),
+    ],
+)  # fmt: skip
+def test_cli_jail_refuses_bad_arguments(args, needle) -> None:
+    r = run_jail(*args)
+    assert r.returncode == 2 and needle in r.stderr
+
+
+def test_cli_jail_refuses_a_workdir_or_staging_root_that_names_a_private_path(tmp_path) -> None:
+    home_dir = Path(os.environ["HOME"])
+    for workdir in (str(home_dir), "/mnt", str(tmp_path)):  # tmp_path names the user
+        r = run_jail("--cli", "codex", "--workdir", workdir, "--", "codex")
+        assert r.returncode == 2, workdir
+        assert "neutral temp path" in r.stderr or "does not exist" in r.stderr
+    with tempfile.TemporaryDirectory(prefix="k2j-", dir="/tmp") as w:
+        env = {"K2VAL_JAIL_TMPDIR": str(home_dir)}
+        r = run_jail("--cli", "codex", "--workdir", w, "--", "codex", env=env)
+        assert r.returncode == 2 and "staging root" in r.stderr
+
+
+def test_cli_jail_refuses_a_non_empty_workdir() -> None:
+    with tempfile.TemporaryDirectory(prefix="k2j-", dir="/tmp") as w:
+        (Path(w) / "something").write_text("x")
+        r = run_jail("--cli", "codex", "--workdir", w, "--", "codex")
+        assert r.returncode == 2 and "must be empty" in r.stderr

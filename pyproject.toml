@@ -57,4 +57,5 @@ testpaths = [ "test" ]
 markers = [
     "e2e: End-to-end PLGrid Forge LLM + MCP tests (requires PLGRID_FORGE_* env; some need Onedata)",
     "onedata_integration: requires live Onezone / Oneprovider",
+    "live: runs real local infrastructure (the CLI jail's leak probe); opt-in by env var",
 ]

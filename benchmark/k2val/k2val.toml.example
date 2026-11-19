@@ -149,16 +149,17 @@ space = "k2val-gpt"
 
 [models.gemini-flash-low]
 backend = "agy"
-binary = "agy"
+binary = "agy"                       # the host binary: the jail runs a staged copy of it
 api_id = "gemini-3.8-flash-low"
 effort = "low"
 space = "k2val-gemini"
-mcp_attach = "settings"              # "settings" (--settings mcpServers) or "mcp_add"
+# its MCP server is written into the jail's fresh home (~/.gemini/config/mcp_config.json)
 
 [cli.jail]
-# wrapper = "<jail dir>/jail-wrapper"      # REQUIRED for the CLI legs. Invoked as
-#                                           #   <wrapper> --workdir <dir> -- <cli argv...>
-# workdir_flag = "--workdir"
+# REQUIRED for the CLI legs: the jail (design/08, "The CLI jail"). Prove it first with
+# `make k2val-jail-probe`. Invoked as
+#   <wrapper> --cli codex|agy --workdir <dir> --mcp-upstream 127.0.0.1:<P> [...] -- <argv...>
+# wrapper = "benchmark/k2val/jail/cli-jail.sh"   # relative to the repository root
 
 [cli.scan]
 # tokens_file = "<scan dir>/tokens.txt"       # one token per line, case-insensitive substring

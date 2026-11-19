@@ -1,8 +1,11 @@
-"""The CLI legs (wave 2): the jail, the gating, the parsers, and an adapter run with fake CLI
-binaries. Never the real CLIs: the fakes emit events of the recorded shape."""
+"""The CLI legs (wave 2): the jail interface, the gating, the parsers, and an adapter run with
+fake CLI binaries and a fake jail. Never the real CLIs. The `*_SMOKE` streams are real ones,
+recorded in the jail (one-word prompt, no MCP server) with their ids masked; the tool-call
+events are synthetic, written to the documented shapes, and UNVERIFIED."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import stat
 import sys
@@ -13,22 +16,103 @@ import pytest
 
 from benchmark.k2val import cli_agents
 from benchmark.k2val.cli_agents import (
+    AGY_MCP_CONFIG,
     CliAdapter,
     agy_argv,
-    agy_settings,
+    agy_mcp_config,
     codex_argv,
     leg_enabled,
     parse_agy_events,
     parse_codex_events,
 )
-from benchmark.k2val.config import JailConf
-from benchmark.k2val.jail import JailError, jail_available, jail_cmd
+from benchmark.k2val.config import ConfigError, JailConf, parse_config
+from benchmark.k2val.jail import REPO_ROOT, JailError, jail_available, jail_cmd
 from benchmark.k2val.recording import CallRecord, RecordingApp
 from benchmark.k2val.scan import build_record, fingerprint, scan_texts, write_scan_record
-from test.unit.k2val.conftest import TOKEN_LOCAL, TOKEN_OWNER
+from test.unit.k2val.conftest import TOKEN_LOCAL, TOKEN_OWNER, raw_config
 
 KNOWN = frozenset({"check_readiness", "ensure_readiness", "get_file_distribution"})
 
+# Real: codex 0.169 `exec --json`, gpt-5.6-luna, "Reply with the single word OK."
+CODEX_SMOKE = [
+    {"type": "thread.started", "thread_id": "<id>"},
+    {"type": "turn.started"},
+    {"type": "item.completed", "item": {"id": "<id>", "type": "agent_message", "text": "OK"}},
+    {
+        "type": "turn.completed",
+        "usage": {
+            "input_tokens": 11781,
+            "cached_input_tokens": 10112,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 5,
+            "reasoning_output_tokens": 0,
+        },
+    },
+]
+
+# Real: agy 1.5.12 `--output-format stream-json`, gemini-3.8-flash-low, the same prompt.
+AGY_SMOKE = [
+    {
+        "event": "init",
+        "conversation_id": "<id>",
+        "init": {
+            "model": "gemini-3.8-flash-low",
+            "cwd": "/work",
+            "tools": ["ask_question", "call_mcp_tool", "run_command"],
+            "permission_mode": "always-proceed",
+        },
+    },
+    {
+        "event": "step_update",
+        "step_update": {
+            "conversation_id": "<id>",
+            "step_index": 0,
+            "state": "DONE",
+            "step_type": "user_input",
+        },
+    },
+    {
+        "event": "step_update",
+        "step_update": {
+            "conversation_id": "<id>",
+            "step_index": 1,
+            "state": "ACTIVE",
+            "step_type": "agent_response",
+            "text_delta": "OK",
+        },
+    },
+    {
+        "event": "step_update",
+        "step_update": {
+            "conversation_id": "<id>",
+            "step_index": 1,
+            "state": "DONE",
+            "step_type": "agent_response",
+            "text_delta": "\n",
+            "duration_seconds": 2.64,
+            "usage": {"input_tokens": 8712, "output_tokens": 1, "thinking_tokens": 0},
+        },
+    },
+    {
+        "event": "result",
+        "result": {
+            "conversation_id": "<id>",
+            "status": "SUCCESS",
+            "response": "OK\n",
+            "duration_seconds": 2.72,
+            "num_turns": 1,
+            "usage": {
+                "input_tokens": 8712,
+                "output_tokens": 1,
+                "thinking_tokens": 0,
+                "cache_read_tokens": 0,
+                "total_tokens": 8713,
+            },
+        },
+    },
+]
+
+# Synthetic (UNVERIFIED shapes): codex tool items.
 CODEX_RUN = [
     {"type": "thread.started", "thread_id": "t1"},
     {"type": "turn.started"},
@@ -93,26 +177,37 @@ CODEX_RUN = [
     },
 ]
 
+
+def _step(index: int, step_type: str, state: str, **extra) -> dict:
+    return {
+        "event": "step_update",
+        "step_update": {"step_index": index, "step_type": step_type, "state": state, **extra},
+    }
+
+
+# The real agy envelope with tool steps added. The tool-step fields are UNVERIFIED.
 AGY_RUN = [
-    {"type": "init", "session_id": "s", "model": "gemini-3.8-flash-low"},
-    {"type": "message", "role": "user", "content": "the brief"},
+    AGY_SMOKE[0],
+    AGY_SMOKE[1],
+    _step(
+        1,
+        "call_mcp_tool",
+        "ACTIVE",
+        arguments={"server_name": "onedata", "tool_name": "check_readiness", "extent": []},
+    ),
+    _step(1, "call_mcp_tool", "DONE", output='{"ready": false}'),
+    _step(2, "run_command", "ACTIVE", arguments={"command": "ls"}),
+    _step(2, "run_command", "ERROR", output="denied"),
+    _step(3, "agent_response", "ACTIVE", text_delta="Not "),
+    _step(3, "agent_response", "DONE", text_delta="ready."),
     {
-        "type": "tool_use",
-        "tool_name": "mcp_onedata_check_readiness",
-        "tool_id": "c1",
-        "parameters": {"extent": []},
+        "event": "result",
+        "result": {
+            "status": "SUCCESS",
+            "response": "Not ready.",
+            "usage": {"input_tokens": 500, "output_tokens": 40, "thinking_tokens": 10},
+        },
     },
-    {"type": "tool_result", "tool_id": "c1", "status": "success", "output": '{"ready": false}'},
-    {
-        "type": "tool_use",
-        "tool_name": "run_shell_command",
-        "tool_id": "c2",
-        "parameters": {"command": "ls"},
-    },
-    {"type": "tool_result", "tool_id": "c2", "status": "error", "output": "denied"},
-    {"type": "message", "role": "assistant", "content": "Not ", "delta": True},
-    {"type": "message", "role": "assistant", "content": "ready.", "delta": True},
-    {"type": "result", "status": "success", "stats": {"input_tokens": 500, "output_tokens": 40}},
 ]
 
 
@@ -120,30 +215,85 @@ def jsonl(events) -> list[str]:
     return [json.dumps(e) for e in events]
 
 
-# --- the jail ----------------------------------------------------------------------------
+# --- the jail interface ----------------------------------------------------------------------
 
 
 def test_with_no_wrapper_there_is_no_jail_and_nothing_runs() -> None:
     assert not jail_available(JailConf())
     with pytest.raises(JailError, match="never run unjailed"):
-        jail_cmd(["codex", "exec"], "/tmp/work", JailConf())
+        jail_cmd(["codex", "exec"], "/tmp/work", JailConf(), cli="codex")
     with pytest.raises(JailError):
-        jail_cmd(["codex"], "/tmp/work", JailConf(wrapper="   "))
+        jail_cmd(["codex"], "/tmp/work", JailConf(wrapper="   "), cli="codex")
 
 
-def test_jail_cmd_puts_the_wrapper_in_front() -> None:
-    conf = JailConf(wrapper="/path/to/jail --net loopback", workdir_flag="--cwd")
-    assert jail_cmd(["codex", "exec", "x"], "/tmp/w", conf) == [
-        "/path/to/jail",
-        "--net",
-        "loopback",
-        "--cwd",
+def test_jail_cmd_builds_the_wrapper_call() -> None:
+    conf = JailConf(wrapper="/path/to/cli-jail.sh")
+    assert jail_cmd(
+        ["agy", "--print=x"],
+        "/tmp/w",
+        conf,
+        cli="agy",
+        mcp_upstream="127.0.0.1:41999",
+        home_files=[(AGY_MCP_CONFIG, "/tmp/s/agy-mcp-config.json")],
+        keep_home="/tmp/keep",
+    ) == [
+        "/path/to/cli-jail.sh",
+        "--cli",
+        "agy",
+        "--workdir",
+        "/tmp/w",
+        "--mcp-upstream",
+        "127.0.0.1:41999",
+        "--home-file",
+        ".gemini/config/mcp_config.json=/tmp/s/agy-mcp-config.json",
+        "--keep-home",
+        "/tmp/keep",
+        "--",
+        "agy",
+        "--print=x",
+    ]
+    assert jail_cmd(["codex"], "/tmp/w", conf, cli="codex") == [
+        "/path/to/cli-jail.sh",
+        "--cli",
+        "codex",
+        "--workdir",
         "/tmp/w",
         "--",
         "codex",
-        "exec",
-        "x",
     ]
+
+
+def test_a_relative_wrapper_is_taken_from_the_repository_root() -> None:
+    cmd = jail_cmd(["codex"], "/tmp/w", JailConf("benchmark/k2val/jail/cli-jail.sh"), cli="codex")
+    assert cmd[0] == str(REPO_ROOT / "benchmark/k2val/jail/cli-jail.sh")
+    assert Path(cmd[0]).is_file()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"cli": "claude"}, "cli must be"),
+        ({"cli": "codex", "mcp_upstream": "10.0.0.5:80"}, "127.0.0.1"),
+        ({"cli": "codex", "mcp_upstream": "127.0.0.1:80/x"}, "127.0.0.1"),
+    ],
+)
+def test_jail_cmd_refuses_bad_arguments(kwargs, match) -> None:
+    with pytest.raises(ValueError, match=match):
+        jail_cmd(["codex"], "/tmp/w", JailConf("/j"), **kwargs)
+
+
+def test_the_example_config_names_the_jail_script() -> None:
+    example = (REPO_ROOT / "benchmark/k2val/k2val.toml.example").read_text()
+    assert 'wrapper = "benchmark/k2val/jail/cli-jail.sh"' in example
+
+
+def test_mcp_add_mode_is_refused(secret_files) -> None:
+    raw = raw_config(secret_files)
+    raw["models"]["gpt-luna-low"]["mcp_attach"] = "mcp_add"
+    with pytest.raises(ConfigError, match="only 'home'"):
+        parse_config(raw)
+    raw["models"]["gpt-luna-low"]["mcp_attach"] = "settings"  # the old name is still accepted
+    parse_config(raw)
 
 
 # --- the gating ------------------------------------------------------------------------------
@@ -184,44 +334,59 @@ def test_cli_legs_are_off_until_a_wrapper_is_set_and_a_clean_scan_exists(cfg, tm
 
 def test_codex_command_line(cfg) -> None:
     argv = codex_argv(cfg.models["gpt-luna-low"], "http://127.0.0.1:41999/mcp", "the prompt")
-    assert argv[:7] == [
+    assert argv[:6] == [
         "codex",
         "exec",
         "--json",
         "--ephemeral",
-        "-s",
-        "read-only",
         "--skip-git-repo-check",
+        "--dangerously-bypass-approvals-and-sandbox",  # bwrap is the sandbox
     ]
-    assert argv[7:9] == ["-m", "gpt-5.6-luna"]
+    assert argv[6:8] == ["-m", "gpt-5.6-luna"]
     assert 'model_reasoning_effort="low"' in argv
     assert 'mcp_servers.onedata.url="http://127.0.0.1:41999/mcp"' in argv  # a URL, nothing more
-    assert argv[-1] == "the prompt"
+    assert argv[-3:] == ["-o", "last_message.txt", "the prompt"]
+    assert "-s" not in argv and "read-only" not in argv
     flat = " ".join(argv)
     assert TOKEN_LOCAL not in flat and "token" not in flat.lower() and "ONEDATA" not in flat
 
 
-def test_agy_settings_declare_only_the_loopback_url(cfg) -> None:
+def test_codex_command_line_without_an_mcp_server(cfg) -> None:
+    argv = codex_argv(cfg.models["gpt-luna-low"], None, "p")
+    assert not any("mcp_servers" in a for a in argv)
+
+
+def test_agy_command_line_and_its_mcp_config(cfg) -> None:
     conf = replace(cfg.models["gpt-luna-low"], backend="agy", binary="agy", reasoning_effort="")
-    conf = replace(conf, api_id="gemini-3.8-flash-low")
-    argv = agy_argv(conf, "/w/agy-settings.json", "the prompt")
-    assert argv[:5] == ["agy", "--print", "--output-format", "stream-json", "--sandbox"]
-    assert argv[argv.index("--settings") : argv.index("--settings") + 2] == [
-        "--settings",
-        "/w/agy-settings.json",
-    ]
-    assert argv[argv.index("--model") : argv.index("--model") + 2] == [
+    conf = replace(conf, api_id="gemini-3.8-flash-low", effort="low")
+    argv = agy_argv(conf, "-the prompt starting with a dash")
+    assert argv == [
+        "agy",
+        "--output-format",
+        "stream-json",
         "--model",
         "gemini-3.8-flash-low",
+        "--effort",
+        "low",
+        "--dangerously-skip-permissions",
+        "--print=-the prompt starting with a dash",  # one argv word: never read as a flag
     ]
-    assert agy_settings("http://127.0.0.1:41999/mcp") == {
-        "mcpServers": {"onedata": {"url": "http://127.0.0.1:41999/mcp"}}
+    assert "--sandbox" not in argv and "--settings" not in argv
+    # the file `agy mcp add` writes, which the jail copies into the fresh home
+    assert agy_mcp_config("http://127.0.0.1:41999/mcp") == {
+        "mcpServers": {"onedata": {"disabled": False, "serverUrl": "http://127.0.0.1:41999/mcp"}}
     }
-    add_mode = agy_argv(replace(conf, mcp_attach="mcp_add"), "/w/s.json", "p")
-    assert "--settings" not in add_mode
+    assert AGY_MCP_CONFIG == ".gemini/config/mcp_config.json"
 
 
 # --- the parsers -----------------------------------------------------------------------------
+
+
+def test_the_real_codex_stream_parses() -> None:
+    run = parse_codex_events(["Reading additional input from stdin...", *jsonl(CODEX_SMOKE)])
+    assert run.final_answer == "OK"
+    assert (run.tokens_in, run.tokens_out) == (11781, 5)
+    assert run.events == [] and run.error is None and run.unparsed == 1
 
 
 def test_codex_events_separate_mcp_calls_from_builtin_tools() -> None:
@@ -249,19 +414,39 @@ def test_codex_failure_events() -> None:
     assert run.error == "401 unauthorized" and run.final_answer == ""
 
 
-def test_agy_events_separate_mcp_calls_from_builtin_tools() -> None:
+def test_the_real_agy_stream_parses() -> None:
+    warning = "cli-jail: warning: agy rewrote its login file(s) inside the jail: ..."
+    run = parse_agy_events([*jsonl(AGY_SMOKE), warning], KNOWN)
+    assert run.final_answer == "OK"  # result.response, stripped
+    assert (run.tokens_in, run.tokens_out) == (8712, 1)
+    assert run.events == [] and run.error is None and run.unparsed == 1
+
+
+def test_agy_answer_falls_back_to_the_last_response_step() -> None:
+    no_result = [e for e in AGY_RUN if e["event"] != "result"]
+    assert parse_agy_events(jsonl(no_result), KNOWN).final_answer == "Not ready."
+
+
+def test_agy_tool_steps_separate_mcp_calls_from_builtin_tools() -> None:
     run = parse_agy_events(jsonl(AGY_RUN), KNOWN)
 
     assert run.final_answer == "Not ready."
     assert [(e.source, e.tool, e.ok) for e in run.events] == [
-        ("mcp", "mcp_onedata_check_readiness", True),
-        ("builtin", "run_shell_command", False),
+        ("mcp", "check_readiness", True),
+        ("builtin", "run_command", False),
     ]
     assert run.events[0].result == '{"ready": false}'
-    assert (run.tokens_in, run.tokens_out) == (500, 40)
+    assert run.events[1].error == "denied"
+    assert (run.tokens_in, run.tokens_out) == (500, 50)  # output + thinking tokens
 
 
-# --- an adapter run with fake binaries -----------------------------------------------------
+def test_agy_failure_result() -> None:
+    bad = {"event": "result", "result": {"status": "FAILED", "error": {"message": "quota"}}}
+    run = parse_agy_events(jsonl([bad]), KNOWN)
+    assert run.error == "quota" and run.final_answer == ""
+
+
+# --- an adapter run with fake binaries and a fake jail ----------------------------------------
 
 
 FAKE_CLI = """#!{python}
@@ -271,8 +456,6 @@ with open(log, "a") as f:
     row = {{"argv": sys.argv[1:], "cwd": os.getcwd(), "ls": sorted(os.listdir("."))}}
     f.write(json.dumps(row) + "\\n")
 args = sys.argv[1:]
-if args[:1] == ["mcp"]:
-    sys.exit(0)
 if args[:1] == ["exec"]:
     for line in {codex!r}:
         print(line)
@@ -280,15 +463,33 @@ if args[:1] == ["exec"]:
 else:
     for line in {agy!r}:
         print(line)
-    if os.environ.get("FAKE_FAIL"):
-        sys.exit(1)
 """
 
-FAKE_JAIL = """#!/bin/sh
-# a fake jail: <wrapper> --workdir DIR -- cmd...
-echo "$@" >> {log}
-shift; workdir="$1"; shift; shift
-cd "$workdir" && exec "$@"
+# A fake jail: records its arguments, environment and home files, then runs the command in
+# the work dir. `--cli X --workdir W [--mcp-upstream U] [--home-file R=F]... -- argv`.
+FAKE_JAIL = """#!{python}
+import json, os, signal, sys, time
+args = sys.argv[1:]
+cut = args.index("--")
+opts, argv = args[:cut], args[cut + 1:]
+pairs = list(zip(opts[0::2], opts[1::2]))
+home_files = {{}}
+for k, v in pairs:
+    if k == "--home-file":
+        rel, src = v.split("=", 1)
+        home_files[rel] = open(src).read()
+row = {{"opts": opts, "env": dict(os.environ), "home_files": home_files}}
+with open({log!r}, "a") as f:
+    f.write(json.dumps(row) + "\\n")
+if os.path.exists({log!r} + ".hang"):  # (the jail's env is fixed: a file is the only signal)
+    def on_term(*_):
+        open({log!r} + ".term", "w").write("TERM")
+        sys.exit(143)
+    signal.signal(signal.SIGTERM, on_term)
+    print("started", flush=True)
+    time.sleep(60)
+os.chdir(dict(pairs)["--workdir"])
+os.execv(argv[0], argv)
 """
 
 
@@ -301,7 +502,7 @@ def make_fakes(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         )
     )
     jail = tmp_path / "fake-jail"
-    jail.write_text(FAKE_JAIL.format(log=jail_log))
+    jail.write_text(FAKE_JAIL.format(python=sys.executable, log=str(jail_log)))
     for p in (cli, jail):
         p.chmod(p.stat().st_mode | stat.S_IEXEC)
     return cli, jail, cli_log, jail_log
@@ -335,13 +536,14 @@ class FakeServer:
 def fakes(tmp_path, monkeypatch, cfg):
     cli, jail, cli_log, jail_log = make_fakes(tmp_path)
     monkeypatch.setattr(cli_agents, "McpHttpServer", FakeServer)
+    monkeypatch.setenv("K2VAL_JAIL_TMPDIR", str(tmp_path))
     FakeServer.instances.clear()
     conf = replace(cfg.models["gpt-luna-low"], binary=str(cli))
     jailed = replace(cfg, jail=JailConf(wrapper=str(jail)), models={**cfg.models, conf.name: conf})
     return jailed, conf, cli_log, jail_log
 
 
-def cli_calls(path: Path) -> list[dict]:
+def log_rows(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
@@ -360,9 +562,26 @@ async def test_a_codex_trial_runs_in_the_jail_with_an_empty_workdir_and_a_url_on
         allowed_tools=KNOWN,
     )
 
-    # through the jail wrapper, with the work dir; the CLI saw an empty work dir
-    assert "--workdir" in jail_log.read_text() and " -- " in jail_log.read_text()
-    (run,) = cli_calls(cli_log)
+    (jail_row,) = log_rows(jail_log)
+    opts = dict(zip(jail_row["opts"][0::2], jail_row["opts"][1::2], strict=True))
+    scratch = Path(FakeServer.instances[0].scratch)
+    assert opts == {
+        "--cli": "codex",
+        "--workdir": str(scratch / "work"),
+        "--mcp-upstream": "127.0.0.1:41999",
+    }
+    # the jail script's own env: tools, $HOME for the logins, and the staging root (the
+    # trial's scratch, so removing it removes the staging even after a SIGKILL)
+    assert set(jail_row["env"]) == {
+        "PATH",
+        "LANG",
+        "HOME",
+        "K2VAL_JAIL_TMPDIR",
+        "K2VAL_JAIL_PYTHON",
+    }
+    assert jail_row["env"]["K2VAL_JAIL_TMPDIR"] == str(scratch)
+    assert scratch.parent == tmp_path
+    (run,) = log_rows(cli_log)
     assert run["ls"] == [] and run["cwd"].endswith("/work")
     flat = " ".join(run["argv"])
     assert 'mcp_servers.onedata.url="http://127.0.0.1:41999/mcp"' in flat
@@ -382,8 +601,7 @@ async def test_a_codex_trial_runs_in_the_jail_with_an_empty_workdir_and_a_url_on
     assert out.raw_trace["count_mismatch"] is None
     assert [t.tool_name for t in out.tool_calls] == ["check_readiness", "ensure_readiness", "shell"]
     assert FakeServer.instances[0].tools == KNOWN
-    # the scratch dir (with the work dir) is gone
-    assert not Path(FakeServer.instances[0].scratch).exists()
+    assert not scratch.exists()  # the scratch dir (with the work dir) is gone
 
 
 @pytest.mark.asyncio
@@ -404,9 +622,7 @@ async def test_no_wrapper_means_the_cli_is_never_started(fakes, tmp_path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_an_agy_trial_uses_settings_and_leaves_the_global_config_alone(
-    fakes, tmp_path
-) -> None:
+async def test_an_agy_trial_gets_its_mcp_server_through_the_fresh_home(fakes, tmp_path) -> None:
     cfg, codex_conf, cli_log, jail_log = fakes
     conf = replace(
         codex_conf,
@@ -421,42 +637,41 @@ async def test_an_agy_trial_uses_settings_and_leaves_the_global_config_alone(
         system_prompt="s", user_prompt="u", mcp_app=app, allowed_tools=KNOWN
     )
 
-    (run,) = cli_calls(cli_log)
-    assert "--settings" in run["argv"] and "--sandbox" in run["argv"]
-    assert not any(a == "mcp" for a in run["argv"])  # no `agy mcp add`: nothing registered globally
+    (jail_row,) = log_rows(jail_log)
+    assert jail_row["opts"][:2] == ["--cli", "agy"]
+    assert json.loads(jail_row["home_files"][AGY_MCP_CONFIG]) == agy_mcp_config(
+        "http://127.0.0.1:41999/mcp"
+    )
+    (run,) = log_rows(cli_log)
+    assert run["ls"] == []  # the MCP config is in the home, not in /work
+    assert "--dangerously-skip-permissions" in run["argv"] and "--sandbox" not in run["argv"]
+    assert run["argv"][-1] == "--print=s\n\nu"
     assert out.final_answer == "Not ready."
     assert [c.source for c in app.calls] == ["mcp", "mcp", "builtin"]
 
 
 @pytest.mark.asyncio
-async def test_agy_mcp_add_uses_a_unique_name_and_removes_it_even_when_the_cli_fails(
-    fakes, tmp_path, monkeypatch
-) -> None:
-    cfg, codex_conf, cli_log, jail_log = fakes
-    conf = replace(
-        codex_conf,
-        name="gemini-flash-low",
-        backend="agy",
-        mcp_attach="mcp_add",
-        api_id="gemini-3.8-flash-low",
-    )
-    app = RecordingApp(object(), allowed=KNOWN)
-    # the run itself crashes
-    monkeypatch.setattr(CliAdapter, "_run", _boom, raising=True)
-
-    with pytest.raises(RuntimeError, match="cli crashed"):
-        await CliAdapter(cfg, conf, tmp_path).dispatch(
-            system_prompt="s", user_prompt="u", mcp_app=app, allowed_tools=KNOWN
+async def test_a_cancelled_trial_terminates_the_jail_first(fakes, tmp_path) -> None:
+    cfg, conf, cli_log, jail_log = fakes
+    Path(str(jail_log) + ".hang").touch()
+    task = asyncio.create_task(
+        CliAdapter(cfg, conf, tmp_path).dispatch(
+            system_prompt="s",
+            user_prompt="u",
+            mcp_app=RecordingApp(object(), allowed=KNOWN),
+            allowed_tools=KNOWN,
         )
-
-    calls = [c["argv"] for c in cli_calls(cli_log)]
-    assert [c[:2] for c in calls] == [["mcp", "add"], ["mcp", "remove"]]
-    assert calls[0][2] == calls[1][2] and calls[0][2].startswith("k2val-")  # the same unique name
-    assert calls[0][3] == "http://127.0.0.1:41999/mcp"
-
-
-async def _boom(self, argv, workdir):
-    raise RuntimeError("cli crashed")
+    )
+    for _ in range(100):
+        if jail_log.exists():
+            break
+        await asyncio.sleep(0.05)
+    await asyncio.sleep(0.3)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # SIGTERM, which the jail script turns into a clean teardown, not an immediate SIGKILL
+    assert Path(str(jail_log) + ".term").read_text() == "TERM"
 
 
 CRASHING_CLI = """#!{python}

@@ -227,6 +227,10 @@ def main(argv: list[str] | None = None) -> int:
         return scan_main(argv[1:])
     if argv[:1] == ["change"]:
         return change_main(argv[1:])
+    if argv[:1] == ["jail-smoke"]:
+        from benchmark.k2val.jail_smoke import smoke_main
+
+        return smoke_main(argv[1:])
     return run_main(argv)
 
 

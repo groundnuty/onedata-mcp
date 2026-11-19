@@ -153,7 +153,6 @@ class ModelConf:
     # codex / agy
     binary: str = ""
     reasoning_effort: str = ""
-    mcp_attach: str = "settings"
 
     @property
     def is_cli(self) -> bool:
@@ -166,8 +165,7 @@ class ModelConf:
 
 @dataclass(frozen=True)
 class JailConf:
-    wrapper: str = ""
-    workdir_flag: str = "--workdir"
+    wrapper: str = ""  # benchmark/k2val/jail/cli-jail.sh (relative to the repository root)
 
 
 @dataclass(frozen=True)
@@ -250,7 +248,6 @@ def _model(name: str, raw: dict[str, Any]) -> ModelConf:
         price=price,
         binary=raw.get("binary", ""),
         reasoning_effort=raw.get("reasoning_effort", ""),
-        mcp_attach=raw.get("mcp_attach", "settings"),
     )
     if backend == "openai_compat" and not (conf.base_url and conf.key_file):
         raise ConfigError(f"models.{name} (openai_compat) needs base_url and key_file")
@@ -258,8 +255,14 @@ def _model(name: str, raw: dict[str, Any]) -> ModelConf:
         raise ConfigError(f"models.{name} (anthropic) needs key_file, effort and [price]")
     if conf.is_cli and not conf.binary:
         raise ConfigError(f"models.{name} ({backend}) needs binary")
-    if conf.mcp_attach not in ("settings", "mcp_add"):
-        raise ConfigError(f"models.{name}.mcp_attach must be 'settings' or 'mcp_add'")
+    # The jail gives the CLI a fresh home per run, and agy's MCP server is written into it, so
+    # there is one way left. "settings" (the old per-session mode) is accepted and means that.
+    if raw.get("mcp_attach", "home") not in ("home", "settings"):
+        raise ConfigError(
+            f"models.{name}.mcp_attach: only 'home' is supported (the jailed CLI gets a fresh "
+            "home per run; `agy mcp add` would register the server in a home that is then "
+            "deleted). Remove the key."
+        )
     return conf
 
 
@@ -309,10 +312,7 @@ def parse_config(raw: dict[str, Any], *, path: Path | None = None) -> K2valConfi
         models=models,
         limits=limits,
         spend=spend,
-        jail=JailConf(
-            wrapper=jail_raw.get("wrapper", ""),
-            workdir_flag=jail_raw.get("workdir_flag", "--workdir"),
-        ),
+        jail=JailConf(wrapper=jail_raw.get("wrapper", "")),
         scan=ScanConf(
             tokens_file=scan_raw.get("tokens_file", ""),
             patterns_file=scan_raw.get("patterns_file", ""),

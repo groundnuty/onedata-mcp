@@ -60,10 +60,12 @@ def test_the_secret_and_local_config_are_gitignored() -> None:
 
 def test_the_example_config_is_committed_and_has_only_placeholder_paths() -> None:
     text = (REPO / "benchmark/k2val/k2val.toml.example").read_text()
-    keys = r"(?:token_file|key_file|wrapper|tokens_file|patterns_file)"
+    keys = r"(?:token_file|key_file|tokens_file|patterns_file)"
     paths = re.findall(rf'{keys} = "([^"]+)"', text)
     assert paths
     assert all(re.match(r"<[a-z ]+ dir>/", p) for p in paths), paths
+    # the jail wrapper is the one path that is not local: the script in this repository
+    assert re.findall(r'wrapper = "([^"]+)"', text) == ["benchmark/k2val/jail/cli-jail.sh"]
     assert not re.search(r"/(?:home|[U]sers|mnt)/", text)
 
 
