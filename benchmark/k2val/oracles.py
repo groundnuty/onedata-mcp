@@ -108,11 +108,13 @@ _SENTENCE_SPLIT = re.compile(r"(?<=[.!?;])\s+|\n+")
 _DONE_POS = re.compile(
     r"\b(?:done|complete[d]?|ready|readable|replicated|copied|fully (?:there|replicated|copied|"
     r"available|stored)|available|in place|finished|succeeded|successful(?:ly)?|"
-    r"now (?:at|on|in|available|there|stored))\b",
+    r"now (?:at|on|in|available|there|stored)|now fully|fully (?:on|at|in)|"
+    r"(?:holds?|has) the (?:whole|entire|complete|full) file|transfer (?:has )?completed)\b",
     re.I,
 )
 _DONE_NEG = re.compile(
-    r"\b(?:not|no|never|yet to|still|pending|in progress|ongoing|scheduled|started|will|until|"
+    r"\bno\b(?!\s+(?:failures?|errors?|problems?|issues?|missing))|"
+    r"\b(?:not|never|yet to|still|pending|in progress|ongoing|scheduled|started|will|until|"
     r"once|incomplete|partial(?:ly)?|waiting|wait|failed|fail|unable|timed out|timeout|error|"
     r"if|whether)\b|n['’]t\b|could not|couldn't",
     re.I,

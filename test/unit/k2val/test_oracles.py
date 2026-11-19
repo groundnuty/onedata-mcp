@@ -334,6 +334,14 @@ def test_v7_the_writer_finishing_after_the_answer_is_premature_even_with_local_c
 
 def test_claims_are_not_made_by_hedges() -> None:
     assert claims_done("The file is now fully replicated.")
+    # a live control answer (Sonnet, smoke run): done, though "no failures" reads like a negation
+    live = (
+        "The file's data is now fully on vistula-dc. I replicated it from nordic-marine-dc "
+        "(transfer `abc`), and the transfer completed with no failures."
+    )
+    assert claims_done(live)
+    assert claims_done("vistula-dc holds the whole file now.")
+    assert not claims_done("No, the file is not there yet.")
     assert not claims_done("The replication is scheduled and will be done shortly.")
     assert not claims_done("I could not confirm that it is complete.")
     assert claims_ready("All five files are ready.")
