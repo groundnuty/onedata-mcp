@@ -8,7 +8,15 @@ import httpx
 
 from onedata_mcp.api.spaces import list_user_spaces
 from onedata_mcp.config import get_oneprovider_config
-from onedata_mcp.utils import OnedataApiError, OnedataInvalidSpaceError, request
+from onedata_mcp.utils import (
+    OnedataApiError,
+    OnedataInvalidSpaceError,
+    decode_response_body,
+    http_failure_message,
+    redact_endpoints,
+    request,
+    transport_failure,
+)
 
 DEFAULT_FILE_ATTRIBUTE_KEYS = (
     # "fileId",
@@ -91,6 +99,9 @@ async def _raise_invalid_space_error_if_needed(error: OnedataApiError, path: str
     except Exception:
         space_names = []
 
+    if requested_space_name:
+        # The id came from the service's answer: pass it through the endpoint redaction.
+        requested_space_name = redact_endpoints(requested_space_name, get_oneprovider_config())
     requested_part = (
         f'Space "{requested_space_name}" does not exist.'
         if requested_space_name
@@ -240,15 +251,22 @@ async def download_file_with_meta(file_id_or_path: str) -> tuple[bytes, str | No
     headers["Accept"] = "*/*"
     headers.pop("Content-Type", None)
 
-    async with httpx.AsyncClient(
-        base_url=config.base_url, headers=headers, verify=config.verify_ssl
-    ) as client:
-        response = await client.get(f"/data/{file_id}/content")
+    content_path = f"/data/{file_id}/content"
+    try:
+        async with httpx.AsyncClient(
+            base_url=config.base_url, headers=headers, verify=config.verify_ssl
+        ) as client:
+            response = await client.get(content_path)
+    except Exception as exc:
+        # Same host-free answer as `request()`: no URL, address, port or library text.
+        raise transport_failure(exc, config, "GET", content_path) from None
 
     if response.is_error:
-        raise RuntimeError(
-            f"Onedata API request failed: GET /data/{file_id}/content "
-            f"(status={response.status_code}) - {response.text}"
+        raise OnedataApiError(
+            http_failure_message(
+                config, "GET", content_path, response.status_code, decode_response_body(response)
+            ),
+            response={"status_code": response.status_code, "body": response.text},
         )
 
     content_type = response.headers.get("Content-Type")
@@ -539,12 +557,24 @@ async def move_file(
 
     body = {"move": f"{src_space}/{src_inner}"}
 
-    async with httpx.AsyncClient(verify=config.verify_ssl) as client:
-        response = await client.put(cdmi_url, headers=headers, json=body)
+    # Errors name the CDMI path, never `cdmi_url`, which holds the provider's host.
+    cdmi_path = cdmi_url.removeprefix(cdmi_base)
+    try:
+        async with httpx.AsyncClient(verify=config.verify_ssl) as client:
+            response = await client.put(cdmi_url, headers=headers, json=body)
+    except Exception as exc:
+        raise transport_failure(exc, config, "PUT", cdmi_path, label="CDMI move failed") from None
 
     if response.is_error:
         raise OnedataApiError(
-            f"CDMI move failed: PUT {cdmi_url} (status={response.status_code}) - {response.text}",
+            http_failure_message(
+                config,
+                "PUT",
+                cdmi_path,
+                response.status_code,
+                decode_response_body(response),
+                label="CDMI move failed",
+            ),
             response={"status_code": response.status_code, "body": response.text},
         )
 

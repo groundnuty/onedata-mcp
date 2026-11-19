@@ -24,8 +24,11 @@ def _mock_available_spaces(httpx_mock: HTTPXMock, names: list[str]) -> None:
     space_ids = [f"s{i}" for i in range(len(names))]
     httpx_mock.add_response(
         method="GET",
-        url="https://onezone.example/api/v3/onezone/spaces",
-        json={"spaces": space_ids},
+        url="https://provider.example/api/v3/oneprovider/spaces",
+        json=[
+            {"name": name, "spaceId": space_id}
+            for space_id, name in zip(space_ids, names, strict=True)
+        ],
         is_reusable=True,
         is_optional=True,
     )

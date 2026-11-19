@@ -36,7 +36,7 @@ That should print the server's startup banner. (The server starts in stdio mode 
 
 ## 3. Configure (environment + tokens)
 
-The server reads its configuration from process environment variables, with a `.env` file in the working directory as a convenience. Copy the template and fill it in:
+The server reads its configuration from process environment variables, with a `.env` file as a convenience: it loads the first one it finds from the directory of its installed `onedata_mcp` package upward to `/` (in a checkout, the repository's own `.env`), never from the working directory of an installed server, and a variable already in the environment is not overridden by it. To read no `.env` at all, see "Reading no `.env` file" below. Copy the template and fill it in:
 
 ```bash
 cp .env.example .env
@@ -56,9 +56,56 @@ cp .env.example .env
 | Variable                       | Meaning                                                                        |
 |--------------------------------|---------------------------------------------------------------------------------|
 | `ONEDATA_ALLOW_INSECURE_TLS`   | Set to `true` only if your federation uses self-signed TLS (development only). |
+| `ONEDATA_MCP_NODE_NAMES`       | JSON object of real node name -> declared name (see below). Unset by default.  |
+| `ONEDATA_MCP_DOTENV`           | Set to `0` in the process environment to read no `.env` file (see below).      |
 | `FASTMCP_LOG_LEVEL`            | Server log level (default `INFO`; `DEBUG` for verbose).                        |
 | `FASTMCP_LOG_FILE`             | If set, logs are also appended to this file.                                   |
 | `MCP_TRANSPORT`                | Set to `http` for the HTTP transport (default is `stdio`). See § 9.            |
+
+### Reading no `.env` file
+
+By default `onedata_mcp.config` loads a `.env` when it is imported, with python-dotenv's default search:
+from the directory of the installed `onedata_mcp` package upward to `/`, the first file found. A variable
+already in the process environment is never overridden, but one the launch leaves unset is filled in. So a
+`.env` in any directory above the package, such as the shared home directory of an account several people
+use, can set any `ONEDATA_*` setting (the node names included) with nothing in the launch saying so.
+
+A launch that must say everything it sets puts `ONEDATA_MCP_DOTENV=0` in the server's process
+environment, and then no `.env` is read. Only the value `0` (spaces around it are ignored) switches the
+read off; unset, empty or any other value keeps the default above, so a server launched as before behaves
+as before. The word is read from the process environment before any file is, so it does nothing inside a
+`.env`.
+
+It covers this server's own read. FastMCP, which the server is built on, separately reads a `.env` in the
+**working directory** for its own `FASTMCP_*` settings. A launch that wants no file read anywhere also
+starts the server in an empty working directory of its own.
+
+### Keeping node names out of error messages
+
+Transport failures never show a host, address or port: the error says what kind it was
+(`timeout`, `tls_error`, `connection_error`, `http_<status>`) and which service the call was
+for (`onezone` or `oneprovider`). The full text goes to the server's own log at `DEBUG`. A
+non-JSON error body (a gateway's HTML page, say) is likewise replaced by `http_<status>` and
+the service name. Both are the same with or without `ONEDATA_MCP_NODE_NAMES`.
+
+An Onedata error body (its error id and description) is Onedata's own text. With
+`ONEDATA_MCP_NODE_NAMES` unset (or empty, or `{}`) it reaches the agent exactly as Onedata
+wrote it: nothing is replaced and nothing is masked. Only when the variable is set does the
+server act on it: any node it names is replaced by its declared name, and URLs and `host=` /
+`hostname=` / `port=` pairs are masked as `<address>` (the masks apply only with the mapping).
+The variable holds a JSON object whose keys are the real host names or addresses of the
+federation's nodes (each optionally with a port: `host`, `host:port`, `[ipv6]:port`) and whose
+values are the declared names:
+
+```
+ONEDATA_MCP_NODE_NAMES={"node-1.site.example:8443": "provider-a", "10.0.0.5": "provider-a"}
+```
+
+Matching is case-insensitive and on whole names; a port that follows a listed name goes with
+it. List every name the federation is reachable by, the configured zone and provider hosts
+included. Leave the variable unset where the real names are already the declared ones (Docker
+Compose). A malformed value stops the server at launch with an error that names the variable
+and the format, never its value.
 
 ### How to get an Onedata token
 
@@ -287,7 +334,7 @@ The full curated surface (`HEADLINE` allowlist used in the PPAM 2026 paper):
 | `list_space_transfers`     | Scheduled transfers in a space (IDs only; pair with `get_transfer`). |
 | `get_transfer`             | Single transfer's source, destination, state, bytes.    |
 
-The server also exposes (outside HEADLINE) the M0rgho-inherited harvester tools (`list_user_harvesters`, `get_harvester_index_schema`, `query_harvester_index`), `get_file_id`, `get_file_attributes`, `list_children`, and `grep_file_content` for ablation experiments and Onedata-specific debugging.
+The server also exposes (outside HEADLINE) the inherited harvester tools (`list_user_harvesters`, `get_harvester_index_schema`, `query_harvester_index`), `get_file_id`, `get_file_attributes`, `list_children`, and `grep_file_content` for ablation experiments and Onedata-specific debugging.
 
 ---
 

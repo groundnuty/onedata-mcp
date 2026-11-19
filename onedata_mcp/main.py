@@ -4,13 +4,15 @@ import sys
 
 from fastmcp import FastMCP
 
+from onedata_mcp.config import get_node_names
 from onedata_mcp.experimental import experimental_enabled
-from onedata_mcp.modules import files, harvesters, metadata, qos, spaces, transfers
-from onedata_mcp.telemetry import TracingMiddleware, setup_telemetry
+from onedata_mcp.modules import files, harvesters, metadata, qos, readiness, spaces, transfers
+from onedata_mcp.telemetry import TracingMiddleware, setup_metrics, setup_telemetry
 from onedata_mcp.token_policy import (
     WRITE_TOOL_NAMES,
     resolve_register_write_tools_sync,
 )
+from onedata_mcp.tool_maturity import tools_to_remove
 
 # Base server instructions — the validated, headline surface. Kept as a module
 # constant so the default (experimental off) is byte-identical.
@@ -74,6 +76,10 @@ def _setup_logging() -> logging.Logger:
 
 
 def _create_onedata_mcp_server() -> FastMCP:
+    # Fail at launch, not at the first tool error, on a malformed ONEDATA_MCP_NODE_NAMES
+    # (the error names the variable and the format, never the value).
+    get_node_names()
+
     # Opt-in un-validated candidates (new tools + enriched instructions/docstrings)
     # gated behind ONEDATA_MCP_EXPERIMENTAL. Off by default → validated surface.
     experimental = experimental_enabled()
@@ -83,16 +89,18 @@ def _create_onedata_mcp_server() -> FastMCP:
         instructions=_EXPERIMENTAL_INSTRUCTIONS if experimental else _BASE_INSTRUCTIONS,
     )
 
-    # Observability: install the OTLP tracer iff OTEL_* is configured (no-op
-    # otherwise), and emit one span per tool call via middleware. Opt-in only;
-    # nothing is hardcoded. See onedata_mcp/telemetry.py.
+    # Observability: install the OTLP tracer + meter iff OTEL_* is configured
+    # (no-op otherwise), and emit one span + duration metric per tool call via
+    # middleware. Opt-in only; nothing is hardcoded. See onedata_mcp/telemetry.py.
     setup_telemetry()
+    setup_metrics()
     mcp.add_middleware(TracingMiddleware())
 
     files.register_module(mcp, experimental=experimental)
     harvesters.register_module(mcp, experimental=experimental)
     metadata.register_module(mcp)
     qos.register_module(mcp)
+    readiness.register_module(mcp)
     spaces.register_module(mcp, experimental=experimental)
     transfers.register_module(mcp)
 
@@ -109,6 +117,17 @@ def _create_onedata_mcp_server() -> FastMCP:
                 mcp.local_provider.remove_tool(tool_name)
             except Exception as exc:  # noqa: BLE001 — best-effort prune; log + continue
                 logger.warning("Could not remove write tool %r: %s", tool_name, exc)
+
+    # Launch-time tool selection: ONEDATA_MCP_MATURITY (tier filter, e.g.
+    # "stable" for the panel-validated set only) and ONEDATA_MCP_TOOLS (explicit
+    # allowlist) prune the exposed surface. With neither set, the full surface
+    # stays. Model-invisible; same by-name prune as the read-only-token guard
+    # above. See onedata_mcp/tool_maturity.py.
+    for tool_name in tools_to_remove():
+        try:
+            mcp.local_provider.remove_tool(tool_name)
+        except Exception as exc:  # noqa: BLE001 — best-effort prune; log + continue
+            logger.warning("Could not remove tool %r for selection: %s", tool_name, exc)
 
     return mcp
 

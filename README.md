@@ -2,45 +2,76 @@
 
 An [MCP](https://modelcontextprotocol.io/) server that connects assistants to [Onedata](https://onedata.org/) (Onezone + Oneprovider): spaces, harvesters, files, **QoS, distribution, providers, transfers**.
 
-This fork (branch `ppam2026/14-tools` of `groundnuty/onedata-mcp`) extends [`M0rgho/onedata-mcp`](https://github.com/M0rgho/onedata-mcp) with seven federation-state tools (six per paper spec, plus a recursive `query_by_metadata` that needs no harvester) for the PPAM 2026 *LLM-agentic access to a federated scientific data layer with Onedata* benchmark. Pinned to **Onedata 25.0** swagger. The headline benchmark uses a curated 16-tool allowlist defined in [`benchmark/tool_allowlist.py`](benchmark/tool_allowlist.py); see [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) for endpoint mapping and the three corrections vs. paper §3 spec.
+`groundnuty/onedata-mcp` extends a pre-existing Onedata MCP base surface with seven federation-state tools (six per paper spec, plus a recursive `query_by_metadata` that needs no harvester) for the PPAM 2026 *LLM-agentic access to a federated scientific data layer with Onedata* benchmark. Pinned to **Onedata 25.0** swagger. The headline benchmark uses a curated 16-tool allowlist defined in [`benchmark/tool_allowlist.py`](benchmark/tool_allowlist.py); see [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) for endpoint mapping and the three corrections vs. paper §3 spec.
 
 ## Tool surface
 
-The server registers **26 tools** in total (the table below). Two subsets matter:
+The server registers **29 tools** in total (the table below). Three lenses matter:
 
-- **19 tools** remain when the server is run with a read-only Onedata token (a `data.readonly` caveat prunes the 7 mutating tools — see [`onedata_mcp/token_policy.py`](onedata_mcp/token_policy.py)).
-- **16 tools** form the curated **HEADLINE** benchmark allowlist (`benchmark/tool_allowlist.py::HEADLINE`) — the subset the PPAM benchmark restricts the agent to. This is distinct from the registered surface: the benchmark curates *down* to 16, it does not cap what the server exposes.
+- **Maturity — 16 `stable` / 13 `experimental`.** `stable` tools were validated against the PPAM 7-LLM K=8 panel (== the HEADLINE benchmark allowlist); `experimental` tools are registered but not yet panel-swept — either added after the paper freeze, or inherited from the upstream base surface and never validated against our panel. See [`onedata_mcp/tool_maturity.py`](onedata_mcp/tool_maturity.py). Origin (`ours`/`upstream`) is a provenance signal — note that panel-validation trumps origin: an upstream tool that survived K=8 is `stable`.
+- **Read-only token — 20 tools.** Running with a `data.readonly` Onedata token prunes the 9 mutating tools (see [`onedata_mcp/token_policy.py`](onedata_mcp/token_policy.py)).
+- **HEADLINE benchmark allowlist — 16 tools.** The subset the PPAM benchmark restricts the agent to (`benchmark/tool_allowlist.py::HEADLINE`); identical to the `stable` set. The benchmark curates *down* to 16 — it does not cap what the server exposes.
 
-The branch name (`14-tools`) is historical — the surface has since grown; the authoritative live count is what `tools/list` returns (26).
+You can restrict the exposed surface at launch — see [Selecting tools at launch](#selecting-tools-at-launch). The branch name (`14-tools`) is historical; the authoritative live count is what `tools/list` returns (29).
 
-| Tool                          | Group         | Notes                                                |
-|-------------------------------|---------------|------------------------------------------------------|
-| `list_user_spaces`            | spaces        |                                                      |
-| `list_marketplace_spaces`     | spaces        |                                                      |
-| `list_space_providers`        | spaces        | **NEW** — providers from oneprovider's `/spaces/{sid}` |
-| `get_file_id`                 | files         |                                                      |
-| `get_file_attributes`         | files         |                                                      |
-| `list_children`               | files         |                                                      |
-| `list_files_recursively`      | files         |                                                      |
-| `download_file`               | files         |                                                      |
-| `grep_file_content`           | files         |                                                      |
-| `create_file`                 | files         |                                                      |
-| `create_directory`            | files         | **NEW** — explicit directory creation (finding M-11) |
-| `delete_file`                 | files         |                                                      |
-| `move_file`                   | files         | **NEW** — CDMI (`PUT /cdmi/{dst_space}/{path}`); intra-space only |
-| `get_file_metadata`           | files         | json / rdf / xattrs                                  |
-| `set_file_metadata`           | files         | json / rdf / xattrs                                  |
-| `get_file_distribution`       | files         | **NEW** — per-provider, per-storage block ranges     |
-| `get_file_qos_summary`        | qos           | **NEW**                                              |
-| `add_file_qos_requirement`    | qos           | **NEW** — async; returns ID, replication eventual    |
-| `get_qos_requirement`         | qos           | **NEW** — detail by ID                               |
-| `remove_qos_requirement`      | qos           | **NEW**                                              |
-| `list_space_transfers`        | transfers     | **NEW** — IDs only; pair with `get_transfer`         |
-| `get_transfer`                | transfers     | **NEW**                                              |
-| `list_user_harvesters`        | harvesters    |                                                      |
-| `get_harvester_index_schema`  | harvesters    |                                                      |
-| `query_harvester_index`       | harvesters    | excluded from headline benchmark allowlist           |
-| `query_by_metadata`           | metadata      | **NEW** — recursive predicate evaluator (no harvester) |
+`Mat.` column: `stable` = panel-validated; `exp·up` = experimental, inherited from upstream (the genuine distrust set); `exp·ours` = experimental, added by this fork post-paper.
+
+| Tool                          | Group         | Mat.      | Notes                                                |
+|-------------------------------|---------------|-----------|------------------------------------------------------|
+| `list_user_spaces`            | spaces        | stable    |                                                      |
+| `list_marketplace_spaces`     | spaces        | exp·up    |                                                      |
+| `list_space_providers`        | spaces        | stable    | **NEW** — providers from oneprovider's `/spaces/{sid}` |
+| `get_file_id`                 | files         | exp·up    |                                                      |
+| `get_file_attributes`         | files         | exp·up    |                                                      |
+| `list_children`               | files         | exp·up    |                                                      |
+| `list_files_recursively`      | files         | stable    |                                                      |
+| `download_file`               | files         | stable    |                                                      |
+| `grep_file_content`           | files         | exp·up    |                                                      |
+| `create_file`                 | files         | stable    |                                                      |
+| `create_directory`            | files         | exp·ours  | **NEW** — explicit directory creation (finding M-11) |
+| `delete_file`                 | files         | stable    |                                                      |
+| `move_file`                   | files         | stable    | **NEW** — CDMI (`PUT /cdmi/{dst_space}/{path}`); intra-space only |
+| `get_file_metadata`           | files         | stable    | json / rdf / xattrs                                  |
+| `set_file_metadata`           | files         | stable    | json / rdf / xattrs                                  |
+| `get_file_distribution`       | files         | stable    | **NEW** — per-provider, per-storage block ranges     |
+| `get_file_qos_summary`        | qos           | stable    | **NEW**                                              |
+| `add_file_qos_requirement`    | qos           | stable    | **NEW** — async; returns ID, replication eventual    |
+| `get_qos_requirement`         | qos           | stable    | **NEW** — detail by ID                               |
+| `remove_qos_requirement`      | qos           | exp·ours  | **NEW** — not in the panel-validated HEADLINE set    |
+| `list_space_transfers`        | transfers     | stable    | **NEW** — IDs only; pair with `get_transfer`         |
+| `get_transfer`                | transfers     | stable    | **NEW**                                              |
+| `schedule_file_replication`   | transfers     | exp·ours  | **NEW** — schedule a replication transfer to a target provider |
+| `list_user_harvesters`        | harvesters    | exp·up    |                                                      |
+| `get_harvester_index_schema`  | harvesters    | exp·up    |                                                      |
+| `query_harvester_index`       | harvesters    | exp·up    | excluded from headline benchmark allowlist           |
+| `query_by_metadata`           | metadata      | stable    | **NEW** — recursive predicate evaluator (no harvester) |
+| `check_readiness`             | readiness     | exp·ours  | **NEW** — are the declared data complete and readable here, or why not |
+| `ensure_readiness`            | readiness     | exp·ours  | **NEW** — places QoS rules, waits, holds; pruned under a read-only token |
+
+### Selecting tools at launch
+
+Two env vars restrict which tools the server exposes (model-invisible; they prune the registered surface, they do not alter any tool). With neither set, all 29 are exposed.
+
+| Env var | Effect |
+| ------- | ------ |
+| `ONEDATA_MCP_MATURITY` | Comma-separated maturity tiers to expose. `stable` → only the 16 panel-validated tools; `stable,experimental` (or unset) → all 29. |
+| `ONEDATA_MCP_TOOLS` | Comma-separated explicit tool allowlist (e.g. `list_user_spaces,download_file`). Takes precedence over `ONEDATA_MCP_MATURITY`; unknown names are ignored with a warning. |
+
+```bash
+# Expose only the panel-validated set (conservative deployment):
+ONEDATA_MCP_MATURITY=stable uv run onedata-mcp
+```
+
+This composes with the read-only-token prune: both simply hide tools, so a read-only token + `ONEDATA_MCP_MATURITY=stable` yields the stable-and-non-mutating intersection.
+
+### Readiness tools
+
+`check_readiness` and `ensure_readiness` (experimental) answer one question: are the data an analysis declares complete and readable at the provider this server talks to? The agent declares them as an `extent`: per dataset (a space name or a directory path), optionally file names or inclusive `YYYY-MM-DD` date ranges that are matched against the `YYYYMMDD` in each file name.
+
+- `check_readiness` is read-only. It answers ready, or not ready with a reason per file group: `being_written` (no other provider holds the whole file yet), `at_other_site`, `in_transfer`, `unreachable` (only at a provider that is down).
+- `ensure_readiness` also places one QoS rule per file (`providerId=<local provider> & anyStorage`, falling back to `providerId=<local provider>` if Onedata rejects it), so the system copies the file here and protects the replica from eviction, then waits up to `deadline_s`. One call waits at most 240 s (`ONEDATA_MCP_ENSURE_MAX_WAIT_S` changes the cap); call it again if the answer is not ready.
+
+A file counts as ready only when this provider holds all of it and another provider does too (or the file was written here). Transfer status and QoS `fulfilled` are not taken as proof. Spec: [`design/07-readiness-tools.md`](design/07-readiness-tools.md). Compare tool surfaces with `make tools-manifest`; the gated live test is `make test-readiness-live` (local Compose federation only).
 
 ## Requirements
 
@@ -55,7 +86,7 @@ uv sync
 
 ## Environment variables
 
-Configuration is loaded from the process environment. [python-dotenv](https://pypi.org/project/python-dotenv/) is used so a `.env` file in the **current working directory** is picked up when the server starts.
+Configuration is loaded from the process environment. [python-dotenv](https://pypi.org/project/python-dotenv/) is used so a `.env` file is picked up when the server starts: the first one found from the directory of the installed `onedata_mcp` package upward to `/` (a checkout's own root `.env`), never overriding a variable already set. Set `ONEDATA_MCP_DOTENV=0` in the process environment to read no `.env` at all (see `USAGE.md`).
 
 1. Copy the example file and edit values:
 

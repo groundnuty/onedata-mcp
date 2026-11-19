@@ -113,3 +113,48 @@ async def test_get_transfer_returns_detail(
     assert result["type"] == "migration"
     assert result["replicatingProviderId"] == "p_dst"
     assert result["evictingProviderId"] == "p_src"
+
+
+@pytest.mark.asyncio
+async def test_schedule_file_replication_posts_replication_body(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """A file-id passes through un-resolved; body is a replication transfer."""
+    import json
+
+    _set_env(monkeypatch)
+    file_id = "0000000000521f5567756964236600a3ch3f2e"
+    target = "27c0ba1e...d591"
+    httpx_mock.add_response(
+        method="POST",
+        url="https://oneprovider.example/api/v3/oneprovider/transfers",
+        json={"transferId": "tr-abc123"},
+    )
+
+    result = await transfers.schedule_file_replication(file_id, target)
+
+    assert result == {"transferId": "tr-abc123"}
+    sent = json.loads(httpx_mock.get_requests()[-1].content)
+    assert sent["type"] == "replication"
+    assert sent["fileId"] == file_id
+    assert sent["replicatingProviderId"] == target
+    assert "evictingProviderId" not in sent  # replication only
+
+
+@pytest.mark.asyncio
+async def test_schedule_file_replication_surfaces_api_error(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """Target provider not supporting the space -> structured OnedataApiError."""
+    from onedata_mcp.utils import OnedataApiError
+
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="POST",
+        url="https://oneprovider.example/api/v3/oneprovider/transfers",
+        status_code=400,
+        json={"error": {"id": "spaceNotSupportedBy", "details": {"providerId": "p2"}}},
+    )
+
+    with pytest.raises(OnedataApiError):
+        await transfers.schedule_file_replication("file-id-x", "p2")

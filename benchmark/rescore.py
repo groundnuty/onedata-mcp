@@ -41,7 +41,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -95,7 +94,9 @@ def _reconstruct_ctx(rec: dict) -> RunContext:
 
     scenario = SCENARIOS_BY_ID[scenario_id]
     specialised = specialise_for_space(scenario, space_name)
-    fixture_paths = {f.path: f"replay-placeholder-{i}" for i, f in enumerate(specialised.fixture.files)}
+    fixture_paths = {
+        f.path: f"replay-placeholder-{i}" for i, f in enumerate(specialised.fixture.files)
+    }
 
     return RunContext(
         scenario_id=scenario_id,
@@ -286,10 +287,7 @@ def _rescore_record(rec: dict, oracle_result: OracleResult) -> dict:
     # Layer 2: lift deployment-artefact failures.
     # Detected by `failure_category` starting with `deployment-` —
     # these are vLLM-serving-layer issues, not MCP-server failures.
-    deployment_lift = (
-        failure_category is not None
-        and failure_category.startswith("deployment-")
-    )
+    deployment_lift = failure_category is not None and failure_category.startswith("deployment-")
 
     final_pass = original_pass or rescored_pass or deployment_lift
 
@@ -304,9 +302,12 @@ def _rescore_record(rec: dict, oracle_result: OracleResult) -> dict:
     out["rescore_changed"] = original_pass != final_pass
     out["rescore_demotion_rejected"] = original_pass and not rescored_pass
     out["lift_kind"] = (
-        "parser-bug" if parser_lift and not deployment_lift
-        else "deployment-artefact" if deployment_lift and not parser_lift
-        else "parser+deployment" if parser_lift and deployment_lift
+        "parser-bug"
+        if parser_lift and not deployment_lift
+        else "deployment-artefact"
+        if deployment_lift and not parser_lift
+        else "parser+deployment"
+        if parser_lift and deployment_lift
         else None
     )
     # `failure_category` reflects the PRE-LIFT classification. Useful
@@ -314,8 +315,10 @@ def _rescore_record(rec: dict, oracle_result: OracleResult) -> dict:
     # If the post-lift outcome is PASS, this category answers "WHY did
     # we lift" — for headlines that exclude deployment lifts, group on
     # this field.
-    out["failure_category"] = failure_category if deployment_lift else (
-        _classify_failure({**rec, "outcome": out["outcome_v2"]})
+    out["failure_category"] = (
+        failure_category
+        if deployment_lift
+        else (_classify_failure({**rec, "outcome": out["outcome_v2"]}))
     )
     return out
 
@@ -370,9 +373,7 @@ async def rescore_run(run_dir: Path) -> tuple[int, int, int]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--run-id", required=True, help="Run ID under artefacts/."
-    )
+    parser.add_argument("--run-id", required=True, help="Run ID under artefacts/.")
     parser.add_argument("--artefact-root", default=str(DEFAULT_ARTEFACT_ROOT))
     args = parser.parse_args()
 
@@ -439,7 +440,11 @@ def main() -> None:
         if n_lift:
             bits.append("lift={" + ", ".join(f"{k}={v}" for k, v in sorted(lifts.items())) + "}")
         if n_fail:
-            bits.append("fail={" + ", ".join(f"{k.split('-', 1)[0]}={v}" for k, v in sorted(cats.items())) + "}")
+            bits.append(
+                "fail={"
+                + ", ".join(f"{k.split('-', 1)[0]}={v}" for k, v in sorted(cats.items()))
+                + "}"
+            )
         print(f"  {llm:24s}  {' '.join(bits) if bits else '(no changes)'}")
 
 

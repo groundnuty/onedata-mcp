@@ -19,11 +19,12 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from collections.abc import Mapping
 from typing import Any
 
 from fastmcp.server.middleware import Middleware
-from opentelemetry import trace
+from opentelemetry import metrics, trace
 from opentelemetry.propagate import extract, inject
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
@@ -31,12 +32,21 @@ logger = logging.getLogger(__name__)
 
 _TRACER_NAME = "onedata-mcp"
 _telemetry_enabled = False
+_metrics_enabled = False
+_tool_duration_hist: metrics.Histogram | None = None
+_rest_duration_hist: metrics.Histogram | None = None
 
 
 def telemetry_enabled() -> bool:
     """True once an OTLP exporter has been installed via :func:`setup_telemetry`."""
 
     return _telemetry_enabled
+
+
+def metrics_enabled() -> bool:
+    """True once an OTLP meter provider has been installed via :func:`setup_metrics`."""
+
+    return _metrics_enabled
 
 
 def _otel_export_configured() -> bool:
@@ -93,6 +103,106 @@ def get_tracer() -> trace.Tracer:
     return trace.get_tracer(_TRACER_NAME)
 
 
+def setup_metrics() -> bool:
+    """Install an OTLP/HTTP meter provider iff OTEL export is configured.
+
+    Mirrors :func:`setup_telemetry`: opt-in via the same OTEL_* gate, no-op when
+    unset (metrics fall through to the API's no-op meter — no exporter, no retry
+    spam), idempotent, and never raises.
+    """
+
+    global _metrics_enabled
+    if _metrics_enabled:
+        return True
+    if not _otel_export_configured():
+        return False
+
+    try:
+        from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+            OTLPMetricExporter,
+        )
+        from opentelemetry.sdk.metrics import MeterProvider
+        from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+        from opentelemetry.sdk.resources import Resource
+
+        reader = PeriodicExportingMetricReader(OTLPMetricExporter())
+        provider = MeterProvider(metric_readers=[reader], resource=Resource.create())
+        metrics.set_meter_provider(provider)
+    except Exception as exc:  # noqa: BLE001 — metrics must never take the server down
+        logger.warning("OpenTelemetry metrics setup failed (%s); metrics stay disabled", exc)
+        return False
+
+    _metrics_enabled = True
+    logger.info("OpenTelemetry metrics enabled (OTLP/HTTP exporter)")
+    return True
+
+
+def get_meter() -> metrics.Meter:
+    """Return the server meter (a no-op meter when metrics are disabled)."""
+
+    return metrics.get_meter(_TRACER_NAME)
+
+
+def tool_call_duration() -> metrics.Histogram:
+    """Cached histogram of MCP tool-call durations (ms).
+
+    Created lazily from :func:`get_meter` on first use. ``setup_metrics`` runs
+    at server construction, so by the first tool call the real meter provider is
+    already installed; when metrics are disabled this is a no-op instrument.
+    """
+
+    global _tool_duration_hist
+    if _tool_duration_hist is None:
+        _tool_duration_hist = get_meter().create_histogram(
+            "mcp.tool.call.duration",
+            unit="ms",
+            description="Duration of MCP tool calls",
+        )
+    return _tool_duration_hist
+
+
+def rest_request_duration() -> metrics.Histogram:
+    """Cached histogram of outbound Onedata REST-call durations (ms)."""
+
+    global _rest_duration_hist
+    if _rest_duration_hist is None:
+        _rest_duration_hist = get_meter().create_histogram(
+            "onedata.rest.request.duration",
+            unit="ms",
+            description="Duration of outbound Onedata REST calls",
+        )
+    return _rest_duration_hist
+
+
+def _record(hist: metrics.Histogram, value: float, attributes: dict[str, Any]) -> None:
+    """Best-effort histogram record — a metrics failure must never propagate."""
+
+    try:
+        hist.record(value, attributes)
+    except Exception:  # noqa: BLE001 — observability is never worth failing the call
+        logger.debug("metric record failed", exc_info=True)
+
+
+def record_tool_call(tool_name: str, status: str, duration_ms: float) -> None:
+    """Record an MCP tool-call duration sample (dims: tool name, ok/error)."""
+
+    _record(
+        tool_call_duration(),
+        duration_ms,
+        {ATTR_TOOL_NAME: tool_name, "status": status},
+    )
+
+
+def record_rest_request(method: str, status_class: str, duration_ms: float) -> None:
+    """Record an outbound REST-call duration sample (dims: method, status class)."""
+
+    _record(
+        rest_request_duration(),
+        duration_ms,
+        {"http.request.method": method, "http.response.status_class": status_class},
+    )
+
+
 def context_from_carrier(carrier: Mapping[str, Any] | None):
     """Extract a remote W3C trace context from an MCP ``_meta`` carrier.
 
@@ -145,6 +255,8 @@ class TracingMiddleware(Middleware):
         parent_ctx = context_from_carrier(carrier)
 
         tracer = get_tracer()
+        t0 = time.perf_counter()
+        status = "ok"
         with tracer.start_as_current_span(
             f"mcp.tool/{tool_name}",
             context=parent_ctx,
@@ -157,11 +269,14 @@ class TracingMiddleware(Middleware):
             try:
                 result = await call_next(context)
             except Exception as exc:
+                status = "error"
                 if span.is_recording():
                     span.set_attribute(ATTR_ERROR_TYPE, type(exc).__name__)
                     span.record_exception(exc)
                     span.set_status(Status(StatusCode.ERROR, str(exc)))
                 raise
+            finally:
+                record_tool_call(tool_name, status, (time.perf_counter() - t0) * 1000.0)
             if span.is_recording():
                 span.set_status(Status(StatusCode.OK))
             return result

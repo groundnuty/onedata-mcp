@@ -201,8 +201,8 @@ async def test_check_convergence_returns_true_when_data_replicated(
     # Cache the space id so _resolve_space_id_async returns immediately
     httpx_mock.add_response(
         method="GET",
-        url="https://onezone.example/api/v3/onezone/spaces",
-        json={"spaces": ["sp1"]},
+        url="https://provider.example/api/v3/oneprovider/spaces",
+        json=[{"name": "ppam_2026_mcp_tests", "spaceId": "sp1"}],
     )
     httpx_mock.add_response(
         method="GET",
@@ -269,8 +269,8 @@ async def test_check_convergence_returns_true_even_when_rule_status_pending(
     )
     httpx_mock.add_response(
         method="GET",
-        url="https://onezone.example/api/v3/onezone/spaces",
-        json={"spaces": ["sp1"]},
+        url="https://provider.example/api/v3/oneprovider/spaces",
+        json=[{"name": "ppam_2026_mcp_tests", "spaceId": "sp1"}],
     )
     httpx_mock.add_response(
         method="GET",
@@ -341,8 +341,8 @@ async def test_check_convergence_returns_false_when_data_not_yet_replicated(
     )
     httpx_mock.add_response(
         method="GET",
-        url="https://onezone.example/api/v3/onezone/spaces",
-        json={"spaces": ["sp1"]},
+        url="https://provider.example/api/v3/oneprovider/spaces",
+        json=[{"name": "ppam_2026_mcp_tests", "spaceId": "sp1"}],
     )
     httpx_mock.add_response(
         method="GET",

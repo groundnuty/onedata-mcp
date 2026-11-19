@@ -33,7 +33,7 @@ The §7 caveat stands — CDMI is documented but the *integration* with Onedata'
 | | Pros | Cons |
 |---|---|---|
 | **(a) CDMI PUT — same shape the official Python client uses** | atomic; matches paper's claim; one HTTP call; same auth (X-Auth-Token) as the rest of the surface | not in `/api/v3/oneprovider/` swagger; intra-space only |
-| **(b) Non-atomic `download → create_at_destination → delete_source`** | uses only `/api/v3/oneprovider/` endpoints; survives any future CDMI churn; supports cross-space | loses atomicity (partial failure → orphan); read-size limits (M0rgho's `download_file` caps at 5 MB); 3× HTTP cost |
+| **(b) Non-atomic `download → create_at_destination → delete_source`** | uses only `/api/v3/oneprovider/` endpoints; survives any future CDMI churn; supports cross-space | loses atomicity (partial failure → orphan); read-size limits (the base `download_file` caps at 5 MB); 3× HTTP cost |
 | **(c) Wait for upstream public endpoint** | future-proof | no ETA; blocks benchmark |
 
 ## Decision: option (a)

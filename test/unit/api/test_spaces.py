@@ -7,7 +7,26 @@ from onedata_mcp.api import spaces
 def _set_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ONEDATA_ONEZONE_HOST", "https://onezone.example")
     monkeypatch.setenv("ONEDATA_ONEZONE_TOKEN", "token")
+    monkeypatch.setenv("ONEDATA_ONEPROVIDER_HOST", "https://oneprovider.example")
+    monkeypatch.setenv("ONEDATA_ONEPROVIDER_TOKEN", "token-p")
     monkeypatch.setenv("ONEDATA_ALLOW_INSECURE_TLS", "false")
+
+
+PROVIDER_SPACES_URL = "https://oneprovider.example/api/v3/oneprovider/spaces"
+ONEZONE_ADMIN_LISTING_PATH = "/api/v3/onezone/spaces"
+
+
+def _provider_listing_entry(space_id: str, name: str) -> dict:
+    """One entry of Oneprovider's GET /spaces answer (Onedata 25.0)."""
+    return {
+        "name": name,
+        "spaceId": space_id,
+        "providers": [{"providerId": "p1", "providerName": "Provider One"}],
+        "fileId": f"root-{space_id}",
+        "dirId": f"root-{space_id}",
+        "trashDirId": f"trash-{space_id}",
+        "archivesDirId": f"archives-{space_id}",
+    }
 
 
 @pytest.mark.asyncio
@@ -42,8 +61,11 @@ async def test_list_user_spaces_fetches_ids_and_details_and_maps_fields(
     _set_env(monkeypatch)
     httpx_mock.add_response(
         method="GET",
-        url="https://onezone.example/api/v3/onezone/spaces",
-        json={"spaces": ["sp1", "sp2"]},
+        url=PROVIDER_SPACES_URL,
+        json=[
+            _provider_listing_entry("sp1", "Space One"),
+            _provider_listing_entry("sp2", "Space Two"),
+        ],
     )
     httpx_mock.add_response(
         method="GET",
@@ -94,11 +116,7 @@ async def test_list_user_spaces_returns_empty_when_no_spaces(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
     _set_env(monkeypatch)
-    httpx_mock.add_response(
-        method="GET",
-        url="https://onezone.example/api/v3/onezone/spaces",
-        json={"spaces": []},
-    )
+    httpx_mock.add_response(method="GET", url=PROVIDER_SPACES_URL, json=[])
 
     result = await spaces.list_user_spaces()
 
@@ -245,3 +263,83 @@ async def test_get_space_providers_calls_oneprovider_not_onezone(
     requests = httpx_mock.get_requests()
     assert requests[0].url.host == "oneprovider.example"
     assert "/api/v3/oneprovider/spaces/" in requests[0].url.path
+
+
+# ---------------------------------------------------------------------------
+# resolve_space_id_or_name: a name resolves through the user's own spaces,
+# read from Oneprovider's GET /spaces, never Onezone's admin listing
+# ---------------------------------------------------------------------------
+
+
+def _mock_user_spaces(httpx_mock: HTTPXMock, spaces_by_id: dict[str, str]) -> None:
+    httpx_mock.add_response(
+        method="GET",
+        url=PROVIDER_SPACES_URL,
+        json=[_provider_listing_entry(sid, name) for sid, name in spaces_by_id.items()],
+    )
+    for sid, name in spaces_by_id.items():
+        httpx_mock.add_response(
+            method="GET",
+            url=f"https://onezone.example/api/v3/onezone/spaces/{sid}",
+            json={"spaceId": sid, "name": name, "providers": {"p1": 1024}},
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_space_name_reads_the_provider_listing_not_the_onezone_admin_listing(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    _mock_user_spaces(httpx_mock, {"sp-a": "Alpha", "sp-b": "Beta"})
+
+    result = await spaces.resolve_space_id_or_name("Beta")
+
+    assert result == "sp-b"
+    requests = httpx_mock.get_requests()
+    assert requests[0].url.host == "oneprovider.example"
+    assert requests[0].url.path == "/api/v3/oneprovider/spaces"
+    assert all(r.url.path != ONEZONE_ADMIN_LISTING_PATH for r in requests)
+
+
+@pytest.mark.asyncio
+async def test_resolve_space_unknown_name_lists_only_the_users_own_names(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    _mock_user_spaces(httpx_mock, {"sp-a": "Alpha"})
+
+    with pytest.raises(ValueError, match=r"'Gamma' not found\. Available names: \['Alpha'\]"):
+        await spaces.resolve_space_id_or_name("Gamma")
+
+
+@pytest.mark.asyncio
+async def test_resolve_space_id_shaped_value_makes_no_request(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    space_id = "9742830720c0ef94496dad1d96595736ch776e"
+
+    assert await spaces.resolve_space_id_or_name(space_id) == space_id
+    assert httpx_mock.get_requests() == []
+
+
+@pytest.mark.asyncio
+async def test_list_user_spaces_refuses_a_listing_that_is_not_a_list(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    httpx_mock.add_response(method="GET", url=PROVIDER_SPACES_URL, json={"spaces": ["sp1"]})
+
+    with pytest.raises(ValueError, match="answered a dict, not a list of spaces"):
+        await spaces.list_user_spaces()
+
+
+@pytest.mark.asyncio
+async def test_list_user_spaces_refuses_an_entry_without_a_space_id(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    httpx_mock.add_response(method="GET", url=PROVIDER_SPACES_URL, json=[{"name": "Alpha"}])
+
+    with pytest.raises(ValueError, match="an entry without a spaceId"):
+        await spaces.list_user_spaces()

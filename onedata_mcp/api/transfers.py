@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from onedata_mcp.api.files import _normalize_path_to_file_id
 from onedata_mcp.config import get_oneprovider_config
 from onedata_mcp.utils import request
 
@@ -145,3 +146,30 @@ async def create_transfer(
     config = get_oneprovider_config()
     response = await request(config, "POST", "/transfers", json_body=body)
     return response["body"]
+
+
+async def schedule_file_replication(
+    file_id_or_path: str,
+    target_provider_id: str,
+) -> dict[str, Any]:
+    """Schedule a replication transfer of a file to a target provider.
+
+    Replication-only wrapper over :func:`create_transfer`: resolves the file
+    (logical path or opaque id) and POSTs a ``type=replication`` transfer that
+    copies the data TO ``target_provider_id``. Returns immediately with the
+    transfer id (poll via ``get_transfer`` / ``list_space_transfers``).
+
+    Args:
+        file_id_or_path: ``/<space>/<path>`` or an opaque file id.
+        target_provider_id: provider the data is copied TO
+            (``replicatingProviderId``).
+
+    Returns: ``{"transferId": "<id>"}``.
+
+    Raises:
+        OnedataApiError: if the target provider does not support the file's
+            space (the structured error carries the reason) or on other REST
+            failures.
+    """
+    file_id = await _normalize_path_to_file_id(file_id_or_path)
+    return await create_transfer(file_id, "replication", replicating_provider_id=target_provider_id)
