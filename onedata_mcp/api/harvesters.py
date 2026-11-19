@@ -1,8 +1,32 @@
 import asyncio
+import json
 from typing import Any
 
 from onedata_mcp.config import get_onezone_config
 from onedata_mcp.utils import request
+
+
+def coerce_harvesters_index_query(query: dict[str, Any] | str) -> dict[str, Any]:
+    """Tolerate a harvester query passed as a JSON-object string.
+
+    Onezone expects a JSON object; weaker models often pass the whole query
+    pre-serialized as a string. Accepting either is a pure tolerance
+    improvement (a dict still works unchanged). Adapted from upstream c474a93.
+    """
+    if isinstance(query, dict):
+        return query
+    if isinstance(query, str):
+        stripped = query.strip()
+        if not stripped:
+            raise ValueError("harvester query string is empty")
+        try:
+            parsed: Any = json.loads(stripped)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"harvester query is not valid JSON: {e}") from e
+        if not isinstance(parsed, dict):
+            raise TypeError("harvester query JSON must deserialize to an object")
+        return parsed
+    raise TypeError(f"harvester query must be dict or str, got {type(query).__name__}")
 
 
 async def get_user_harvester(harvester_id: str) -> dict[str, Any]:
@@ -49,13 +73,14 @@ async def get_harvester_index_schema(harvester_id: str, index_id: str) -> dict[s
 
 
 async def query_harvester_index(
-    harvester_id: str, index_id: str, query: dict[str, Any]
+    harvester_id: str, index_id: str, query: dict[str, Any] | str
 ) -> dict[str, Any]:
     config = get_onezone_config()
+    body = coerce_harvesters_index_query(query)
     response = await request(
         config,
         "POST",
         f"/harvesters/{harvester_id}/indices/{index_id}/query",
-        json_body=query,
+        json_body=body,
     )
     return response["body"]

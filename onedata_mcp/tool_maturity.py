@@ -10,12 +10,13 @@ Two axes:
   ``stable``       — validated against the PPAM 7-LLM K=8 panel (== the
                      benchmark HEADLINE-16). Proven against weaker models.
   ``experimental`` — registered but NOT panel-validated: either added to this
-                     fork after the paper freeze, or inherited from the M0rgho
-                     upstream fork and never swept against our panel.
+                     project after the paper freeze, or inherited from the
+                     upstream base surface and never swept against our panel.
 
 ``origin`` (a distrust signal for anything unvalidated)
-  ``ours``     — authored in this fork after the M0rgho fork point (85b8515).
-  ``upstream`` — inherited/adapted from M0rgho/onedata-mcp.
+  ``ours``     — authored here after the upstream base commit (85b8515).
+  ``upstream`` — inherited from the upstream base surface, or adapted from its
+                 later commits (the flag-gated tools, see ``FLAG_GATED``).
 
 Note **panel-validation trumps origin**: an upstream-origin tool that made it
 into the HEADLINE-16 and survived K=8 was hardened by us (M-1..M-13 findings)
@@ -33,7 +34,7 @@ import os
 
 logger = logging.getLogger(__name__)
 
-# --- classification (all 29 registered tools; 27 verified against fork 85b8515) ---
+# --- classification (the 29 tools registered by default; 27 verified against fork 85b8515) ---
 
 # maturity == "stable": panel-validated (the HEADLINE-16).
 STABLE: frozenset[str] = frozenset(
@@ -67,7 +68,7 @@ EXPERIMENTAL: frozenset[str] = frozenset(
         # ours, the readiness tools (design/07-readiness-tools.md)
         "check_readiness",
         "ensure_readiness",
-        # inherited from the M0rgho upstream fork, never panel-swept (the
+        # inherited from the upstream base surface, never panel-swept (the
         # genuine distrust set)
         "get_file_attributes",
         "get_file_id",
@@ -80,8 +81,8 @@ EXPERIMENTAL: frozenset[str] = frozenset(
     }
 )
 
-# origin == "upstream": present at the M0rgho fork point (85b8515). Everything
-# else is "ours".
+# origin == "upstream": present at the upstream base commit (85b8515).
+# Everything else is "ours".
 UPSTREAM: frozenset[str] = frozenset(
     {
         "create_file",
@@ -102,8 +103,25 @@ UPSTREAM: frozenset[str] = frozenset(
     }
 )
 
-# Every classified tool. A unit test asserts this equals the registered surface,
-# so adding a tool without classifying it fails CI.
+# Registered ONLY when ONEDATA_MCP_EXPERIMENTAL is on (onedata_mcp/experimental.py);
+# with the flag off they do not exist on the server, so they are kept out of
+# ALL_KNOWN, the surface registered by default. Both are ``experimental`` (never
+# panel-validated, and ``maturity_of`` already answers that for anything outside
+# STABLE) and ``upstream`` in origin: adapted from later upstream commits
+# (``list_space_datasets`` from 63c21b5, ``set_file_xattrs`` from 46f030a) rather
+# than present at the base commit, so they are not in UPSTREAM. They are therefore
+# outside the EXPERIMENTAL ∩ UPSTREAM set of the registered-by-default distrust tools,
+# but carry the same two labels through ``maturity_of`` / ``origin_of``.
+FLAG_GATED: frozenset[str] = frozenset(
+    {
+        "list_space_datasets",
+        "set_file_xattrs",
+    }
+)
+
+# Every tool registered by default (flag off). A unit test asserts this equals the
+# registered surface, so adding a tool without classifying it fails CI; another
+# asserts ALL_KNOWN | FLAG_GATED equals the surface with the flag on.
 ALL_KNOWN: frozenset[str] = STABLE | EXPERIMENTAL
 
 VALID_TIERS: frozenset[str] = frozenset({"stable", "experimental"})
@@ -121,7 +139,13 @@ def maturity_of(tool: str) -> str:
 def origin_of(tool: str) -> str:
     """Provenance of a tool. Unknown tools default to ``ours``."""
 
-    return "upstream" if tool in UPSTREAM else "ours"
+    return "upstream" if tool in UPSTREAM or tool in FLAG_GATED else "ours"
+
+
+def registered_surface(experimental: bool) -> frozenset[str]:
+    """The tools the server registers: ALL_KNOWN, plus FLAG_GATED when the flag is on."""
+
+    return ALL_KNOWN | FLAG_GATED if experimental else ALL_KNOWN
 
 
 def _parse_csv_env(name: str) -> set[str]:

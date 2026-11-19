@@ -7,13 +7,47 @@ from pydantic import Field
 from onedata_mcp.api.spaces import (
     get_space_providers,
     list_marketplace_spaces,
+    list_space_datasets,
     list_user_spaces,
     resolve_space_id_or_name,
 )
 
 
-def register_module(mcp: FastMCP) -> None:
-    """Register onedata spaces module tools and prompts with the MCP server."""
+def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
+    """Register onedata spaces module tools and prompts with the MCP server.
+
+    When ``experimental`` is set, additionally registers un-validated tools
+    (currently ``list_space_datasets``) gated behind ONEDATA_MCP_EXPERIMENTAL —
+    see onedata_mcp/experimental.py and onedata-mcp#1.
+    """
+
+    if experimental:
+
+        @mcp.tool(
+            name="list_space_datasets",
+            annotations=ToolAnnotations(readOnlyHint=True),
+        )
+        async def mcp_list_space_datasets(
+            space_id_or_name: str = Field(
+                description="Space id or space name (as returned by list_user_spaces)"
+            ),
+            state: str = Field(
+                default="attached",
+                description=(
+                    "Dataset tree: 'attached' follows the current file layout; "
+                    "'detached' is the hierarchy frozen at detachment time"
+                ),
+            ),
+            limit: int = Field(default=100, ge=1, le=1000),
+            offset: int = Field(default=0, ge=0),
+        ) -> dict[str, Any]:
+            """List top-level datasets established in a space."""
+            return await list_space_datasets(
+                space_id_or_name,
+                state="detached" if state == "detached" else "attached",
+                limit=limit,
+                offset=offset,
+            )
 
     @mcp.tool(name="list_user_spaces", description="List spaces available to the user")
     async def mcp_list_user_spaces() -> list[dict]:
