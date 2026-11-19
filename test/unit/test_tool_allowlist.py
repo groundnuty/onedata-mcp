@@ -20,6 +20,11 @@ from benchmark.tool_allowlist import (
 )
 from onedata_mcp.main import mcp
 
+# The readiness tools (design/07-readiness-tools.md) are outside the PPAM benchmark's
+# classification on purpose: adding them to ABLATION_EXTRAS would put them in the paper's
+# ablation surface (ABLATION_FULL). The benchmark module stays as it is.
+READINESS_TOOLS = frozenset({"check_readiness", "ensure_readiness"})
+
 
 @pytest.mark.asyncio
 async def test_headline_has_expected_cardinality() -> None:
@@ -48,7 +53,7 @@ async def test_every_classified_tool_is_actually_exposed_by_the_server() -> None
 async def test_no_server_tool_is_unclassified() -> None:
     server_tools = {t.name for t in await mcp.list_tools()}
     classified = HEADLINE | ABLATION_EXTRAS | EXCLUDED_HARVESTER
-    unclassified = server_tools - classified
+    unclassified = server_tools - classified - READINESS_TOOLS
     assert not unclassified, (
         f"Server exposes tools not classified in the allowlist: {sorted(unclassified)}. "
         "Add each to HEADLINE, ABLATION_EXTRAS, or EXCLUDED_HARVESTER."

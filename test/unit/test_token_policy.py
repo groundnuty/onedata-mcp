@@ -97,11 +97,12 @@ async def test_pruning_removes_exactly_the_write_tools() -> None:
     """Removing WRITE_TOOL_NAMES leaves the read surface intact (prune semantics)."""
     from fastmcp import FastMCP
 
-    from onedata_mcp.modules import files, qos, transfers
+    from onedata_mcp.modules import files, qos, readiness, transfers
 
     probe = FastMCP(name="probe")
     files.register_module(probe)
     qos.register_module(probe)
+    readiness.register_module(probe)
     transfers.register_module(probe)
 
     before = {t.name for t in await probe.list_tools()}
@@ -114,3 +115,11 @@ async def test_pruning_removes_exactly_the_write_tools() -> None:
     assert after == before - token_policy.WRITE_TOOL_NAMES
     # A representative read tool survives the prune.
     assert "get_file_metadata" in after
+    # check_readiness only reads; ensure_readiness places QoS rules and is pruned.
+    assert "check_readiness" in after
+    assert "ensure_readiness" not in after
+
+
+def test_ensure_readiness_is_a_write_tool_and_check_readiness_is_not() -> None:
+    assert "ensure_readiness" in token_policy.WRITE_TOOL_NAMES
+    assert "check_readiness" not in token_policy.WRITE_TOOL_NAMES

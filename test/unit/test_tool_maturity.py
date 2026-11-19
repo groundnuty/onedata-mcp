@@ -114,5 +114,14 @@ def test_explicit_unknown_names_ignored(monkeypatch: pytest.MonkeyPatch) -> None
 # --- end-to-end against the live server ------------------------------------
 
 
-def test_default_server_exposes_all_27() -> None:
-    assert len(_registered()) == len(tm.ALL_KNOWN) == 27
+def test_default_server_exposes_all_29() -> None:
+    assert len(_registered()) == len(tm.ALL_KNOWN) == 29
+
+
+def test_readiness_tools_are_experimental_and_ours() -> None:
+    """The readiness tools are new: not panel-validated, not from upstream."""
+    for name in ("check_readiness", "ensure_readiness"):
+        assert name in tm.EXPERIMENTAL
+        assert tm.maturity_of(name) == "experimental"
+        assert tm.origin_of(name) == "ours"
+        assert name not in tm.UPSTREAM
