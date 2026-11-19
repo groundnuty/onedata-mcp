@@ -17,7 +17,15 @@ from pathlib import Path
 
 import pytest
 
-from benchmark.k2val.jail import JailFileError, fwd_in, fwd_out, netns, read_jail_file
+from benchmark.k2val.jail import (
+    JailCleanupError,
+    JailFileError,
+    fwd_in,
+    fwd_out,
+    netns,
+    read_jail_file,
+    remove_tree,
+)
 
 JAIL_DIR = Path(fwd_out.__file__).resolve().parent
 CLI_JAIL = JAIL_DIR / "cli-jail.sh"
@@ -267,6 +275,44 @@ def test_an_oversized_jail_file_is_refused(tmp_path) -> None:
     with pytest.raises(JailFileError, match="larger"):
         read_jail_file(tmp_path, "big", limit=1024)
     assert read_jail_file(tmp_path, "big", limit=2048) == "x" * 2048
+
+
+# --- removing what the jail wrote into ----------------------------------------------------
+
+
+def test_remove_tree_removes_dirs_the_jail_stripped_of_permissions(tmp_path) -> None:
+    root = tmp_path / "scratch"
+    (root / "work" / "locked" / "inner").mkdir(parents=True)
+    (root / "work" / "locked" / "inner" / "f").write_text("x")
+    (root / "home" / ".codex").mkdir(parents=True)
+    (root / "home" / ".codex" / "auth.json").write_text("login copy")
+    for d in (
+        root / "work" / "locked" / "inner",
+        root / "work" / "locked",
+        root / "home" / ".codex",
+        root / "home",
+        root / "work",
+    ):
+        d.chmod(0)
+    # a symlink to a host dir: its permissions are never touched, the dir never removed
+    outside = tmp_path / "host-dir"
+    outside.mkdir()
+    (outside / "keep").write_text("x")
+    outside.chmod(0o500)
+    (root / "link").symlink_to(outside)
+
+    remove_tree(root)
+
+    assert not root.exists()
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o500 and (outside / "keep").exists()
+    outside.chmod(0o700)
+
+
+def test_remove_tree_is_loud_when_something_is_left(tmp_path, monkeypatch) -> None:
+    (tmp_path / "d").mkdir()
+    monkeypatch.setattr("shutil.rmtree", lambda *a, **k: None)
+    with pytest.raises(JailCleanupError, match="login"):
+        remove_tree(tmp_path / "d")
 
 
 # --- cli-jail.sh ------------------------------------------------------------------------------

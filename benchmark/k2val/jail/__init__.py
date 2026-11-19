@@ -41,6 +41,42 @@ class JailFileError(RuntimeError):
     """A file the jail wrote is not a plain small regular file: it is not read."""
 
 
+class JailCleanupError(RuntimeError):
+    """A directory the jail wrote into could not be removed."""
+
+
+def _unlock_dirs(path: str) -> None:
+    """u+rwx back on `path` and every directory below it, top-down, never through a symlink:
+    the jail may have stripped them (chmod 0) so that removal fails. Files are left alone (an
+    unlink needs no permission on the file)."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return
+    if not stat.S_ISDIR(st.st_mode):
+        return
+    os.chmod(path, stat.S_IMODE(st.st_mode) | stat.S_IRWXU)
+    with os.scandir(path) as entries:
+        subdirs = [e.path for e in entries if e.is_dir(follow_symlinks=False)]
+    for d in subdirs:
+        _unlock_dirs(d)
+
+
+def remove_tree(path: Path | str) -> None:
+    """Remove a directory the jail could write into (the trial's scratch, its work dir, a jail's
+    staging dir left by a SIGKILL), whatever the jail did to its permissions. Raises
+    JailCleanupError if anything is left: it may hold a copy of a CLI login."""
+    import shutil
+
+    p = str(path)
+    if not os.path.lexists(p):
+        return
+    _unlock_dirs(p)
+    shutil.rmtree(p, ignore_errors=True)
+    if os.path.lexists(p):
+        raise JailCleanupError(f"could not remove {p} (it may hold a copy of a CLI login)")
+
+
 def read_jail_file(
     directory: Path | str, name: str, limit: int = MAX_JAIL_FILE_BYTES
 ) -> str | None:
@@ -52,7 +88,10 @@ def read_jail_file(
     and checked with fstat on that same fd."""
     if not name or "/" in name or name in (".", ".."):
         raise ValueError(f"a plain file name is required, got {name!r}")
-    dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as e:  # the jail made its work dir unreadable (chmod 0), or replaced it
+        raise JailFileError(f"{directory}: not readable ({os.strerror(e.errno or 0)})") from None
     try:
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
         try:

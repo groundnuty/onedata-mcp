@@ -32,7 +32,8 @@
 #
 # Environment: K2VAL_JAIL_TMPDIR (staging root, default /tmp; must be under /tmp, /var/tmp or
 # /dev/shm), K2VAL_JAIL_PYTHON (the Python for the outside helpers, default python3).
-# Exit: the CLI's status; 2 for a usage or staging error; 3 if the network could not be set up.
+# Exit: the CLI's status; 2 for a usage or staging error; 3 if the network could not be set up;
+# 4 if the staging dir (with the login copy) could not be removed.
 set -u -o pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
@@ -108,17 +109,33 @@ fi
 
 # ---- staging -------------------------------------------------------------------------------
 BW_PID="" CHILD_PID="" SLIRP_PID="" FWD_PID="" REAPER_PID="" BLOCK_W="" SYNC_RW=""
+
+# The jail can strip the permissions of anything it owns (its home, the login's dir, /work) so
+# that a plain rm -rf fails and leaves the login copy behind. Give every DIRECTORY back u+rwx,
+# top-down and never through a symlink (find -P; `-exec ... \;` runs before find reads the dir),
+# then remove, then check. Files need no permission to be unlinked, and are left untouched.
+remove_staging() {
+  [ -n "${S:-}" ] && [ -e "$S" ] || return 0
+  find -P "$S" -type d -exec chmod u+rwx {} \; 2>/dev/null
+  rm -rf "$S" 2>/dev/null
+  if [ -e "$S" ]; then
+    echo "cli-jail: ERROR: the staging dir could not be removed and holds a copy of the $CLI login: $S" >&2
+    return 1
+  fi
+}
+
 cleanup() {
   local rc=$?
-  trap - EXIT INT TERM HUP
+  # no signal may cut the cleanup short: a second TERM during it is ignored, not fatal
+  trap - EXIT
+  trap '' INT TERM HUP
   # The jail first: its PID-1 (killing it ends its whole PID namespace), then bwrap. Neither
   # was released if we got here early: the block FIFO is never released by EOF, only by a byte.
-  [ -n "$CHILD_PID" ] && kill -KILL "$CHILD_PID" 2>/dev/null
-  [ -n "$BW_PID" ] && kill -KILL "$BW_PID" 2>/dev/null
-  [ -n "$REAPER_PID" ] && kill -KILL "$REAPER_PID" 2>/dev/null  # it ignores TERM
-  for p in "$FWD_PID" "$SLIRP_PID"; do [ -n "$p" ] && kill -TERM "$p" 2>/dev/null; done
+  for p in "$CHILD_PID" "$BW_PID" "$REAPER_PID" "$FWD_PID" "$SLIRP_PID"; do
+    [ -n "$p" ] && kill -KILL "$p" 2>/dev/null
+  done
   for p in "$BW_PID" "$FWD_PID" "$SLIRP_PID" "$REAPER_PID"; do [ -n "$p" ] && wait "$p" 2>/dev/null; done
-  [ -n "${S:-}" ] && [ -d "$S" ] && rm -rf "$S"
+  remove_staging || rc=4
   exit "$rc"
 }
 

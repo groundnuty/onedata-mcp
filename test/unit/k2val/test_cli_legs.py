@@ -724,6 +724,36 @@ print('{{"type": "item.completed", "item": {{"type": "agent_message", "text": "N
 os.symlink({secret!r}, "last_message.txt")
 """
 
+# A CLI that strips the permissions of what it wrote in /work, and of /work itself.
+LOCKING_CLI = """#!{python}
+import os
+print('{{"type": "item.completed", "item": {{"type": "agent_message", "text": "OK"}}}}')
+os.makedirs("locked/inner")
+open("locked/inner/f", "w").write("x")
+os.chmod("locked/inner", 0)
+os.chmod("locked", 0)
+os.chmod(".", 0)
+"""
+
+
+@pytest.mark.asyncio
+async def test_the_scratch_dir_is_removed_even_after_a_chmod_0(fakes, tmp_path) -> None:
+    cfg, conf, cli_log, jail_log = fakes
+    cli = tmp_path / "locking-cli"
+    cli.write_text(LOCKING_CLI.format(python=sys.executable))
+    cli.chmod(cli.stat().st_mode | stat.S_IEXEC)
+
+    out = await CliAdapter(cfg, replace(conf, binary=str(cli)), tmp_path).dispatch(
+        system_prompt="s",
+        user_prompt="u",
+        mcp_app=RecordingApp(object(), allowed=KNOWN),
+        allowed_tools=KNOWN,
+    )
+
+    assert out.final_answer == "OK"
+    assert not Path(FakeServer.instances[0].scratch).exists()
+
+
 # A CLI that floods its output, then lingers.
 FLOODING_CLI = """#!{python}
 import sys, time

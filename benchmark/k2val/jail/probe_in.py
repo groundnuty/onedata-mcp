@@ -241,11 +241,37 @@ def sleep_mode() -> int:
     return 0
 
 
+def _lock(path: str) -> None:
+    """A dir holding a file, then the dir's permissions stripped: what a hostile CLI can do to
+    anything it owns in the jail, to keep the host from cleaning it up."""
+    os.makedirs(os.path.join(path, "inner"), exist_ok=True)
+    with open(os.path.join(path, "inner", "f"), "w") as f:
+        f.write("x")
+    os.chmod(os.path.join(path, "inner"), 0)
+    os.chmod(path, 0)
+
+
+def hostile_perms_mode(conf: dict) -> int:
+    """Strip permissions in the home (the login's own dir, a new dir, the home itself) and in
+    /work, then exit 0. The host must still remove every copy of the login."""
+    home = os.environ["HOME"]
+    login_dir = os.path.join(home, conf["expected_home_files"][0].split("/")[0])
+    _lock(os.path.join(home, "locked"))
+    _lock(os.path.join("/work", "locked"))
+    os.chmod(login_dir, 0)
+    os.chmod("/work", 0)
+    os.chmod(home, 0)
+    print("HOSTILE-DONE", flush=True)
+    return 0
+
+
 def main() -> int:
     with open(sys.argv[1], encoding="utf-8") as f:
         conf = json.load(f)
     if conf.get("mode") == "sleep":
         return sleep_mode()
+    if conf.get("mode") == "hostile-perms":
+        return hostile_perms_mode(conf)
     check_paths(conf)
     check_strings(conf)
     check_env(conf)

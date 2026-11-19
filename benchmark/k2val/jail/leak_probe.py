@@ -31,6 +31,7 @@ import os
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -45,6 +46,7 @@ HERE = Path(__file__).resolve().parent
 JAIL = HERE / "cli-jail.sh"
 NEUTRAL_ROOT = "/tmp"
 TLS_HOSTS = ["api.openai.com", "chatgpt.com", "generativelanguage.googleapis.com"]
+HOSTILE_TIMEOUT_S = 60  # a hostile run that has not ended by then is a hang (a FAIL)
 METADATA = ("169.254.169.254", 80)
 
 # The login files cli-jail.sh copies (the first of each list is required, the rest if present).
@@ -234,6 +236,26 @@ def jail_processes(markers: list[str]) -> list[int]:
         if any(m in cmd for m in markers):
             out.append(int(p))
     return out
+
+
+def force_rmtree(path: str) -> bool:
+    """Remove a tree a jail wrote into, even with its permissions stripped: give every directory
+    (never following a symlink) back u+rwx, top-down, then remove. True if it is gone."""
+
+    def unlock(p: str) -> None:
+        with contextlib.suppress(OSError):
+            st = os.lstat(p)
+            if not stat.S_ISDIR(st.st_mode):
+                return
+            os.chmod(p, stat.S_IMODE(st.st_mode) | stat.S_IRWXU)
+            for entry in os.scandir(p):
+                if entry.is_dir(follow_symlinks=False):
+                    unlock(entry.path)
+
+    if os.path.lexists(path):
+        unlock(path)
+        shutil.rmtree(path, ignore_errors=True)
+    return not os.path.lexists(path)
 
 
 SLIRP_SIGNATURE = "--exit-fd 7 --ready-fd 8"  # how cli-jail.sh starts slirp4netns
@@ -434,15 +456,55 @@ class CliProbe:
             os.unlink(probe)
             for sig in (signal.SIGTERM, signal.SIGKILL):
                 self.signal_case(sig, conf, root, workdir, upstream)
+            self.hostile_case(
+                "hostile-perms",
+                "8 login copies removed after chmod 000 (home, login dir, /work)",
+                conf,
+                root,
+                upstream,
+            )
         finally:
             upstream.close()
             canary_lo.close()
             canary_any.close()
             host_proc.kill()
             host_proc.wait()
-            shutil.rmtree(root, ignore_errors=True)
-            shutil.rmtree(workdir, ignore_errors=True)
+            force_rmtree(root)
+            force_rmtree(workdir)
         return rep
+
+    def hostile_case(self, mode: str, prop: str, conf: dict, root: str, upstream: Upstream) -> None:
+        """The probe plays a hostile CLI (`mode`), then exits 0. The jail script must still end
+        in time and remove its staging dir; the work dir must still be removable by its owner."""
+        workdir = tempfile.mkdtemp(prefix="k2val-probe-work-", dir=NEUTRAL_ROOT)
+        slirp_before = jail_slirps()
+        proc, probe = self.run_jail({**conf, "mode": mode}, root, workdir, upstream)
+        t0 = time.monotonic()
+        try:
+            out, err = proc.communicate(timeout=HOSTILE_TIMEOUT_S)
+            hung = False
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, err = proc.communicate()
+            hung = True
+        elapsed = time.monotonic() - t0
+        left = self.leftovers(root, probe, slirp_before)
+        done = "HOSTILE-DONE" in out
+        for n in left.files:  # whatever the script failed to remove (a FAIL below)
+            force_rmtree(os.path.join(root, n))
+        work_removed = force_rmtree(workdir)
+        ok = done and not hung and proc.returncode == 0 and not left.files
+        ok = ok and left.processes_gone and work_removed
+        detail = (
+            f"exit {proc.returncode} after {elapsed:.1f}s{' (HUNG, killed)' if hung else ''}; "
+            f"{left.describe()}; work dir removable: {work_removed}"
+        )
+        if not done:
+            detail = f"hostile probe did not finish: {' | '.join(err.splitlines()[-2:])}; " + detail
+        self.report.add(prop, ok, detail)
+        with contextlib.suppress(OSError):
+            os.unlink(probe)
+        self.last_hostile_stderr = err
 
     def signal_case(
         self, sig: signal.Signals, conf: dict, root: str, workdir: str, upstream: Upstream

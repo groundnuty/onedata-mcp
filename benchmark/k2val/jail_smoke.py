@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import shutil
 import sys
 import time
 from pathlib import Path
@@ -39,6 +38,7 @@ from benchmark.k2val.jail import (
     jail_available,
     jail_cmd,
     read_jail_file,
+    remove_tree,
 )
 from benchmark.k2val.secrets import redact, say
 
@@ -90,7 +90,7 @@ async def smoke_one(conf: ModelConf, jail: JailConf, out_dir: Path) -> dict:
         except JailFileError as e:
             last_message = f"<not read: {e}>"
     finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+        remove_tree(scratch)
     if conf.backend == "codex":
         parsed = parse_codex_events(lines)
     else:

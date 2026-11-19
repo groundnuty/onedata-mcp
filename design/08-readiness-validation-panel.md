@@ -167,7 +167,12 @@ service on the host's loopback (the Onedata providers, agent channel servers and
 - bwrap sets a jailed process's parent-death signal only after the block-fd read. Before the release, a small reaper ends
   the jail if the script is SIGKILLed.
 - On exit or SIGTERM/INT/HUP the script kills the jail's PID 1, which ends its PID namespace, then bwrap, slirp and the
-  forwarder, and removes the staging dir.
+  forwarder, and removes the staging dir. During that cleanup further signals are ignored, so a second SIGTERM cannot
+  cut it short.
+- The jail can strip the permissions of what it owns (its home, the login's dir, `/work`: `chmod 0`) so that a plain
+  `rm -rf` fails and leaves the login copy behind. Both removals, the script's (staging dir) and the harness's
+  (`remove_tree`, the trial's scratch with `/work`), first give every directory back `u+rwx`, top-down and never
+  through a symlink, then remove, then check: anything left is an error (the script exits 4), never silent.
 - A SIGKILL of the script skips that removal. The harness therefore stages inside the trial's scratch dir (its
   `K2VAL_JAIL_TMPDIR`), removes that dir itself, and cancels with SIGTERM, then SIGKILL after 10 s.
 

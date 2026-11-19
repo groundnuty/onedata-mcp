@@ -29,7 +29,6 @@ import asyncio
 import json
 import os
 import re
-import shutil
 import sys
 import tempfile
 import time
@@ -47,6 +46,7 @@ from benchmark.k2val.jail import (
     jail_available,
     jail_cmd,
     read_jail_file,
+    remove_tree,
 )
 from benchmark.k2val.mcp_http import McpHttpServer
 from benchmark.k2val.recording import CallRecord
@@ -392,7 +392,7 @@ class CliAdapter:
                 last_message = (read_jail_file(workdir, LAST_MESSAGE_FILE) or "").strip()
             except JailFileError as e:
                 last_message, refused = "", str(e)
-            shutil.rmtree(scratch, ignore_errors=True)
+            remove_tree(scratch)  # loud if anything (a login copy) is left
         lines, returncode = run.lines, run.returncode
 
         if self.conf.backend == "codex":
