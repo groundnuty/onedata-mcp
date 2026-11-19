@@ -630,7 +630,13 @@ def test_the_bwrap_arguments_isolate_the_cli() -> None:
         ("<staging>/home", "/home/agent"),
     ]
     host_sources = {src for _, src, _ in binds if not src.startswith("<staging>")}
-    assert host_sources == {"/usr", "/etc/ssl", "/etc/ca-certificates", "/tmp/w"}
+    # nothing of the host's /etc: its /etc/ssl holds local CAs and a certificate naming the host
+    assert host_sources == {"/usr", "/tmp/w"}
+    assert (
+        "--ro-bind",
+        "<staging>/etc/ca-certificates.crt",
+        "/etc/ssl/certs/ca-certificates.crt",
+    ) in binds
     assert ("--ro-bind", "<staging>/sock", "/run/k2val") in binds
     assert args[args.index("--tmpfs") + 1] == "/usr/local"  # hidden
     assert env == [

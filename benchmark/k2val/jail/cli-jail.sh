@@ -209,6 +209,30 @@ write_etc() {
     "$uid" "$gid" "$JAIL_HOME" > "$S/etc/passwd"
   printf 'agent:x:%s:\nnogroup:x:65534:\n' "$gid" > "$S/etc/group"
   printf 'passwd: files\ngroup: files\nhosts: files dns\n' > "$S/etc/nsswitch.conf"
+  write_ca_bundle
+}
+
+# The jail's ONLY CA file: the distro's Mozilla set as /etc/ca-certificates.conf selects it (its
+# `!` lines deselect), else every mozilla/*.crt. Never the host's /etc/ssl: its bundle holds
+# locally added CAs, and its snakeoil certificate names the host.
+write_ca_bundle() {
+  local conf=/etc/ca-certificates.conf share=/usr/share/ca-certificates line f n=0
+  : > "$S/etc/ca-certificates.crt"
+  if [ -r "$conf" ]; then
+    while IFS= read -r line; do
+      case $line in mozilla/*) ;; *) continue ;; esac
+      f=$share/$line
+      [ -f "$f" ] || continue
+      cat -- "$f" >> "$S/etc/ca-certificates.crt" && printf '\n' >> "$S/etc/ca-certificates.crt" && n=$((n + 1))
+    done < "$conf"
+  fi
+  if [ "$n" = 0 ]; then
+    for f in "$share"/mozilla/*.crt; do
+      [ -f "$f" ] || continue
+      cat -- "$f" >> "$S/etc/ca-certificates.crt" && printf '\n' >> "$S/etc/ca-certificates.crt" && n=$((n + 1))
+    done
+  fi
+  [ "$n" -gt 0 ] || die "no Mozilla CA list ($share/mozilla): the jail would have no CA to trust"
 }
 
 # ---- the bwrap arguments (passed through fd 3: no host path in the jail's /proc/1/cmdline) --
@@ -221,7 +245,7 @@ bwrap_args() {
     --ro-bind "$S/etc/resolv.conf" /etc/resolv.conf --ro-bind "$S/etc/hosts" /etc/hosts \
     --ro-bind "$S/etc/passwd" /etc/passwd --ro-bind "$S/etc/group" /etc/group \
     --ro-bind "$S/etc/nsswitch.conf" /etc/nsswitch.conf \
-    --ro-bind /etc/ssl /etc/ssl --ro-bind-try /etc/ca-certificates /etc/ca-certificates \
+    --ro-bind "$S/etc/ca-certificates.crt" /etc/ssl/certs/ca-certificates.crt \
     --proc /proc --dev /dev --tmpfs /tmp \
     --bind "$S/home" "$JAIL_HOME" \
     --ro-bind "$S/bin" /opt/cli --ro-bind "$S/k2val" /opt/k2val

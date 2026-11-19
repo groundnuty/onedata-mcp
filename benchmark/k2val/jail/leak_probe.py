@@ -32,11 +32,14 @@ Exit 0 only if every row passes. Prints no credential and no host path.
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
+import hashlib
 import http.server
 import ipaddress
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -84,7 +87,6 @@ ALLOWED_ENV = {
     "agy": ["HOME", "LANG", "PATH"],
 }
 EXPECTED_ETC = [
-    "ca-certificates",
     "group",
     "hosts",
     "nsswitch.conf",
@@ -92,6 +94,27 @@ EXPECTED_ETC = [
     "resolv.conf",
     "ssl",
 ]
+CA_CONF = Path("/etc/ca-certificates.conf")
+CA_SHARE = Path("/usr/share/ca-certificates")
+PEM_CERT = re.compile(rb"-----BEGIN CERTIFICATE-----(.+?)-----END CERTIFICATE-----", re.S)
+
+
+def mozilla_ca_sha256() -> list[str]:
+    """SHA-256 of the DER of every CA in the distro's Mozilla set, as /etc/ca-certificates.conf
+    selects it (deselected `!` lines and locally added CAs left out): the only CAs the jail's
+    /etc may hold. Computed here, on the host, independently of the jail script."""
+    if CA_CONF.is_file():
+        lines = CA_CONF.read_text().splitlines()
+        files = [CA_SHARE / line for line in lines if line.startswith("mozilla/")]
+    else:
+        files = sorted((CA_SHARE / "mozilla").glob("*.crt"))
+    out = set()
+    for f in files:
+        with contextlib.suppress(OSError):
+            for m in PEM_CERT.finditer(f.read_bytes()):
+                der = base64.b64decode(b"".join(m.group(1).split()))
+                out.add(hashlib.sha256(der).hexdigest())
+    return sorted(out)
 
 
 @dataclass
@@ -418,6 +441,7 @@ class CliProbe:
             "expected_home_files": expected_home(self.cli, self.home),
             "expected_root": expected_root,
             "expected_etc": EXPECTED_ETC,
+            "mozilla_ca_sha256": mozilla_ca_sha256(),
             "unreachable": unreachable,
             "dns_public_name": DNS_PUBLIC_NAME,
             "dns_resolvers": host_resolvers(),
@@ -651,6 +675,7 @@ class CliProbe:
             ("etc", "1 /etc holds only generated + ssl files"),
             ("usr_local", "1 /usr/local hidden"),
             ("cli_binaries", "1 /opt/cli: own copies (no symlink, no host inode)"),
+            ("etc_contents", "1 /etc: no host/user name, Mozilla CAs only"),
             ("home_dir", "1 /home holds only the fresh home"),
             ("work_empty", "1 /work is empty"),
             ("env", "2 env = allowed vars only"),

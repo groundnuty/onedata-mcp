@@ -116,8 +116,11 @@ the Python is standard library only. No local path is written in any of them: pa
 `--new-session` (no controlling terminal) and `--hostname jail`. bwrap's own arguments arrive through a file
 descriptor (`--args`), so no host path shows in the jail's `/proc/1/cmdline`. The jail holds:
 - a read-only `/usr`, with `/usr/local` hidden under an empty tmpfs;
-- generated `/etc/{resolv.conf,hosts,passwd,group,nsswitch.conf}`, plus read-only `/etc/ssl` and
-  `/etc/ca-certificates`;
+- generated `/etc/{resolv.conf,hosts,passwd,group,nsswitch.conf}`, and one CA file,
+  `/etc/ssl/certs/ca-certificates.crt`, built from the distro's Mozilla set as `/etc/ca-certificates.conf` selects it.
+  Nothing of the host's `/etc` is bound: its `/etc/ssl` holds locally added CAs and a snakeoil certificate whose
+  subject is the host name. Both CLIs look for that file first (seen in their binaries), and no `openssl.cnf` is
+  needed;
 - a private `/tmp`, its own `/proc`, a minimal `/dev`, and a read-only root;
 - `/home/agent`, a fresh home staged per run, holding only that CLI's login, copied from the invoking user:
   - codex: `~/.codex/auth.json`, `installation_id`;
@@ -254,6 +257,8 @@ out: the trace's MCP half is the server's own record, and the CLI's events come 
    1. the home, `/mnt`, `/Users`, `~/.ssh`, the repository, the config and every token/key path are absent; no
       host-identifying string is in `/proc/{1,self}/{cmdline,environ}`, `mountinfo`, `/etc` or the hostname; `/`,
       `/etc` and `/home` hold exactly the jail's entries; `/opt/cli` holds own regular files (no symlink, one link);
+      no file under `/etc` holds the host or user name (certificates are searched decoded too), and every CA
+      certificate there is in the distro's Mozilla set, computed on the host;
    2. the env is exactly the allowed names;
    3. the home holds exactly that CLI's login files;
    4. the host's loopback (`127.0.0.1:31443/31444`, `10.0.2.2` on several ports, a canary on the host's

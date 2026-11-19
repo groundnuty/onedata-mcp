@@ -10,10 +10,14 @@ SIGTERM and sleeps, for the cleanup-on-signal checks. Self-contained, standard l
 
 from __future__ import annotations
 
+import base64
+import binascii
 import errno
+import hashlib
 import http.client
 import json
 import os
+import re
 import signal
 import socket
 import ssl
@@ -94,6 +98,56 @@ def check_cli_binaries() -> None:
             bad.append(f"{name}: {st.st_nlink} links (an inode shared with the host)")
     emit("cli_binaries", bool(entries) and not bad,
          f"{len(entries)} files, own copies" if not bad else "; ".join(bad))  # fmt: skip
+
+
+PEM_CERT = re.compile(rb"-----BEGIN CERTIFICATE-----(.+?)-----END CERTIFICATE-----", re.S)
+
+
+def pem_certificates(data: bytes) -> list[bytes]:
+    """The DER of every PEM certificate in `data`."""
+    out = []
+    for m in PEM_CERT.finditer(data):
+        try:
+            out.append(base64.b64decode(b"".join(m.group(1).split()), validate=True))
+        except (ValueError, binascii.Error):
+            continue
+    return out
+
+
+def check_etc_contents(conf: dict) -> None:
+    """Nothing under the jail's /etc names the host or its user, and every CA certificate there is
+    one of the distro's Mozilla set: no locally added CA, no host certificate (a snakeoil
+    certificate carries the host name in its DER, so certificates are searched decoded too)."""
+    mozilla = set(conf["mozilla_ca_sha256"])
+    needles = [s.encode() for s in conf["forbidden_strings"] if s]
+    bad, n_files, n_certs = [], 0, 0
+    for d, _, files in os.walk("/etc"):
+        for f in sorted(files):
+            p = os.path.join(d, f)
+            try:
+                with open(p, "rb") as fh:
+                    data = fh.read(32 << 20)
+            except OSError:
+                continue  # unreadable here is unreadable to the CLI as well
+            n_files += 1
+            certs = pem_certificates(data)
+            n_certs += len(certs)
+            for i, s in enumerate(needles):
+                if any(s in blob for blob in (data, *certs)):
+                    bad.append(f"{p}: host string #{i}")
+            foreign = [c for c in certs if hashlib.sha256(c).hexdigest() not in mozilla]
+            if foreign:
+                bad.append(f"{p}: {len(foreign)} non-Mozilla certificate(s)")
+    ssl_dirs = (listing("/etc/ssl"), listing("/etc/ssl/certs"))
+    if ssl_dirs != (["certs"], ["ca-certificates.crt"]):
+        bad.append(f"/etc/ssl = {ssl_dirs[0]}, /etc/ssl/certs has {len(ssl_dirs[1])} entries")
+    more = f" (+{len(bad) - 6} more)" if len(bad) > 6 else ""
+    detail = (
+        "; ".join(bad[:6]) + more
+        if bad
+        else (f"{n_files} files, {n_certs} certificates, all Mozilla, no host string")
+    )
+    emit("etc_contents", not bad and n_certs > 0, detail)
 
 
 def check_strings(conf: dict) -> None:
@@ -373,6 +427,7 @@ def main() -> int:
         return hostile_huge_mode(conf)
     check_paths(conf)
     check_cli_binaries()
+    check_etc_contents(conf)
     check_strings(conf)
     check_env(conf)
     check_home(conf)
