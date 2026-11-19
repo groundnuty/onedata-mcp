@@ -142,13 +142,16 @@ service on the host's loopback (the Onedata providers, agent channel servers and
   is attached to bwrap's child. Its pid comes from `--info-fd`. bwrap's child sits in a user namespace nested inside the
   one that owns the netns, so slirp is given the owning one by fd (`--userns-path=/proc/self/fd/N`, from
   `NS_GET_USERNS`). `--enable-sandbox` cannot work there and is not used;
-- DNS is slirp's `10.0.2.3`, through the generated `/etc/resolv.conf`;
+- DNS goes to public resolvers (`1.1.1.1`, `8.8.8.8` in the generated `/etc/resolv.conf`) over the NATed egress.
+  slirp's own resolver `10.0.2.3` is off (`--disable-dns`) and rejected by the filter: it relays to the HOST's
+  resolver, which answered inside the jail for the host's own name and its tailnet name (seen before this change);
+- slirp runs with `--disable-dns` and `--enable-seccomp`;
 - **an egress filter, beyond the brief.** `--disable-host-loopback` only stops the host's `127.0.0.1`. slirp opens
   connections from the host, so without a filter the jail reached the host's own LAN, container-bridge and tailnet
   addresses, services bound to `0.0.0.0`, other machines on those networks, and the cloud metadata service at
   `169.254.169.254` (all verified open in a prototype). `netns.py filter` joins the netns' owning user namespace, holds
   `CAP_NET_ADMIN` as an ambient capability for `nft` alone, installs an OUTPUT-hook table, and reads it back to check it.
-  The table accepts loopback and DNS to `10.0.2.3`. It rejects every private, shared (100.64/10), link-local,
+  The table accepts loopback. It rejects every private, shared (100.64/10), link-local,
   loopback, reserved and multicast IPv4 range, the whole subnet of every host interface (`local/prefixlen`, so the
   host's neighbours too) and any point-to-point peer, and all IPv6. The rest, public IPv4, is accepted. The host's
   networks come from `ip -j addr`; if `ip` is missing, fails or times out, the filter and so the jail fail (fail
@@ -224,8 +227,7 @@ out: the trace's MCP half is the server's own record, and the CLI's events come 
 **Residual risks.**
 - The jail sends the vendor everything the CLI sees, by design: the prompts, the tool definitions and the MCP answers.
   `k2val scan` is the guard there.
-- DNS goes through slirp to the host's resolver, so names only the host can resolve (local or VPN names) may resolve
-  inside too (not tested). The filter still rejects the private addresses they would resolve to.
+- DNS goes to public resolvers, so every name the jail looks up is seen by them (as it would be by any resolver).
 - `/usr` is the host's, read-only, and visible. `/proc` shows the kernel version and CPU and memory facts. The staging
   and work-dir temp paths show in mountinfo.
 - slirp4netns runs on the host without `--enable-sandbox`; a libslirp flaw would act with the user's rights.
@@ -251,8 +253,11 @@ out: the trace's MCP half is the server's own record, and the CLI's events come 
    4. the host's loopback (`127.0.0.1:31443/31444`, `10.0.2.2` on several ports, a canary on the host's
       `127.0.0.1`), a `0.0.0.0` canary via every host IPv4 address, port 22 on those addresses, and the metadata
       service are all unreachable. Each target IS reachable from the host at that moment (or is marked "not
-      listening"), so no row passes vacuously; the canaries count zero connections;
-   5. a verified TLS handshake each to api.openai.com, chatgpt.com and generativelanguage.googleapis.com;
+      listening"), so no row passes vacuously; the canaries count zero connections. slirp's DNS relay `10.0.2.3`
+      answers no query, and each internal-only name found at probe time (the host's name, that name under each search
+      domain, its tailnet name; only those that resolve on the host) does not resolve inside;
+   5. a verified TLS handshake each to api.openai.com, chatgpt.com and generativelanguage.googleapis.com (so public
+      DNS works);
    6. `127.0.0.1:<P>` inside reaches a dummy upstream that answers with a nonce;
    7. host processes are not visible (pid 1 is bwrap; a host process with a marker is not seen); also no capabilities,
       no new user namespaces, nft can neither list nor flush, no `/dev/tty`, only fds 0-2;

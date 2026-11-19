@@ -47,6 +47,8 @@ JAIL = HERE / "cli-jail.sh"
 NEUTRAL_ROOT = "/tmp"
 TLS_HOSTS = ["api.openai.com", "chatgpt.com", "generativelanguage.googleapis.com"]
 HOSTILE_TIMEOUT_S = 60  # a hostile run that has not ended by then is a hang (a FAIL)
+SLIRP_DNS_RELAY = "10.0.2.3"  # slirp's DNS, which relays to the HOST's resolver
+DNS_PUBLIC_NAME = "example.com"
 METADATA = ("169.254.169.254", 80)
 
 # The login files cli-jail.sh copies (the first of each list is required, the rest if present).
@@ -183,6 +185,35 @@ def host_ipv4_addresses() -> list[str]:
             if a.get("family") == "inet" and a.get("local") and not a["local"].startswith("127.")
         }
     )
+
+
+def resolves(name: str) -> bool:
+    try:
+        socket.getaddrinfo(name, None)
+        return True
+    except OSError:
+        return False
+
+
+def host_only_names() -> list[str]:
+    """Names the HOST resolves through its own resolver but the internet does not: its hostname,
+    the hostname under each search domain of the host's resolv.conf, and its tailnet name if
+    tailscale runs. Only those that resolve on the host now are kept (else the row is vacuous)."""
+    host = socket.gethostname()
+    names = [host]
+    with contextlib.suppress(OSError):
+        for line in Path("/etc/resolv.conf").read_text().splitlines():
+            words = line.split()
+            if words and words[0] in ("search", "domain"):
+                names += [f"{host}.{d.rstrip('.')}" for d in words[1:]]
+    if ts := shutil.which("tailscale"):
+        with contextlib.suppress(OSError, ValueError, subprocess.SubprocessError):
+            out = subprocess.run(
+                [ts, "status", "--json"], capture_output=True, text=True, timeout=5
+            ).stdout
+            if dns := json.loads(out).get("Self", {}).get("DNSName", "").rstrip("."):
+                names.append(dns)
+    return [n for n in dict.fromkeys(names) if resolves(n)]
 
 
 def repo_root() -> Path:
@@ -361,6 +392,9 @@ class CliProbe:
             "expected_root": expected_root,
             "expected_etc": EXPECTED_ETC,
             "unreachable": unreachable,
+            "dns_relay": SLIRP_DNS_RELAY,
+            "dns_public_name": DNS_PUBLIC_NAME,
+            "host_only_names": host_only_names(),
             "tls_hosts": TLS_HOSTS,
             "mcp": {"port": upstream.port, "nonce": self.nonce},
         }
@@ -595,6 +629,22 @@ class CliProbe:
             lo.hits == 0 and any_.hits == 0,
             f"127.0.0.1 canary hits {lo.hits}, 0.0.0.0 canary hits {any_.hits}",
         )
+        r = get("dns_relay")
+        host_dns = resolves(DNS_PUBLIC_NAME)  # the host resolver the relay would reach works now
+        rep.add(
+            f"4 slirp's DNS relay {SLIRP_DNS_RELAY} answers nothing",
+            r["ok"] and host_dns,
+            f"{r['detail']} (the host resolves {DNS_PUBLIC_NAME}: {host_dns})",
+        )
+        names = sorted(k for k in results if k.startswith("hostname:"))
+        for key in names:
+            r = results[key]
+            idx = key.split(":", 1)[1]
+            rep.add(f"4 host-only name #{idx} does not resolve inside", r["ok"],
+                    f"{r['detail']} (it resolves on the host)")  # fmt: skip
+        if not names:
+            rep.add("4 host-only names do not resolve inside", False,
+                    "vacuous: no name was found that the host resolves locally")  # fmt: skip
         for h in TLS_HOSTS:
             r = get(f"tls:{h}")
             rep.add(f"5 outbound TLS {h}", r["ok"], r["detail"])

@@ -17,10 +17,11 @@ filter closes that gap. It joins the owning user namespace and the netns, keeps 
 across exec as an ambient capability, runs `nft -f -` there, and reads the table back to check
 it. The jail script runs it while the netns is still offline, and starts nothing if it fails.
 
-The ruleset (OUTPUT hook): loopback accepted (the in-jail forwarder); DNS to slirp's resolver
-10.0.2.3 accepted; every private, shared, link-local, loopback, reserved and multicast IPv4
-range rejected, plus the whole subnet of every host interface (local/prefixlen, so the host's
-neighbours too) and any point-to-point peer; all IPv6 rejected; the rest (public IPv4) accepted.
+The ruleset (OUTPUT hook): loopback accepted (the in-jail forwarder); every private, shared,
+link-local, loopback, reserved and multicast IPv4 range rejected (among them slirp's DNS relay
+10.0.2.3, which would answer from the HOST's resolver: the jail uses public resolvers instead),
+plus the whole subnet of every host interface (local/prefixlen, so the host's neighbours too)
+and any point-to-point peer; all IPv6 rejected; the rest (public IPv4) accepted.
 The host's networks come from `ip -j addr`: if `ip` is missing, fails or times out, the filter
 fails, and so does the jail (fail closed).
 
@@ -43,7 +44,7 @@ import subprocess
 import sys
 
 TABLE = "k2val_egress"
-SLIRP_DNS = "10.0.2.3"
+SLIRP_DNS_RELAY = "10.0.2.3"  # rejected, like the rest of 10.0.0.0/8: never an exception
 NS_GET_USERNS = 0xB701
 CAP_NET_ADMIN = 12
 PR_CAP_AMBIENT = 47
@@ -136,8 +137,6 @@ def ruleset(extra_blocked: list[str] | tuple[str, ...] = ()) -> str:
     chain output {{
         type filter hook output priority 0; policy accept;
         oifname "lo" accept
-        ip daddr {SLIRP_DNS} udp dport 53 accept
-        ip daddr {SLIRP_DNS} tcp dport 53 accept
         ip daddr @blocked_v4 reject
         meta nfproto ipv6 reject
     }}

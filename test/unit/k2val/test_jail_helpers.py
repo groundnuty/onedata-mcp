@@ -266,14 +266,16 @@ async def test_an_idle_connection_is_closed(kind, short_dir) -> None:
 # --- the egress filter ----------------------------------------------------------------------
 
 
-def test_the_ruleset_rejects_every_blocked_range_and_allows_only_slirp_dns() -> None:
+def test_the_ruleset_rejects_every_blocked_range_and_the_dns_relay() -> None:
     rules = netns.ruleset(["93.184.216.0/24"])
     for net in netns.BLOCKED_V4:
         assert net in rules
     assert "93.184.216.0/24" in rules
     chain = rules[rules.index("chain output") :]
     assert chain.index('oifname "lo" accept') < chain.index("ip daddr @blocked_v4 reject")
-    assert chain.index("ip daddr 10.0.2.3 udp dport 53 accept") < chain.index("@blocked_v4")
+    # no exception for slirp's DNS relay (it answers from the host's resolver)
+    assert "10.0.2.3" not in rules and "dport 53" not in rules
+    assert not netns.outside_blocked_ranges([f"{netns.SLIRP_DNS_RELAY}/32"])
     assert "meta nfproto ipv6 reject" in chain
     for must_block in ("169.254.169.254", "100.64.0.1", "10.0.2.2", "172.17.0.1", "192.168.1.1"):
         assert not netns.outside_blocked_ranges([f"{must_block}/32"])  # already blocked

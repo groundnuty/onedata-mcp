@@ -16,7 +16,8 @@
 # /proc of its own PID namespace, and a staged copy of the CLI's binaries at /opt/cli.
 #
 # Network: the jail has its OWN network namespace (bwrap --unshare-net). slirp4netns
-# (--configure --disable-host-loopback) gives it outbound internet; DNS is slirp's 10.0.2.3.
+# (--configure --disable-host-loopback --disable-dns) gives it outbound internet; DNS goes to
+# public resolvers (1.1.1.1, 8.8.8.8), never to slirp's 10.0.2.3 relay to the host's resolver.
 # The host's loopback is not reachable. `netns.py filter` installs an nft filter in the jail's
 # netns, before the network comes up, that rejects every private, link-local (cloud metadata),
 # shared (tailnet), loopback and reserved range and every address of the host itself; the jail
@@ -196,7 +197,9 @@ stage_binaries() {
 write_etc() {
   local uid gid
   uid=$(id -u) gid=$(id -g)
-  printf 'nameserver 10.0.2.3\n' > "$S/etc/resolv.conf"
+  # public resolvers over the NATed egress; never slirp's 10.0.2.3, which relays to the HOST's
+  # resolver and so would answer for local, VPN and tailnet names (the filter drops it too)
+  printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$S/etc/resolv.conf"
   printf '127.0.0.1\tlocalhost\n::1\tlocalhost\n' > "$S/etc/hosts"
   printf 'agent:x:%s:%s:agent:%s:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n' \
     "$uid" "$gid" "$JAIL_HOME" > "$S/etc/passwd"
@@ -300,7 +303,7 @@ REAPER_PID=$!
   || die "no egress filter: the CLI is not started" 3
 
 "$PY" -I "$HERE/netns.py" slirp --pid "$CHILD_PID" -- \
-  "$SLIRP" --configure --mtu=65520 --disable-host-loopback --enable-seccomp \
+  "$SLIRP" --configure --mtu=65520 --disable-host-loopback --disable-dns --enable-seccomp \
   --exit-fd 7 --ready-fd 8 "$CHILD_PID" tap0 \
   7<"$S/ctl/sync" 8>"$S/ctl/slirp-ready" {BLOCK_W}>&- {SYNC_RW}>&- >"$S/ctl/slirp.log" 2>&1 &
 SLIRP_PID=$!

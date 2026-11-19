@@ -17,6 +17,7 @@ import os
 import signal
 import socket
 import ssl
+import struct
 import subprocess
 import sys
 import time
@@ -152,6 +153,37 @@ def check_tls(conf: dict) -> None:
                 emit(f"tls:{host}", True, f"{s.version()} {host}:443, certificate verified")
         except OSError as e:
             emit(f"tls:{host}", False, f"{host}: {type(e).__name__}: {e}")
+
+
+def dns_answers(server: str, name: str, timeout: float = 3.0) -> bool:
+    """Does `server` answer a plain A query for `name` over UDP? (A hand-built query: no
+    resolver library, no search domains.)"""
+    qid = os.getpid() & 0xFFFF
+    qname = b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\0"
+    query = struct.pack(">HHHHHH", qid, 0x0100, 1, 0, 0, 0) + qname + struct.pack(">HH", 1, 1)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(timeout)
+            s.connect((server, 53))
+            s.send(query)
+            return s.recv(512)[:2] == query[:2]
+    except OSError:  # timeout, or refused by the filter
+        return False
+
+
+def check_dns(conf: dict) -> None:
+    relay = conf["dns_relay"]
+    answered = dns_answers(relay, conf["dns_public_name"])
+    emit(
+        "dns_relay", not answered, f"{relay}:53 " + ("ANSWERED" if answered else "answers nothing")
+    )
+    for i, name in enumerate(conf["host_only_names"]):
+        try:
+            socket.getaddrinfo(name, None)
+            resolved = True
+        except OSError:
+            resolved = False
+        emit(f"hostname:{i}", not resolved, "RESOLVED inside" if resolved else "not resolved")
 
 
 def check_mcp(conf: dict) -> None:
@@ -300,6 +332,7 @@ def main() -> int:
     check_isolation()
     check_mcp(conf)
     check_unreachable(conf)
+    check_dns(conf)
     check_tls(conf)
     print(json.dumps({"id": "done", "ok": True, "detail": ""}), flush=True)
     return 0
