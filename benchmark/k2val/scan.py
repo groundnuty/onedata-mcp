@@ -81,16 +81,30 @@ class ScanResult:
         return sum(c["tokens"] + c["patterns"] for c in self.categories.values())
 
 
+_TERM_CHARS = r"A-Za-z0-9_.\-"
+
+
+def _whole_term(token: str) -> re.Pattern[str]:
+    """`token` as a whole term, case-insensitive. A token holding any other character (a
+    space, `=`, `/`...) matches only as an entire line, as in the study-token check."""
+    t = token.strip()
+    if re.search(rf"[^{_TERM_CHARS}]", t):
+        return re.compile(rf"^\s*{re.escape(t)}\s*$", re.IGNORECASE | re.MULTILINE)
+    return re.compile(rf"(?<![{_TERM_CHARS}]){re.escape(t)}(?![{_TERM_CHARS}])", re.IGNORECASE)
+
+
 def scan_texts(
     sources: dict[str, str], tokens: list[str], patterns: list[re.Pattern[str]]
 ) -> ScanResult:
     """Counts of token and pattern matches per category. Returns no matched text."""
     result = ScanResult()
-    lowered_tokens = [t.lower() for t in tokens]
+    # A token matches as a whole term: not inside a longer run of letters, digits, `_`,
+    # `.` or `-` (the convention of the study-token check this mirrors). Fixed strings that
+    # must match anywhere belong in the patterns file, regex-escaped.
+    token_res = [_whole_term(t) for t in tokens if t.strip()]
     for category, text in sources.items():
-        low = text.lower()
         result.categories[category] = {
-            "tokens": sum(low.count(t) for t in lowered_tokens),
+            "tokens": sum(len(r.findall(text)) for r in token_res),
             "patterns": sum(len(p.findall(text)) for p in patterns),
         }
     return result

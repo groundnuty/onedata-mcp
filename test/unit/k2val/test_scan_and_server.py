@@ -241,3 +241,20 @@ def test_the_server_binds_loopback_only() -> None:
     src = Path(mod.__file__).read_text()
     assert 'HOST = "127.0.0.1"' in src
     assert re.search(r'MCP_HOST"\] = HOST', src)
+
+
+def test_tokens_match_whole_terms_only() -> None:
+    from benchmark.k2val.scan import scan_texts
+
+    sources = {"a": "the PPAM panel; vistula-dc; dcx; a.dc; DC here"}
+    counts = scan_texts(sources, ["ppam", "dc"], []).categories["a"]
+    # "ppam" matches once; "dc" only as the free-standing "DC", never inside
+    # "vistula-dc", "dcx" or "a.dc"
+    assert counts["tokens"] == 2
+
+
+def test_a_token_with_other_characters_matches_only_as_a_whole_line() -> None:
+    from benchmark.k2val.scan import scan_texts
+
+    sources = {"a": "examples: country=PL, geo=EU\ncountry=PL\n"}
+    assert scan_texts(sources, ["country=PL"], []).categories["a"]["tokens"] == 1
