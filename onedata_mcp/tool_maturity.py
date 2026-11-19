@@ -33,7 +33,7 @@ import os
 
 logger = logging.getLogger(__name__)
 
-# --- classification (all 27 registered tools; verified against fork 85b8515) ---
+# --- classification (all 29 registered tools; 27 verified against fork 85b8515) ---
 
 # maturity == "stable": panel-validated (the HEADLINE-16).
 STABLE: frozenset[str] = frozenset(
@@ -64,6 +64,9 @@ EXPERIMENTAL: frozenset[str] = frozenset(
         "create_directory",
         "remove_qos_requirement",
         "schedule_file_replication",
+        # ours, the readiness tools (design/07-readiness-tools.md)
+        "check_readiness",
+        "ensure_readiness",
         # inherited from the M0rgho upstream fork, never panel-swept (the
         # genuine distrust set)
         "get_file_attributes",

@@ -22,7 +22,6 @@ from __future__ import annotations
 
 from benchmark.oracles._helpers import extract_int, extract_kv_lines
 
-
 # ---------------------------------------------------------------------------
 # extract_int — case-insensitive (bug 1)
 # ---------------------------------------------------------------------------
