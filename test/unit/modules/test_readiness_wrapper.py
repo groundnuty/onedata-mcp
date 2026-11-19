@@ -18,7 +18,6 @@ from onedata_mcp.api import readiness as api
 from onedata_mcp.modules import readiness as module
 
 PROVIDER = "https://provider.example/api/v3/oneprovider"
-ZONE = "https://onezone.example/api/v3/onezone"
 
 
 @pytest.fixture(autouse=True)
@@ -159,10 +158,14 @@ def _mock_one_ready_file(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(
         method="GET",
         url=f"{PROVIDER}/spaces",
-        json=[{"name": "my-dataset", "spaceId": "s1"}],
-    )
-    httpx_mock.add_response(
-        method="GET", url=f"{ZONE}/spaces/s1", json={"name": "my-dataset", "spaceId": "s1"}
+        json=[
+            {
+                "name": "my-dataset",
+                "spaceId": "s1",
+                "providers": [{"providerId": "pLocal", "providerName": "local"}],
+                "fileId": "root1",
+            }
+        ],
     )
     httpx_mock.add_response(
         method="POST", url=f"{PROVIDER}/lookup-file-id/%2Fmy-dataset", json={"fileId": "root1"}
