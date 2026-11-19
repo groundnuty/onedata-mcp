@@ -46,7 +46,6 @@ from onedata_mcp.api.files import (
     list_files_recursively,
 )
 from onedata_mcp.api.qos import add_qos_requirement, get_qos_requirement
-from onedata_mcp.api.spaces import resolve_space_id_or_name
 from onedata_mcp.api.transfers import get_transfer, list_space_transfers
 from onedata_mcp.config import get_oneprovider_config, get_onezone_config
 from onedata_mcp.utils import OnedataApiError, OnedataError, OnedataInvalidSpaceError, request
@@ -512,6 +511,7 @@ class _Run:
         self.deadline = deadline
         self._rest = asyncio.Semaphore(CHECK_CONCURRENCY)
         self._space_ids: dict[str, str] = {}
+        self._spaces: list[dict[str, Any]] | None = None
         self._online: dict[str, asyncio.Future[bool]] = {}
         self._transfers: dict[str, asyncio.Future[list[_Transfer] | None]] = {}
 
@@ -539,8 +539,29 @@ class _Run:
 
     async def space_id(self, space: str) -> str:
         if space not in self._space_ids:
-            self._space_ids[space] = await self.within(resolve_space_id_or_name(space))
+            self._space_ids[space] = await self.within(self._space_id_from_provider(space))
         return self._space_ids[space]
+
+    async def _space_id_from_provider(self, space: str) -> str:
+        """A space's id from the local provider's own `GET /spaces`, matched by name or id.
+
+        One provider call per tool call and no Onezone lookup, so a token valid only at the
+        local provider resolves names too (the existing resolver also reads each space's
+        details from Onezone).
+        """
+        if self._spaces is None:
+            response = await self.call(request, get_oneprovider_config(), "GET", "/spaces")
+            body = response["body"]
+            if not isinstance(body, list):
+                raise ValueError("the provider's list of spaces has an unexpected shape")
+            self._spaces = [entry for entry in body if isinstance(entry, dict)]
+        for entry in self._spaces:
+            if entry.get("name") == space or entry.get("spaceId") == space:
+                space_id = entry.get("spaceId")
+                if isinstance(space_id, str) and space_id:
+                    return space_id
+        names = sorted(e["name"] for e in self._spaces if isinstance(e.get("name"), str))
+        raise ValueError(f"Space {space!r} not found. Available names: {names}")
 
     async def provider_online(self, provider_id: str) -> bool:
         """Onezone's `online` for a provider, looked up once per call.
@@ -801,7 +822,13 @@ async def _list_dataset(run: _Run, item: _Item) -> _Listing:
         elif paths is not None:
             incomplete = True
         next_token = page.get("nextPageToken")
-        if page.get("isLast") is True:
+        is_last = page.get("isLast")
+        # Onedata 25.0 (measured live) omits `isLast` and ends with `nextPageToken: null`;
+        # the swagger also documents `isLast`. Either marks the last page; `isLast: false`
+        # with no usable token stays incomplete below.
+        if is_last is True or (
+            "isLast" not in page and "nextPageToken" in page and next_token is None
+        ):
             break
         if not isinstance(next_token, str) or not next_token or next_token == token:
             incomplete = True  # not the last page, and no way to ask for the next one

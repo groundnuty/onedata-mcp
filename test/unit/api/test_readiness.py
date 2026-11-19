@@ -97,6 +97,22 @@ class Fed:
         self.online = {OWNER: True, OTHER: True}
         self.failed: set[str] = set()  # providers whose distribution entry fails
         self.zone_providers_fail = False
+        self.zone_status: int | None = None  # every Onezone request answers this status
+        # the provider's own `GET /spaces` (Onedata 25.0 shape: name, spaceId, providers, ...)
+        self.spaces: list[dict] = [
+            {
+                "name": SPACE,
+                "spaceId": SPACE_ID,
+                "providers": [
+                    {"providerId": LOCAL, "providerName": "local"},
+                    {"providerId": OWNER, "providerName": "owner"},
+                ],
+                "fileId": "root-file-id",
+                "dirId": "root-file-id",
+                "trashDirId": "trash-file-id",
+                "archivesDirId": "archives-file-id",
+            }
+        ]
         self.transfers: dict[str, dict] = {}
         self.rules: dict[str, dict] = {}
         self.qos_status: Callable[[str, str], int] = lambda fid, expression: 201
@@ -169,12 +185,11 @@ class Fed:
 
         if url.startswith(ZONE + "/"):
             rest = url[len(ZONE) :]
+            if self.zone_status is not None:
+                return "zone_any", lambda: _error(self.zone_status, "unauthorized")
             if m := re.fullmatch(r"/providers/([^/?]+)", rest):
                 return "zone_provider", lambda: self._zone_provider(m.group(1))
-            if m := re.fullmatch(r"/spaces/([^/?]+)", rest):
-                return "zone_space", lambda: httpx.Response(
-                    200, json={"name": SPACE, "spaceId": m.group(1)}
-                )
+            # Onezone has nothing else to tell: spaces come from the provider's own list
         elif url.startswith(PROVIDER + "/"):
             rest = url[len(PROVIDER) :]
             path = request.url.path[len("/api/v3/oneprovider") :]
@@ -183,9 +198,7 @@ class Fed:
                     200, json={"providerId": LOCAL, "name": "local", "version": "25.0.0"}
                 )
             if method == "GET" and path == "/spaces":
-                return "spaces", lambda: httpx.Response(
-                    200, json=[{"name": SPACE, "spaceId": SPACE_ID}]
-                )
+                return "spaces", lambda: httpx.Response(200, json=self.spaces)
             if method == "POST" and path.startswith("/lookup-file-id/"):
                 return "lookup", lambda: self._lookup(unquote(path[len("/lookup-file-id/") :]))
             if m := re.fullmatch(r"/data/([^/]+)/files", path):
@@ -842,6 +855,96 @@ async def test_check_a_failing_onezone_lookup_counts_as_online(fed: Fed) -> None
 
     # BEST EFFORT: the tool still answers, and takes the owner for online
     assert list((await check())["not_ready"]) == ["at_other_site"]
+
+
+def onezone_requests(fed: Fed) -> list[str]:
+    return [p for _, p in fed.requests if p.startswith("/api/v3/onezone/")]
+
+
+@pytest.mark.asyncio
+async def test_check_resolving_a_dataset_name_makes_no_onezone_request(fed: Fed) -> None:
+    """The space comes from the provider's own list: a token valid only there is enough."""
+    fed.add("a.nc", 100, local="full", owner="full")
+
+    result = await check()
+
+    assert result["ready"] is True
+    assert onezone_requests(fed) == []
+    assert fed.unexpected == []  # nothing asked Onezone for a space's details
+
+
+@pytest.mark.asyncio
+async def test_ensure_resolving_a_dataset_name_makes_no_onezone_request(fed: Fed) -> None:
+    fed.add("a.nc", 100, local="full", owner="full")
+
+    result = await ensure()
+
+    assert result["ready"] is True
+    assert onezone_requests(fed) == []
+
+
+@pytest.mark.asyncio
+async def test_check_reads_the_provider_list_of_spaces_once_per_call(fed: Fed) -> None:
+    fed.add("sub/a.nc", 100, local="full", owner="full")
+
+    result = await readiness.check_readiness(
+        [{"dataset": SPACE}, {"dataset": f"/{SPACE}/sub"}, {"dataset": f"{SPACE}/sub"}]
+    )
+
+    assert result["ready"] is True
+    assert sum(p == "/api/v3/oneprovider/spaces" for _, p in fed.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_space_is_matched_by_name_or_by_id(fed: Fed) -> None:
+    fed.spaces.append({"name": "archive", "spaceId": "sp-archive-id", "providers": []})
+    run = readiness._Run(LOCAL, readiness._monotonic() + 60)
+
+    assert await run.space_id("archive") == "sp-archive-id"
+    assert await run.space_id("sp-archive-id") == "sp-archive-id"
+    assert await run.space_id(SPACE) == SPACE_ID
+    with pytest.raises(ValueError, match=r"Space 'nope' not found. Available names: \['archive'"):
+        await run.space_id("nope")
+
+
+@pytest.mark.asyncio
+async def test_check_a_provider_list_of_spaces_in_an_unexpected_shape_does_not_crash(
+    fed: Fed,
+) -> None:
+    fed.spaces = {"error": {"id": "forbidden"}}  # type: ignore[assignment]
+
+    result = await check()
+
+    assert result["ready"] is False
+    assert result["files"] == 0
+    assert len(result["unresolved"]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("onezone", ["answers-401", "not-configured"])
+async def test_check_and_ensure_are_not_failed_by_a_onezone_that_refuses_the_token(
+    fed: Fed, monkeypatch: pytest.MonkeyPatch, onezone: str
+) -> None:
+    """A token valid only at the local provider: Onezone answers 401, or is not even set up.
+    The owner's online state is the only thing asked of it, and it is best effort."""
+    if onezone == "answers-401":
+        fed.zone_status = 401
+    else:
+        monkeypatch.delenv("ONEDATA_ONEZONE_HOST")
+        monkeypatch.delenv("ONEDATA_ONEZONE_TOKEN")
+    fed.add("a.nc", 100, owner="full")  # not here yet: classifying it asks Onezone about the owner
+    fed.add("b.nc", 100, local="full", owner="full")
+
+    checked = await check()
+    ensured = await ensure(deadline_s=10)
+
+    assert list(checked["not_ready"]) == [
+        "at_other_site"
+    ]  # no exception; the owner taken as online
+    assert checked["files"] == 2
+    assert ensured["ready"] is False
+    assert ensured["held"]["files"] == 2
+    assert "unchecked" not in ensured
 
 
 @pytest.mark.asyncio
@@ -2037,6 +2140,24 @@ async def test_check_a_listing_that_cannot_be_continued_is_incomplete(fed: Fed, 
 
     assert result["ready"] is False
     assert listing_incomplete() in result["unresolved"]
+
+
+@pytest.mark.asyncio
+async def test_check_the_onedata_25_last_page_shape_is_complete(fed: Fed) -> None:
+    """Onedata 25.0 (measured live) omits `isLast` and ends with `nextPageToken: null`."""
+    fed.add("a.nc", 100, local="full", owner="full")
+    patch_listing(
+        fed,
+        lambda page: {
+            **{k: v for k, v in page.items() if k != "isLast"},
+            "nextPageToken": None,
+        },
+    )
+
+    result = await check()
+
+    assert result["ready"] is True
+    assert not result.get("unresolved")
 
 
 @pytest.mark.asyncio
