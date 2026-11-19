@@ -2143,6 +2143,24 @@ async def test_check_a_listing_that_cannot_be_continued_is_incomplete(fed: Fed, 
 
 
 @pytest.mark.asyncio
+async def test_check_the_onedata_25_last_page_shape_is_complete(fed: Fed) -> None:
+    """Onedata 25.0 (measured live) omits `isLast` and ends with `nextPageToken: null`."""
+    fed.add("a.nc", 100, local="full", owner="full")
+    patch_listing(
+        fed,
+        lambda page: {
+            **{k: v for k, v in page.items() if k != "isLast"},
+            "nextPageToken": None,
+        },
+    )
+
+    result = await check()
+
+    assert result["ready"] is True
+    assert not result.get("unresolved")
+
+
+@pytest.mark.asyncio
 async def test_check_a_regular_entry_without_a_file_id_makes_the_listing_incomplete(
     fed: Fed,
 ) -> None:

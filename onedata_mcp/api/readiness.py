@@ -822,7 +822,13 @@ async def _list_dataset(run: _Run, item: _Item) -> _Listing:
         elif paths is not None:
             incomplete = True
         next_token = page.get("nextPageToken")
-        if page.get("isLast") is True:
+        is_last = page.get("isLast")
+        # Onedata 25.0 (measured live) omits `isLast` and ends with `nextPageToken: null`;
+        # the swagger also documents `isLast`. Either marks the last page; `isLast: false`
+        # with no usable token stays incomplete below.
+        if is_last is True or (
+            "isLast" not in page and "nextPageToken" in page and next_token is None
+        ):
             break
         if not isinstance(next_token, str) or not next_token or next_token == token:
             incomplete = True  # not the last page, and no way to ask for the next one
