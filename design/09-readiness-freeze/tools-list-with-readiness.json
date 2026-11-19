@@ -1,0 +1,465 @@
+[
+  {
+    "annotations": {
+      "destructiveHint": true
+    },
+    "description": "Add a new QoS requirement; returns the requirement ID immediately.\n\nReplication is asynchronous: poll get_file_qos_summary or\nlist_space_transfers to observe materialisation.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "expression": {
+          "description": "Onedata QoS expression. Operands depend on what attributes the federation operator has assigned to storages. Two ALWAYS-SAFE implicit operands: 'providerId=<id>' and 'storageId=<id>'. Admin-set string attributes (e.g. country=PL, type=ssd, geo=EU) ONLY work if a federation admin has tagged the storages \u2014 use list_space_providers to see which providers support the space, and check the specific federation's docs for any admin-attributed tags. Operators: '&' (AND), '|' (OR), '\\\\' (exclusion). USE SINGLE EQUALS '=' (NOT '=='). Avoid 'cloud=...', 'region=...', 'zone=...' unless verified \u2014 these are common-but-fictional operand names.",
+          "type": "string"
+        },
+        "file_id_or_path": {
+          "description": "File id or path of the file or directory to attach the requirement to",
+          "type": "string"
+        },
+        "replicas_num": {
+          "default": 1,
+          "description": "Target replica count (>= 1). The system will replicate the file until this many copies satisfy the expression.",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "file_id_or_path",
+        "expression"
+      ],
+      "type": "object"
+    },
+    "name": "add_file_qos_requirement"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Check whether the data your analysis needs are ready to read at your provider: complete there, with all writes finished. Describe the data as `extent`: for each dataset (a space name such as 'my-dataset'), optionally the files or date ranges you need; dates are read from the YYYYMMDD in each file name. The answer is ready, or not ready and why: being_written (the owner is still writing them, so their bytes are incomplete), at_other_site (complete at another provider, not yet at yours), in_transfer (on their way to your provider), or unreachable (only at a provider that is down). Read-only.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "extent": {
+          "description": "The data you need: one item per dataset",
+          "items": {
+            "properties": {
+              "dataset": {
+                "description": "A space name such as 'my-dataset', or an absolute directory path inside a space such as '/my-dataset/sub/dir'",
+                "type": "string"
+              },
+              "date_ranges": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "properties": {
+                        "end": {
+                          "description": "Last day, inclusive, as YYYY-MM-DD",
+                          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                          "type": "string"
+                        },
+                        "start": {
+                          "description": "First day, inclusive, as YYYY-MM-DD",
+                          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "start",
+                        "end"
+                      ],
+                      "type": "object"
+                    },
+                    "maxItems": 400,
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Inclusive day ranges. They select the files whose name carries a YYYYMMDD date inside any range"
+              },
+              "files": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 20000,
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "File names or absolute paths inside the dataset. With neither files nor date_ranges, the whole dataset is meant"
+              }
+            },
+            "required": [
+              "dataset"
+            ],
+            "type": "object"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "extent"
+      ],
+      "type": "object"
+    },
+    "name": "check_readiness"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false
+    },
+    "description": "Make the data your analysis needs ready at your provider, and keep them there for your run. Takes the same `extent` as check_readiness, plus `deadline_s`, how long you can wait. The system chooses where to copy from and waits for unfinished writes and transfers. The answer is ready (the data are complete and readable at your provider now, and held there), or not ready with the reason. One call waits at most about 4 minutes; if the answer is not ready because data are being written or in transfer, call it again.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "deadline_s": {
+          "description": "How many seconds in total you are willing to wait",
+          "maximum": 86400,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "extent": {
+          "description": "The data you need: one item per dataset",
+          "items": {
+            "properties": {
+              "dataset": {
+                "description": "A space name such as 'my-dataset', or an absolute directory path inside a space such as '/my-dataset/sub/dir'",
+                "type": "string"
+              },
+              "date_ranges": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "properties": {
+                        "end": {
+                          "description": "Last day, inclusive, as YYYY-MM-DD",
+                          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                          "type": "string"
+                        },
+                        "start": {
+                          "description": "First day, inclusive, as YYYY-MM-DD",
+                          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "start",
+                        "end"
+                      ],
+                      "type": "object"
+                    },
+                    "maxItems": 400,
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Inclusive day ranges. They select the files whose name carries a YYYYMMDD date inside any range"
+              },
+              "files": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 20000,
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "File names or absolute paths inside the dataset. With neither files nor date_ranges, the whole dataset is meant"
+              }
+            },
+            "required": [
+              "dataset"
+            ],
+            "type": "object"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "extent",
+        "deadline_s"
+      ],
+      "type": "object"
+    },
+    "name": "ensure_readiness"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Get attributes for a file id or a logical path.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "attributes": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "\n            (Optional) List of attribute names to request from Oneprovider. \n            Allowed values:\n            - Identity/location: fileId, parentFileId, index, name, conflictingName, path, type\n            - Permissions/access: activePermissionsType, posixPermissions, acl\n            - Ownership/provider/shares: ownerUserId, originProviderId, directShareIds\n            - Links: hardlinkCount, symlinkValue\n            - Display ids: displayUid, displayGid\n            - Timestamps/size: creationTime, atime, mtime, ctime, size\n            - Replication: isFullyReplicatedLocally, localReplicationRate\n            - Metadata: hasCustomMetadata, hasJsonMetadata, jsonMetadata, xattr.*\n            "
+        },
+        "file_id_or_path": {
+          "description": "File id or path to the file in format /<space_name>/<path_to_file>",
+          "type": "string"
+        }
+      },
+      "required": [
+        "file_id_or_path"
+      ],
+      "type": "object"
+    },
+    "name": "get_file_attributes"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Return per-provider, per-storage-backend block distribution.\n\nFor each provider supporting the file's space, reports which blocks\nare physically held (the steady state is partial replication).\nSymbolic links are not supported (server returns 400). For\ndirectories, returns aggregate distribution.\n\n## Provider-name enrichment\n\nThe Oneprovider REST returns the distribution keyed by\nproviderId hex strings only. This wrapper adds a\n`providerName` field on each provider entry, so callers don't\nhave to chain a secondary lookup.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "file_id_or_path": {
+          "description": "File id or path to the file in format /<space_name>/<path_to_file>",
+          "type": "string"
+        }
+      },
+      "required": [
+        "file_id_or_path"
+      ],
+      "type": "object"
+    },
+    "name": "get_file_distribution"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Get metadata for a given file id or path by metadata types.\n\nFor many metadata values from a single request, use\nget_file_attributes with metadata-related attributes.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "file_id_or_path": {
+          "description": "File id or path to the file in format /<space_name>/<path_to_file>",
+          "type": "string"
+        },
+        "metadata_types": {
+          "default": [
+            "json",
+            "rdf",
+            "xattrs"
+          ],
+          "description": "List of metadata types to get",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "file_id_or_path"
+      ],
+      "type": "object"
+    },
+    "name": "get_file_metadata"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Return the effective QoS summary for a file or directory.\n\nIncludes inherited requirements (from ancestor directories) and\nper-requirement status. Status: 'pending', 'fulfilled', 'impossible'.\n\n## Per-rule detail enrichment\n\nThe Oneprovider REST returns `requirements` as a flat\n`{qosId: status}` mapping. To answer common questions like\n\"which files require only 1 replica?\" the agent would need\nto follow up with a `get_qos_requirement` call per rule. This\nwrapper fetches each rule's detail in parallel and embeds it\ninline, so the response shape becomes:\n\n    {\n      \"status\": \"fulfilled\",\n      \"requirements\": {\n        \"<qosId>\": {\n          \"status\": \"fulfilled\",\n          \"expression\": \"providerId=...\",\n          \"replicas_num\": 2,\n          ...\n        },\n        ...\n      }\n    }\n\nThe original\nflat shape is preserved as `requirements_flat` for callers that\ndepend on it.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "file_id_or_path": {
+          "description": "File id or path to the file in format /<space_name>/<path_to_file>",
+          "type": "string"
+        }
+      },
+      "required": [
+        "file_id_or_path"
+      ],
+      "type": "object"
+    },
+    "name": "get_file_qos_summary"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Get detail for a single QoS requirement by its id.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "qos_id": {
+          "description": "QoS requirement id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "qos_id"
+      ],
+      "type": "object"
+    },
+    "name": "get_qos_requirement"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Get detail for a single transfer by id.\n\nIncludes type (replication / eviction / migration), the\ndestination provider id (`replicatingProviderId`), file path, byte\ncounts, and timing. The providers the data came from appear only\nas the keys of the per-provider byte histograms (`minHist`,\n`hrHist`, `dyHist`, `mthHist`).",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "transfer_id": {
+          "description": "Transfer id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "transfer_id"
+      ],
+      "type": "object"
+    },
+    "name": "get_transfer"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "List providers supporting a space, queried from Oneprovider.\n\n`space_id` accepts either the hex spaceId or the space name; an\ninternal lookup resolves names.\n\nReturns the canonical (providerId, providerName) pairs as the\noneprovider sees them.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "space_id": {
+          "description": "Space id OR human-readable name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "space_id"
+      ],
+      "type": "object"
+    },
+    "name": "list_space_providers"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "List transfer ids in a space.\n\n`space_id` accepts either the hex spaceId or the space name; an\ninternal lookup resolves names.\n\nThe response contains transfer ids only; for source / destination /\nbytes / state detail, follow up with get_transfer per id.\n\nNote: requires the `space_view_transfers` privilege on the calling token.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "default": 100,
+          "description": "Maximum number of transfer ids to return (1..1000)",
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "page_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Pagination token from a previous response's nextPageToken"
+        },
+        "space_id": {
+          "description": "Space id OR human-readable name",
+          "type": "string"
+        },
+        "state": {
+          "default": "ongoing",
+          "description": "Transfer state filter. Defaults to 'ongoing'.",
+          "enum": [
+            "waiting",
+            "ongoing",
+            "ended"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "space_id"
+      ],
+      "type": "object"
+    },
+    "name": "list_space_transfers"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true
+    },
+    "description": "Remove a QoS requirement by id. Does not roll back already-replicated data.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "qos_id": {
+          "description": "QoS requirement id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "qos_id"
+      ],
+      "type": "object"
+    },
+    "name": "remove_qos_requirement"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true
+    },
+    "description": "Schedule a replication transfer of a file to a target provider.\n\nCopies the file's data to `target_provider_id` and returns the\nscheduled transfer's id; poll it with `get_transfer`, or watch the\nspace transfer log with `list_space_transfers`. Replication only \u2014\ndoes not evict or migrate.\n\nThe target provider must support the file's space; if it does not, the\ncall fails with a structured error explaining why the placement cannot\nbe scheduled.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "file_id_or_path": {
+          "description": "File id or path in format /<space_name>/<path_to_file>",
+          "type": "string"
+        },
+        "target_provider_id": {
+          "description": "Provider id to replicate the file TO (data is copied to this provider)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "file_id_or_path",
+        "target_provider_id"
+      ],
+      "type": "object"
+    },
+    "name": "schedule_file_replication"
+  }
+]
