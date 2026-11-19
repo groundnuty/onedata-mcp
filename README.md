@@ -75,7 +75,7 @@ uv sync
 
 ## Environment variables
 
-Configuration is loaded from the process environment. [python-dotenv](https://pypi.org/project/python-dotenv/) is used so a `.env` file in the **current working directory** is picked up when the server starts.
+Configuration is loaded from the process environment. [python-dotenv](https://pypi.org/project/python-dotenv/) is used so a `.env` file is picked up when the server starts: the first one found from the directory of the installed `onedata_mcp` package upward to `/` (a checkout's own root `.env`), never overriding a variable already set. Set `ONEDATA_MCP_DOTENV=0` in the process environment to read no `.env` at all (see `USAGE.md`).
 
 1. Copy the example file and edit values:
 

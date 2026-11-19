@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import logging
+import re
+import ssl
 import time
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -26,12 +30,35 @@ def is_valid_url(url: str) -> bool:
 logger = logging.getLogger(__name__)
 
 
+# An Onedata error id or errno is a plain identifier (`posix`, `enoent`, `badValueFileId`).
+# Anything else (a URL, a host name) in those fields is not one, and is never
+# passed on: both go into trace attributes and into the invalid-space check.
+_IDENTIFIER_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}")
+
+
+def _identifier_or_none(value: Any) -> str | None:
+    if isinstance(value, str) and _IDENTIFIER_RE.fullmatch(value):
+        return value
+    return None
+
+
 class OnedataError(RuntimeError):
     """Base class for Onedata-related errors."""
 
-    def __init__(self, message: str, response: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        response: dict[str, Any] | None = None,
+        *,
+        kind: str | None = None,
+        service: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.response = response
+        # Set on a transport failure: the stable error kind (see
+        # `transport_error_kind`) and the declared name of the service.
+        self.kind = kind
+        self.service = service
 
     @property
     def body(self) -> dict[str, Any]:
@@ -48,16 +75,14 @@ class OnedataError(RuntimeError):
         details = error.get("details")
         if not isinstance(details, dict):
             return None
-        errno = details.get("errno")
-        return errno if isinstance(errno, str) else None
+        return _identifier_or_none(details.get("errno"))
 
     @property
     def error_id(self) -> str | None:
         error = self.body.get("error")
         if not isinstance(error, dict):
             return None
-        error_id = error.get("id")
-        return error_id if isinstance(error_id, str) else None
+        return _identifier_or_none(error.get("id"))
 
 
 class OnedataPathNotFoundError(OnedataError):
@@ -83,6 +108,246 @@ def _format_body_for_log(body: Any) -> str:
         return repr(body)
 
 
+# ---------------------------------------------------------------------------
+# Host-free errors
+#
+# FastMCP puts `str(exc)` into a tool's answer, and OpenTelemetry records an
+# exception's text and stack trace (cause chain included) on the span it passes
+# through. A transport exception's text names the node it could not reach
+# (`HTTPSConnectionPool(host=<FQDN>, port=8443)`, a certificate's host name, a
+# URL), so no raw transport text may travel in an exception raised to a tool.
+# The answer carries a stable kind and the declared service name instead; the
+# original text goes only to this server's own DEBUG log.
+# ---------------------------------------------------------------------------
+
+
+def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
+    """The exception and everything it was raised from or while handling."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        if current.__cause__ is not None:
+            current = current.__cause__
+        elif not current.__suppress_context__:
+            current = current.__context__
+        else:
+            current = None
+
+
+def transport_error_kind(exc: BaseException) -> str:
+    """Classify an exception raised while calling a service, by type and never by text.
+
+    One of `timeout`, `tls_error`, `http_<status>`, `connection_error`, or
+    `request_error` for anything else. httpx wraps the `ssl` error of a failed
+    handshake in a `ConnectError`, so the whole cause chain is read, with a
+    timeout taking precedence over a TLS failure over a plain connection error.
+    """
+    chain = list(_exception_chain(exc))
+    if any(isinstance(e, httpx.TimeoutException | TimeoutError) for e in chain):
+        return "timeout"
+    if any(isinstance(e, ssl.SSLError) for e in chain):
+        return "tls_error"
+    for e in chain:
+        if isinstance(e, httpx.HTTPStatusError):
+            return f"http_{e.response.status_code}"
+    if any(isinstance(e, httpx.TransportError | OSError) for e in chain):
+        return "connection_error"
+    return "request_error"
+
+
+def transport_failure(
+    exc: BaseException,
+    config: OnedataConfig,
+    method: str,
+    path: str,
+    *,
+    label: str = "Onedata API request failed",
+) -> OnedataApiError:
+    """The host-free error to raise (`from None`) in place of a transport exception.
+
+    The message holds the request's method and relative path, the error kind and
+    the declared service name: no URL, address, port or library text. The
+    original exception's full text is logged at DEBUG, on this server's own
+    log, which no tool answer or span carries.
+    """
+    kind = transport_error_kind(exc)
+    logger.debug(
+        "Onedata transport failure (%s, service %s): %s %s: %s",
+        kind,
+        config.service,
+        method,
+        path,
+        exc,
+        exc_info=exc,
+    )
+    return OnedataApiError(
+        f"{label}: {method} {path} - {kind} (service: {config.service})",
+        response=None,
+        kind=kind,
+        service=config.service,
+    )
+
+
+# What the structured JSON body of a non-2xx answer may not show. Onedata's own error
+# ids and descriptions reach the agent unchanged, except for exactly three things, all
+# of which apply ONLY when the deploy gives a node list (ONEDATA_MCP_NODE_NAMES, the
+# fallback mode for a federation whose real names must stay hidden):
+#   1. a node the list names (its host name or address, with a port that follows it) is
+#      replaced by its DECLARED name, so the text an agent sees is the same on every
+#      deployment of the same layout;
+#   2. a URL is masked;
+#   3. a `host=` or `port=` pair is masked.
+# Anything else, a dotted file name included, passes untouched. Both masks run after
+# the replacement, so a URL or a pair naming a known node reads `<address>`.
+# With no list (unset, empty or `{}`, as on Compose, where the names are already the
+# declared ones) none of the three applies: an Onedata error text reaches the caller
+# byte for byte as Onedata wrote it. Transport errors and non-JSON bodies are this
+# server's own fixed host-free texts and are the same in both modes.
+_MASK = "<address>"
+# A URL starts at a token start; the scan of a hostile `a.a.a. ...` body stays linear.
+# Trailing sentence punctuation stays outside the URL.
+_URL_RE = re.compile(r"(?<![\w.+-])[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>)\]\\]*[^\s'\"<>)\]\\.,;:!?]")
+# `host='x'`, `hostname=x`, `port=8443` (a connection pool's repr).
+_KEYWORD_RE = re.compile(
+    r"\b(?:host|hostname|port)\s*=\s*"
+    r"(?:'[^']*'|\"[^\"]*\"|[^\s,;)\]}'\"]*[^\s,;)\]}'\".:!?])",
+    re.IGNORECASE,
+)
+
+
+@functools.lru_cache(maxsize=8)
+def _node_name_regex(hosts: tuple[str, ...]) -> re.Pattern[str]:
+    """One pattern for the given hosts: the longest first, whole names only.
+
+    A host may be followed by a port, which goes with it (`[v6]:8443` for an IPv6
+    address). `node1` does not match inside `node10` or `node1.other.example`.
+    """
+    ordered = sorted(hosts, key=len, reverse=True)
+    plain = "|".join(re.escape(h) for h in ordered if ":" not in h)
+    bare6 = "|".join(re.escape(h) for h in ordered if ":" in h)
+    every = "|".join(re.escape(h) for h in ordered)
+    named = []
+    if plain:
+        named.append(rf"(?P<plain>{plain})(?::\d{{1,5}})?")
+    named.append(rf"\[(?P<bracket>{every})\](?::\d{{1,5}})?")
+    alternatives = [r"(?<![\w.-])(?:" + "|".join(named) + r")(?![\w-]|\.\w)"]
+    if bare6:
+        # A bare IPv6 address may follow a prose colon (`peer:2001:db8::1`); one that is
+        # followed by `:<hex>` is read as a longer address and left alone.
+        alternatives.append(rf"(?<![\w.-])(?P<bare6>{bare6})(?![\w-]|\.\w|:[0-9A-Fa-f])")
+    return re.compile("|".join(alternatives), re.IGNORECASE)
+
+
+def replace_node_names(text: str, node_names: tuple[tuple[str, str], ...]) -> str:
+    """Replace each known node's name or address in `text` by its declared name."""
+    if not node_names:
+        return text
+    declared = dict(node_names)
+    pattern = _node_name_regex(tuple(declared))
+
+    def _declared_name(match: re.Match[str]) -> str:
+        return declared[match.group(match.lastgroup or "plain").lower()]
+
+    return pattern.sub(_declared_name, text)
+
+
+def redact_endpoints(text: str, config: OnedataConfig) -> str:
+    """Apply the three rules above to a service's error text; every other byte is kept.
+
+    Without a node list (`config.node_names` empty) the text is returned as it is.
+    """
+    if not config.node_names:
+        return text
+    text = replace_node_names(text, config.node_names)
+    text = _URL_RE.sub(_MASK, text)
+    return _KEYWORD_RE.sub(_MASK, text)
+
+
+_JSON_STRING_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
+
+
+def redact_json_text(text: str, config: OnedataConfig) -> str:
+    """`redact_endpoints` applied to each string of serialized JSON, as decoded.
+
+    On the serialized text an escape such as `\\n` or `\\"` would sit against a name
+    and break its boundary (`\\nnode17`, `host=\\"x\\"`). A string no rule touches is
+    kept byte for byte. Without a node list the whole text is kept as it is.
+    """
+    if not config.node_names:
+        return text
+
+    def _one(match: re.Match[str]) -> str:
+        literal = match.group(0)
+        try:
+            decoded = json.loads(literal)
+        except ValueError:  # not JSON (the repr fallback): redact the literal as it is
+            return redact_endpoints(literal, config)
+        redacted = redact_endpoints(decoded, config)
+        return literal if redacted == decoded else json.dumps(redacted)
+
+    return _JSON_STRING_RE.sub(_one, text)
+
+
+def http_failure_message(
+    config: OnedataConfig,
+    method: str,
+    path: str,
+    status: int,
+    body: Any,
+    *,
+    label: str = "Onedata API request failed",
+) -> str:
+    """The message for a non-2xx answer: the status, and the body when it is safe to show.
+
+    A structured (JSON) body is Onedata's own error and reaches the agent unchanged;
+    only when a node list is configured are the three rules at `redact_endpoints`
+    applied to it. Anything else (an HTML page from a gateway, plain text, bytes) is
+    replaced by `http_<status>` and the service name in both modes, because such a
+    page may name the upstream node.
+    """
+    if isinstance(body, dict | list):
+        detail = redact_json_text(_format_body_for_log(body), config)
+    else:
+        detail = f"http_{status} (service: {config.service})"
+    return f"{label}: {method} {path} (status={status}) - {detail}"
+
+
+def decode_response_body(response: httpx.Response) -> Any:
+    """The response's JSON body for a JSON answer, else its text, else its bytes."""
+    try:
+        content_type = response.headers.get("Content-Type", "")
+        if content_type.startswith("application/json"):
+            return response.json()
+        return response.text
+    except ValueError:
+        return response.content
+
+
+async def _send(
+    config: OnedataConfig,
+    method: str,
+    path: str,
+    headers: dict[str, str],
+    params: dict[str, Any] | None,
+    json_body: dict[str, Any] | None,
+    body: bytes | None,
+) -> httpx.Response:
+    async with httpx.AsyncClient(
+        base_url=config.base_url, headers=headers, verify=config.verify_ssl
+    ) as client:
+        if json_body is not None:
+            return await client.request(method, path, params=params, json=json_body)
+        return await client.request(method, path, params=params, content=body)
+
+
+def _mark_span_error(span: Any, description: str) -> None:
+    """Set a REST span's status to ERROR with a host-free description."""
+    if span is not None:
+        span.set_status(telemetry.Status(telemetry.StatusCode.ERROR, description))
+
+
 async def request(
     config: OnedataConfig,
     method: str,
@@ -94,9 +359,7 @@ async def request(
     additional_headers: dict[str, str] | None = None,
 ) -> Any:
     method = method.upper()
-    url = config.base_url
     headers = dict(config.auth_headers)
-    verify = config.verify_ssl
 
     headers.update(additional_headers or {})
 
@@ -110,10 +373,13 @@ async def request(
     else:
         span_cm = contextlib.nullcontext()
 
-    # Built inside the span's lifetime on a non-2xx response, raised after the
+    # Both errors are built inside the span's lifetime and raised after the
     # block. Keeping construction inside the `with` lets us set the REST span's
-    # ERROR status + onedata.* attrs before the span ends (#10).
+    # ERROR status + onedata.* attrs before the span ends (#10), and keeps the
+    # raw transport exception from escaping through the span, which would
+    # record its text (the node's host and port) and stack trace on the trace.
     onedata_error: OnedataApiError | None = None
+    transport_error: OnedataApiError | None = None
     response: httpx.Response | None = None
     t0 = time.perf_counter()
     try:
@@ -122,55 +388,48 @@ async def request(
                 span.set_attribute("http.request.method", method)
                 span.set_attribute("url.path", path)
                 telemetry.inject_traceparent(headers)
-            if json_body is not None:
-                async with httpx.AsyncClient(
-                    base_url=url, headers=headers, verify=verify
-                ) as client:
-                    response = await client.request(method, path, params=params, json=json_body)
-            else:
-                async with httpx.AsyncClient(
-                    base_url=url, headers=headers, verify=verify
-                ) as client:
-                    response = await client.request(method, path, params=params, content=body)
-
             try:
-                content_type = response.headers.get("Content-Type", "")
-                if content_type.startswith("application/json"):
-                    response_body: Any = response.json()
-                else:
-                    response_body = response.text
-            except ValueError:
-                response_body = response.content
-
-            if span is not None:
-                span.set_attribute("http.response.status_code", response.status_code)
-
-            # A non-2xx Onedata response is a REST-level failure: mark the span
-            # ERROR here (not only on network exceptions), so Tempo queries
-            # filtering onedata.rest spans by status.code==ERROR don't undercount.
-            if response.is_error:
-                response_payload = {"status_code": response.status_code, "body": response_body}
-                details = _format_body_for_log(response_body)
-                onedata_error = OnedataApiError(
-                    f"Onedata API request failed: {method} {path} "
-                    f"(status={response.status_code}) - {details}",
-                    response=response_payload,
-                )
+                response = await _send(config, method, path, headers, params, json_body, body)
+            except Exception as exc:
+                transport_error = transport_failure(exc, config, method, path)
                 if span is not None:
-                    if onedata_error.error_id:
-                        span.set_attribute("onedata.error_id", onedata_error.error_id)
-                    if onedata_error.errno:
-                        span.set_attribute("onedata.errno", onedata_error.errno)
-                    span.set_status(
-                        telemetry.Status(
-                            telemetry.StatusCode.ERROR,
-                            f"HTTP {response.status_code}",
-                        )
+                    span.set_attribute("error.type", transport_error.kind or "request_error")
+                _mark_span_error(span, transport_error.kind or "request_error")
+
+            if response is not None:
+                response_body = decode_response_body(response)
+
+                if span is not None:
+                    span.set_attribute("http.response.status_code", response.status_code)
+
+                # A non-2xx Onedata response is a REST-level failure: mark the span
+                # ERROR here (not only on network exceptions), so Tempo queries
+                # filtering onedata.rest spans by status.code==ERROR don't undercount.
+                if response.is_error:
+                    onedata_error = OnedataApiError(
+                        http_failure_message(
+                            config, method, path, response.status_code, response_body
+                        ),
+                        response={"status_code": response.status_code, "body": response_body},
                     )
+                    if span is not None:
+                        if onedata_error.error_id:
+                            span.set_attribute(
+                                "onedata.error_id", redact_endpoints(onedata_error.error_id, config)
+                            )
+                        if onedata_error.errno:
+                            span.set_attribute(
+                                "onedata.errno", redact_endpoints(onedata_error.errno, config)
+                            )
+                    _mark_span_error(span, f"HTTP {response.status_code}")
     except Exception as e:
+        # Anything else that went wrong around the call: still host-free.
         telemetry.record_rest_request(method, "exception", (time.perf_counter() - t0) * 1000.0)
-        err = f"Onedata API request failed: {method} {path} - {e!s}"
-        raise OnedataApiError(err, response=None) from e
+        raise transport_failure(e, config, method, path) from None
+
+    if transport_error is not None:
+        telemetry.record_rest_request(method, "exception", (time.perf_counter() - t0) * 1000.0)
+        raise transport_error from None
 
     # Record REST duration for both success and non-2xx (status class from the
     # response); the network-exception path is recorded above.
