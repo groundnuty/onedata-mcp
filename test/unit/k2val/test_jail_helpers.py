@@ -344,6 +344,7 @@ def test_every_host_resolver_but_the_jails_own_is_blocked(tmp_path, monkeypatch)
     upstream = tmp_path / "upstream.conf"
     upstream.write_text("nameserver 192.0.2.10\nnameserver 8.8.8.8\nnameserver 2001:db8::1\n")
     monkeypatch.setattr(netns.shutil, "which", lambda *a, **k: None)  # no resolvectl
+    monkeypatch.setattr(netns.os.path, "isdir", lambda p: False)  # nor systemd-resolved
     found = netns.host_nameservers((str(stub), str(upstream)))
     assert found == ["127.0.0.53", "192.0.2.10", "8.8.8.8"]  # IPv4 only (all IPv6 is rejected)
     assert netns.resolvers_to_block(found) == ["127.0.0.53/32", "192.0.2.10/32"]
@@ -741,3 +742,27 @@ def test_cli_jail_refuses_a_non_empty_workdir() -> None:
         (Path(w) / "something").write_text("x")
         r = run_jail("--cli", "codex", "--workdir", w, "--", "codex")
         assert r.returncode == 2 and "must be empty" in r.stderr
+
+
+def test_resolver_words_in_every_form_are_read_or_fail_closed() -> None:
+    import pytest
+
+    from benchmark.k2val.jail import netns
+
+    text = "192.0.2.1 198.51.100.2#dns.example 203.0.113.3:53 [2001:db8::1]:853 fe80::1%eth0"
+    assert netns._ipv4s(text) == ["192.0.2.1", "198.51.100.2", "203.0.113.3"]
+    with pytest.raises(RuntimeError):
+        netns._ipv4s("192.0.2.1 not-an-address")
+
+
+def test_systemd_resolved_without_resolvectl_fails_closed(monkeypatch, tmp_path) -> None:
+    import pytest
+
+    from benchmark.k2val.jail import netns
+
+    conf = tmp_path / "resolv.conf"
+    conf.write_text("nameserver 192.0.2.1\n")
+    monkeypatch.setattr(netns.shutil, "which", lambda *a, **k: None)
+    monkeypatch.setattr(netns.os.path, "isdir", lambda p: p == "/run/systemd/resolve")
+    with pytest.raises(RuntimeError, match="resolvectl"):
+        netns.host_nameservers((str(conf),))

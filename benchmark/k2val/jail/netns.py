@@ -34,7 +34,6 @@ Standard library only.
 
 from __future__ import annotations
 
-import contextlib
 import ctypes
 import fcntl
 import ipaddress
@@ -124,12 +123,29 @@ def host_ipv4_networks(text: str | None = None) -> list[str]:
     return sorted(nets)
 
 
+def _resolver_address(word: str) -> str:
+    """The address in one resolver word: `ip`, `ip#server-name` (DNS-over-TLS), `ip:port`,
+    `[ipv6]:port` or `ipv6%iface`. Raises ValueError if it holds no address."""
+    w = word.split("#", 1)[0]
+    if w.startswith("["):
+        w = w[1 : w.index("]")]
+    elif w.count(":") == 1:
+        w = w.split(":", 1)[0]
+    w = w.split("%", 1)[0]
+    return str(ipaddress.ip_address(w))
+
+
 def _ipv4s(text: str) -> list[str]:
+    """The IPv4 resolvers in `text`. IPv6 ones are dropped (all IPv6 is blocked anyway). A word
+    that holds no address fails closed: a resolver this filter cannot read would stay open."""
     out = []
     for word in text.replace(",", " ").split():
-        with contextlib.suppress(ValueError):
-            if ipaddress.ip_address(word).version == 4:
-                out.append(word)
+        try:
+            addr = _resolver_address(word)
+        except ValueError:
+            raise RuntimeError(f"cannot read a resolver address from {word!r}") from None
+        if ipaddress.ip_address(addr).version == 4:
+            out.append(addr)
     return out
 
 
@@ -152,7 +168,11 @@ def host_nameservers(files: tuple[str, ...] = HOST_RESOLV_FILES) -> list[str]:
                 found += _ipv4s(words[1])
     # resolvectl absent: nothing more to read. Present but failing: fail closed, since the
     # per-link resolvers it lists (a VPN's, perhaps at a public address) would be missed.
-    if rc := shutil.which("resolvectl"):
+    rc = shutil.which("resolvectl", path=os.environ.get("PATH", "") + SBIN + ":/usr/bin:/bin")
+    if not rc and os.path.isdir("/run/systemd/resolve"):
+        # systemd-resolved runs, so per-link resolvers exist, but they cannot be listed
+        raise RuntimeError("systemd-resolved is in use but `resolvectl` was not found")
+    if rc:
         try:
             r = subprocess.run([rc, "dns"], capture_output=True, text=True, timeout=5)
         except (OSError, subprocess.SubprocessError) as e:

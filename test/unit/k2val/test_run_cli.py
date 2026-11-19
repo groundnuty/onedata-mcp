@@ -73,7 +73,7 @@ def test_the_app_registers_the_modules_main_registers() -> None:
     """A drift guard: `build_app` copies main's module list instead of importing main (whose
     import has side effects)."""
     main_src = (REPO / "onedata_mcp/main.py").read_text()
-    in_main = tuple(re.findall(r"^\s+(\w+)\.register_module\(mcp\)", main_src, flags=re.M))
+    in_main = tuple(re.findall(r"^\s+(\w+)\.register_module\(mcp\b", main_src, flags=re.M))
     assert in_main == MODULE_NAMES
 
 
