@@ -390,3 +390,47 @@ async def test_list_files_recursively_with_relative_prefix_filters(
     assert len(files) == 1
     # M-6 absolute-path normalization (independent fix, but we ride it):
     assert files[0]["path"] == "/space/d2/datasets/alpha.txt"
+
+
+# ---------------------------------------------------------------------------
+# A relative path with a client that offers no MCP roots gets a clear error
+# (was: "List roots not supported", which says nothing about the path).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["get_file_attributes", "get_file_distribution"])
+async def test_relative_path_without_client_roots_says_how_to_fix(
+    monkeypatch: pytest.MonkeyPatch, files_mcp: FastMCP, tool: str
+) -> None:
+    _set_env(monkeypatch)
+    async with Client(files_mcp) as client:
+        result = await client.call_tool(
+            tool, {"file_id_or_path": "space/a.nc"}, raise_on_error=False
+        )
+    assert result.is_error
+    text = result.content[0].text
+    assert "Paths must start with '/'" in text
+    assert "/<space_name>/<path_to_file>" in text
+    assert "'space/a.nc'" in text
+    assert "List roots not supported" not in text
+
+
+@pytest.mark.asyncio
+async def test_relative_path_with_client_root_still_resolves(
+    monkeypatch: pytest.MonkeyPatch, files_mcp: FastMCP, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="POST", url=_lookup_url("/space/a.nc"), json={"fileId": "0000abcd"}
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=re.compile(r"https://provider\.example/api/v3/oneprovider/data/0000abcd(\?.*)?$"),
+        json={"name": "a.nc", "path": "/space/a.nc", "type": "REG", "size": 3},
+    )
+    async with Client(files_mcp, roots=["file:///space"]) as client:
+        result = await client.call_tool(
+            "get_file_attributes", {"file_id_or_path": "a.nc"}, raise_on_error=False
+        )
+    assert not result.is_error, result.content[0].text
