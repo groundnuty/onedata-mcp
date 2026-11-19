@@ -11,6 +11,10 @@ It runs INSIDE the jail's own network namespace, under the jail's /usr/bin/pytho
 Binding before the fork means the port already listens when the CLI starts. The child dies
 with the CLI (PR_SET_PDEATHSIG), and the jail's PID namespace ends with it anyway.
 
+As in fwd_out.py: a connection is torn down WHOLE on the first EOF or error on either side, at
+most MAX_CONNECTIONS are open at once, and one idle for IDLE_TIMEOUT_S (above a trial's wall cap)
+is closed.
+
 Self-contained, standard library only: this file is copied into the jail's staging directory.
 """
 
@@ -26,6 +30,9 @@ import sys
 
 CHUNK = 65536
 PR_SET_PDEATHSIG = 1
+MAX_CONNECTIONS = 16
+IDLE_TIMEOUT_S = 1500.0
+CLOSE_TIMEOUT_S = 2.0
 USAGE = "usage: fwd_in.py --listen 127.0.0.1:<port> --socket <path> -- <argv...>"
 
 
@@ -44,37 +51,75 @@ def parse_args(argv: list[str]) -> tuple[tuple[str, int], str, list[str]]:
     return (host, int(port)), values["--socket"], command
 
 
-async def pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    try:
-        while data := await reader.read(CHUNK):
-            writer.write(data)
-            await writer.drain()
-        if writer.can_write_eof():
-            writer.write_eof()
-    except (ConnectionError, OSError):
-        pass
+async def _copy(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, seen: list) -> None:
+    """One direction, until EOF or an error (either ends the whole connection)."""
+    loop = asyncio.get_running_loop()
+    while data := await reader.read(CHUNK):
+        seen[0] = loop.time()
+        writer.write(data)
+        await writer.drain()
 
 
-async def relay(a_reader, a_writer, b_reader, b_writer) -> None:
+async def _close(writer: asyncio.StreamWriter) -> None:
+    writer.close()
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(writer.wait_closed(), CLOSE_TIMEOUT_S)
+
+
+async def relay(a, b, idle_timeout: float = IDLE_TIMEOUT_S) -> None:
+    """Both directions of (reader, writer) pairs `a` and `b`. The first EOF or error on either
+    side, or `idle_timeout` with no byte either way, cancels the other direction and closes BOTH
+    sides."""
+    loop = asyncio.get_running_loop()
+    seen = [loop.time()]
+    tasks = [
+        asyncio.create_task(_copy(a[0], b[1], seen)),
+        asyncio.create_task(_copy(b[0], a[1], seen)),
+    ]
     try:
-        await asyncio.gather(pipe(a_reader, b_writer), pipe(b_reader, a_writer))
+        while True:
+            done, _ = await asyncio.wait(
+                tasks, timeout=min(idle_timeout, 1.0), return_when=asyncio.FIRST_COMPLETED
+            )
+            if done or loop.time() - seen[0] >= idle_timeout:
+                break
     finally:
-        for w in (a_writer, b_writer):
-            w.close()
-            with contextlib.suppress(ConnectionError, OSError):
-                await w.wait_closed()
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(_close(a[1]), _close(b[1]))
 
 
-def make_handler(socket_path: str):
-    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        try:
-            up_reader, up_writer = await asyncio.open_unix_connection(socket_path)
-        except OSError:
-            writer.close()
+class Forwarder:
+    """The connection handler: relays each accepted connection to `connect()`'s, at most
+    `max_connections` at once. `active` and `refused` are counts (for the tests)."""
+
+    def __init__(self, connect, max_connections=MAX_CONNECTIONS, idle_timeout=IDLE_TIMEOUT_S):
+        self.connect = connect
+        self.max_connections = max_connections
+        self.idle_timeout = idle_timeout
+        self.active = 0
+        self.refused = 0
+
+    async def __call__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        if self.active >= self.max_connections:
+            self.refused += 1
+            await _close(writer)
             return
-        await relay(reader, writer, up_reader, up_writer)
+        self.active += 1
+        try:
+            try:
+                upstream = await self.connect()
+            except OSError:
+                await _close(writer)
+                return
+            await relay((reader, writer), upstream, self.idle_timeout)
+        finally:
+            self.active -= 1
 
-    return handle
+
+def make_handler(socket_path: str, **kwargs) -> Forwarder:
+    return Forwarder(lambda: asyncio.open_unix_connection(socket_path), **kwargs)
 
 
 async def serve(listener: socket.socket, socket_path: str) -> None:

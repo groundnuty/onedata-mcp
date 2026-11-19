@@ -159,6 +159,10 @@ service on the host's loopback (the Onedata providers, agent channel servers and
      and execs the CLI. The port listens before the CLI starts, and the URL is the same inside and out (the server's
      `Host` check passes).
 
+  Both forwarders tear a connection down whole on the first EOF or error on either side (no half-closed connection
+  waits on the other), keep at most 16 open (more are closed on accept), and close one idle for 1500 s. That is above
+  a trial's 20-minute wall cap on purpose: a tool call may run 300 s silently and an MCP GET stream may idle all trial.
+
 **Start and teardown.**
 - The CLI starts only once the filter, slirp and the forwarder are up. bwrap waits on `--block-fd` for one byte from a
   FIFO that it also holds open read-write, so EOF can never release it.

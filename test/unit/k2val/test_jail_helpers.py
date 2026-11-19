@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import json
 import os
 import socket
@@ -107,8 +108,10 @@ CLIENT = """
 import socket, sys
 s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=5)
 s.sendall(b"hello")
-s.shutdown(socket.SHUT_WR)
-print(s.recv(100).decode())
+got = b""
+while len(got) < 10:
+    got += s.recv(100)
+print(got.decode())
 """
 
 
@@ -141,6 +144,123 @@ async def test_fwd_in_listens_before_it_execs_the_command_and_relays_to_the_sock
     server.close()
     assert proc.returncode == 0
     assert out.decode().strip() == "echo:hello"
+
+
+# --- both forwarders: teardown, connection cap, idle timeout --------------------------------
+
+
+async def _forwarder(kind: str, upstream_handler, short_dir: Path, **kwargs):
+    """(forwarder, open-a-client, close-all) for the outside (UNIX front, TCP upstream) or the
+    inside (TCP front, UNIX upstream) forwarder."""
+    if kind == "fwd_out":
+        up = await asyncio.start_server(upstream_handler, "127.0.0.1", 0)
+        fwd = fwd_out.make_handler("127.0.0.1", up.sockets[0].getsockname()[1], **kwargs)
+        path = str(short_dir / "front.sock")
+        front = await asyncio.start_unix_server(fwd, path=path)
+
+        def client():
+            return asyncio.open_unix_connection(path)
+    else:
+        up_path = str(short_dir / "up.sock")
+        up = await asyncio.start_unix_server(upstream_handler, path=up_path)
+        fwd = fwd_in.make_handler(up_path, **kwargs)
+        front = await asyncio.start_server(fwd, "127.0.0.1", 0)
+        port = front.sockets[0].getsockname()[1]
+
+        def client():
+            return asyncio.open_connection("127.0.0.1", port)
+
+    def close() -> None:
+        front.close()
+        up.close()
+
+    return fwd, client, close
+
+
+async def _until(cond, timeout: float = 3.0) -> bool:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not cond():
+        if asyncio.get_running_loop().time() > deadline:
+            return False
+        await asyncio.sleep(0.05)
+    return True
+
+
+async def _hold(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    """An upstream that never closes on its own (it waits for the forwarder to close it)."""
+    with contextlib.suppress(Exception):
+        while await reader.read(65536):
+            pass
+        await asyncio.sleep(30)
+
+
+def test_the_forwarders_bound_connections_and_idle_time() -> None:
+    for mod in (fwd_out, fwd_in):
+        assert mod.MAX_CONNECTIONS == 16
+        assert mod.IDLE_TIMEOUT_S > 20 * 60  # above the trial wall cap: never cuts a trial
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["fwd_out", "fwd_in"])
+async def test_an_upstream_close_tears_down_the_whole_connection(kind, short_dir) -> None:
+    async def bye(reader, writer):
+        writer.write(b"bye")
+        await writer.drain()
+        writer.close()
+
+    fwd, client, close = await _forwarder(kind, bye, short_dir)
+    try:
+        reader, writer = await client()  # the client never closes its side
+        assert await asyncio.wait_for(reader.read(3), 3) == b"bye"
+        assert await asyncio.wait_for(reader.read(), 3) == b""
+        assert await _until(lambda: fwd.active == 0), "the relay waits on the open side"
+        writer.close()
+    finally:
+        close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["fwd_out", "fwd_in"])
+async def test_a_client_close_tears_down_the_upstream_side(kind, short_dir) -> None:
+    fwd, client, close = await _forwarder(kind, _hold, short_dir)
+    try:
+        reader, writer = await client()
+        writer.write(b"GET / HTTP/1.1\r\n\r\n")
+        await writer.drain()
+        assert await _until(lambda: fwd.active == 1)
+        writer.close()
+        assert await _until(lambda: fwd.active == 0), "the relay waits on the upstream"
+    finally:
+        close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["fwd_out", "fwd_in"])
+async def test_connections_beyond_the_cap_are_closed(kind, short_dir) -> None:
+    fwd, client, close = await _forwarder(kind, _hold, short_dir, max_connections=3)
+    try:
+        held = [await client() for _ in range(3)]
+        assert await _until(lambda: fwd.active == 3)
+        reader, writer = await client()
+        assert await asyncio.wait_for(reader.read(), 3) == b""  # closed at once
+        assert fwd.refused == 1 and fwd.active == 3
+        for _, w in [*held, (reader, writer)]:
+            w.close()
+    finally:
+        close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["fwd_out", "fwd_in"])
+async def test_an_idle_connection_is_closed(kind, short_dir) -> None:
+    fwd, client, close = await _forwarder(kind, _hold, short_dir, idle_timeout=0.3)
+    try:
+        reader, writer = await client()
+        assert await asyncio.wait_for(reader.read(), 5) == b""
+        assert await _until(lambda: fwd.active == 0)
+        writer.close()
+    finally:
+        close()
 
 
 # --- the egress filter ----------------------------------------------------------------------
