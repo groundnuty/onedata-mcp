@@ -163,7 +163,8 @@ service on the host's loopback (the Onedata providers, agent channel servers and
   loopback, reserved and multicast IPv4 range, the whole subnet of every host interface (`local/prefixlen`, so the
   host's neighbours too) and any point-to-point peer, every resolver the host is configured with but the jail's two,
   and all IPv6. The rest, public IPv4, is accepted. The host's networks come from `ip -j addr`; if `ip` is missing,
-  fails or times out, or `/etc/resolv.conf` cannot be read, the filter and so the jail fail (fail closed). The jailed process has no capability over that netns, so it can neither read nor flush the table;
+  fails or times out, `/etc/resolv.conf` cannot be read, or `resolvectl` is there but fails, the filter and so the
+  jail fail (fail closed). The jailed process has no capability over that netns, so it can neither read nor flush the table;
 - the MCP server is reached through a UNIX socket:
   1. the harness's MCP server listens on `127.0.0.1:<P>` outside;
   2. `fwd_out.py` serves it on `<staging>/sock/mcp.sock` (0600, in a 0700 dir; the upstream must be loopback);
@@ -266,8 +267,8 @@ out: the trace's MCP half is the server's own record, and the CLI's events come 
       no file under `/etc` holds the host or user name (certificates are searched decoded too), and every CA
       certificate there is in the distro's Mozilla set, computed on the host;
    2. the env is exactly the allowed names;
-   3. the home holds exactly that CLI's login files and is a tmpfs; while a jail runs, no login file is under the
-      on-disk staging root;
+   3. the home holds exactly that CLI's login files, byte for byte the host's (hashes compared, not printed), and is
+      a tmpfs; while a jail runs, no login file is under the on-disk staging root;
    4. the host's loopback (`127.0.0.1:31443/31444`, `10.0.2.2` on several ports, a canary on the host's
       `127.0.0.1`), a `0.0.0.0` canary via every host IPv4 address, port 22 on those addresses, and the metadata
       service are all unreachable. Each target IS reachable from the host at that moment (or is marked "not
@@ -298,7 +299,8 @@ out: the trace's MCP half is the server's own record, and the CLI's events come 
    - a forced network failure (slirp with `--enable-sandbox`) returns exit 3 at once, through a pipe, with the staging
      dir removed and no bwrap or slirp process left;
    - a SIGKILL of the script while it waits before the release byte frees the caller's pipe in under a second (the
-     reaper ends the jail). No jail, slirp or forwarder process is left; the staging dir stays for the caller.
+     reaper ends the jail). No jail, slirp or forwarder process is left; the on-disk staging dir and the tmpfs home
+     (the login copy, in RAM) stay for the caller to remove. Both re-checked after the tmpfs staging change.
 5. `make k2val-jail-smoke` (after the probe): one fixed prompt per CLI ("Reply with the single word OK."), no MCP
    server. It prints the exit code, the parsed final message and the event shapes (field names only).
 

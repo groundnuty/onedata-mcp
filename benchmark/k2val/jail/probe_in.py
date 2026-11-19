@@ -201,6 +201,19 @@ def check_home(conf: dict) -> None:
         if len(fields) > 4 and fields[4] == home and right:
             fstype = right.split()[0]
     emit("home_tmpfs", fstype == "tmpfs", f"{home} is on {fstype}")
+    # the copies are whole: the same bytes as the host's files (hashes compared, not printed)
+    wrong = []
+    for rel, want in sorted(conf["login_sha256"].items()):
+        try:
+            with open(os.path.join(home, rel), "rb") as f:
+                ok = hashlib.sha256(f.read()).hexdigest() == want
+        except OSError:
+            ok = False
+        if not ok:
+            wrong.append(rel)
+    n = len(conf["login_sha256"])
+    emit("home_content", n > 0 and not wrong,
+         f"{n} login files, all match" if not wrong else f"MISMATCH: {wrong}")  # fmt: skip
 
 
 # --- (4) unreachable, (5) TLS, (6) MCP -----------------------------------------------------------

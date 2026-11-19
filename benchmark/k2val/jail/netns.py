@@ -150,11 +150,17 @@ def host_nameservers(files: tuple[str, ...] = HOST_RESOLV_FILES) -> list[str]:
             words = line.split()
             if len(words) >= 2 and words[0] == "nameserver":
                 found += _ipv4s(words[1])
+    # resolvectl absent: nothing more to read. Present but failing: fail closed, since the
+    # per-link resolvers it lists (a VPN's, perhaps at a public address) would be missed.
     if rc := shutil.which("resolvectl"):
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
+        try:
             r = subprocess.run([rc, "dns"], capture_output=True, text=True, timeout=5)
-            for line in r.stdout.splitlines():
-                found += _ipv4s(line.split(":", 1)[1] if ":" in line else "")
+        except (OSError, subprocess.SubprocessError) as e:
+            raise RuntimeError(f"`resolvectl dns` failed: {e}") from None
+        if r.returncode != 0:
+            raise RuntimeError(f"`resolvectl dns` exited {r.returncode}")
+        for line in r.stdout.splitlines():
+            found += _ipv4s(line.split(":", 1)[1] if ":" in line else "")
     return sorted(set(found))
 
 

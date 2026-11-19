@@ -91,6 +91,15 @@ def login_copies_under(root: str, cli: str) -> int:
     return sum(f in names for _, _, files in os.walk(root) for f in files)
 
 
+def login_hashes(cli: str, home: str) -> dict[str, str]:
+    """SHA-256 of each of `cli`'s login files on the host (compared inside the jail with its
+    copies; only match or mismatch is ever printed)."""
+    return {
+        rel: hashlib.sha256(Path(home, rel).read_bytes()).hexdigest()
+        for rel in expected_home(cli, home)
+    }
+
+
 def expected_home(cli: str, home: str) -> list[str]:
     return sorted(f for f in LOGIN_FILES[cli] if os.path.isfile(os.path.join(home, f)))
 
@@ -272,11 +281,10 @@ def host_resolvers() -> list[dict]:
                 words = line.split()
                 if len(words) >= 2 and words[0] == "nameserver":
                     found += _ipv4s(words[1])
-    if rc := shutil.which("resolvectl"):
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
-            out = subprocess.run([rc, "dns"], capture_output=True, text=True, timeout=5).stdout
-            for line in out.splitlines():
-                found += _ipv4s(line.split(":", 1)[1] if ":" in line else "")
+    if rc := shutil.which("resolvectl"):  # there but failing: the probe fails, loudly
+        r = subprocess.run([rc, "dns"], capture_output=True, text=True, timeout=5, check=True)
+        for line in r.stdout.splitlines():
+            found += _ipv4s(line.split(":", 1)[1] if ":" in line else "")
     fixed = {
         SLIRP_DNS_RELAY: f"slirp's relay {SLIRP_DNS_RELAY}",
         "127.0.0.53": "the host's stub 127.0.0.53",
@@ -452,6 +460,7 @@ class CliProbe:
             "max_processes": 4,
             "allowed_env": ALLOWED_ENV[self.cli],
             "expected_home_files": expected_home(self.cli, self.home),
+            "login_sha256": login_hashes(self.cli, self.home),
             "expected_root": expected_root,
             "expected_etc": EXPECTED_ETC,
             "mozilla_ca_sha256": mozilla_ca_sha256(),
@@ -538,7 +547,12 @@ class CliProbe:
             conf = self.probe_conf(upstream, canary_lo, canary_any)
             # fd targets may name none of the host strings, nor the staging root or the host
             # side of /work (both legitimately in mountinfo, so not in forbidden_strings)
-            conf["fd_forbidden"] = [*conf["forbidden_strings"], *both(root), *both(workdir)]
+            conf["fd_forbidden"] = [
+                *conf["forbidden_strings"],
+                *both(root),
+                *both(workdir),
+                *both(self.shm),
+            ]
             host_side = self.host_reachability(conf, canary_lo)
             self.resolvers = conf["dns_resolvers"]
             self.host_answering = {r["ip"] for r in self.resolvers if dns_answers(r["ip"])}
@@ -708,6 +722,7 @@ class CliProbe:
             ("env", "2 env = allowed vars only"),
             ("home", "3 fresh home = this CLI's login files only"),
             ("home_tmpfs", "3 the fresh home is a tmpfs"),
+            ("home_content", "3 the login copies match the host's, byte for byte"),
         ]:
             r = get(i)
             rep.add(prop, r["ok"], r["detail"])

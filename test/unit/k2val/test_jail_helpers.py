@@ -370,6 +370,22 @@ def test_per_link_resolvers_are_read_from_resolvectl(tmp_path, monkeypatch) -> N
     ]
 
 
+@pytest.mark.parametrize("failure", ["exit 1", "timeout"])
+def test_a_failing_resolvectl_fails_closed(tmp_path, monkeypatch, failure) -> None:
+    """Present but failing: its per-link resolvers would be missed, so the filter refuses."""
+    (tmp_path / "r").write_text("nameserver 127.0.0.1\n")
+
+    def run(*a, **k):
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired("resolvectl", 5)
+        return subprocess.CompletedProcess(a, 1, "", "")
+
+    monkeypatch.setattr(netns.shutil, "which", lambda *a, **k: "/x/resolvectl")
+    monkeypatch.setattr(netns.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="resolvectl"):
+        netns.host_nameservers((str(tmp_path / "r"),))
+
+
 def test_an_unreadable_resolv_conf_fails_closed(tmp_path) -> None:
     with pytest.raises(RuntimeError, match="cannot read"):
         netns.host_nameservers((str(tmp_path / "absent"),))
