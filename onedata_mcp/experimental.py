@@ -1,6 +1,6 @@
 """Opt-in gate for un-validated MCP-exposed features.
 
-Candidates adapted from upstream (M0rgho/onedata-mcp) that change the
+Candidates adapted from later commits of the upstream base that change the
 model-facing surface (new tools, enriched tool docstrings, enriched server
 instructions) are registered ONLY when this flag is on. They have NOT been
 through the multi-LLM hardening sweep that the rest of the headline surface
