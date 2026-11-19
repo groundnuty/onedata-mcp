@@ -247,7 +247,7 @@ out: the trace's MCP half is the server's own record, and the CLI's events come 
    only if every row passes. Per CLI it checks:
    1. the home, `/mnt`, `/Users`, `~/.ssh`, the repository, the config and every token/key path are absent; no
       host-identifying string is in `/proc/{1,self}/{cmdline,environ}`, `mountinfo`, `/etc` or the hostname; `/`,
-      `/etc` and `/home` hold exactly the jail's entries;
+      `/etc` and `/home` hold exactly the jail's entries; `/opt/cli` holds own regular files (no symlink, one link);
    2. the env is exactly the allowed names;
    3. the home holds exactly that CLI's login files;
    4. the host's loopback (`127.0.0.1:31443/31444`, `10.0.2.2` on several ports, a canary on the host's
@@ -262,9 +262,14 @@ out: the trace's MCP half is the server's own record, and the CLI's events come 
    7. host processes are not visible (pid 1 is bwrap; a host process with a marker is not seen); also no capabilities,
       no new user namespaces, nft can neither list nor flush, no `/dev/tty`, only fds 0-2;
    8. no staging dir, jail process or slirp is left after a normal exit and a SIGTERM; after a SIGKILL no process is
-      left, and the staging dir is left for the caller to remove.
+      left, and the staging dir is left for the caller to remove. Two hostile runs, where the probe plays a CLI that
+      tampers before exiting: after a `chmod 0` of the home, the login's dir and `/work`, every login copy is still
+      removed; after a FIFO and a `/dev/zero` symlink replace the login files, the script still ends at once and names
+      them.
+   Each row added after the first review (`/opt/cli`, the DNS rows, the two hostile runs) failed on the code before
+   its fix, as the commit messages record.
 3. A negative control proves the probe can fail: a copy of the jail without the filter and without
-   `--disable-host-loopback` fails every row of (4).
+   `--disable-host-loopback` fails every reachability row of (4).
 4. Teardown before the release, which the probe's signal cases do not reach (they signal a running probe), was checked
    by hand on two scratch copies:
    - a forced network failure (slirp with `--enable-sandbox`) returns exit 3 at once, through a pipe, with the staging
