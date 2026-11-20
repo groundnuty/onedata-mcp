@@ -6,12 +6,15 @@ receives tells it how to fix the call, holds no host, and that a success is an e
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from fastmcp import Client, FastMCP
 from pytest_httpx import HTTPXMock
 
 from onedata_mcp.modules import qos as qos_module
 from onedata_mcp.token_policy import WRITE_TOOL_NAMES
+from onedata_mcp.tool_maturity import ALL_KNOWN, FLAG_GATED
 
 HOST = "provider.example"
 QOS_URL = f"https://{HOST}/api/v3/oneprovider/qos_requirements"
@@ -44,6 +47,21 @@ async def test_it_is_a_write_tool_annotated_destructive(qos_mcp: FastMCP) -> Non
     assert tool.annotations is not None and tool.annotations.destructiveHint is True
     assert "remove_qos_requirement" in WRITE_TOOL_NAMES
     assert list(tool.inputSchema["properties"]) == ["qos_id"]  # no list input to cap
+
+
+@pytest.mark.asyncio
+async def test_the_description_follows_the_surface_rules(qos_mcp: FastMCP) -> None:
+    """design/10, gate 2: it says what it returns, names no other tool (one may not be offered
+    alongside it) and cites no document the model cannot read."""
+    async with Client(qos_mcp) as client:
+        tool = next(t for t in await client.list_tools() if t.name == "remove_qos_requirement")
+    field = tool.inputSchema["properties"]["qos_id"]["description"]
+    text = f"{tool.description} {field}"
+
+    assert "Returns nothing on success" in text
+    others = (ALL_KNOWN | FLAG_GATED) - {"remove_qos_requirement"}
+    assert [name for name in others if name in text] == []
+    assert not re.search(r"\.md\b|design/|https?://|§|\bM-\d", text)
 
 
 @pytest.mark.asyncio

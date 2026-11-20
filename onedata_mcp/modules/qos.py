@@ -132,5 +132,6 @@ def register_module(mcp: FastMCP) -> None:
     async def mcp_remove_qos_requirement(
         qos_id: str = Field(description="QoS requirement id"),
     ) -> None:
-        """Remove a QoS requirement by id. Does not roll back already-replicated data."""
+        """Remove a QoS requirement by id. Returns nothing on success.
+        Does not roll back already-replicated data."""
         await remove_qos_requirement(qos_id)
