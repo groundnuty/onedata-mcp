@@ -235,3 +235,58 @@ def verify_lco(ctx: K2Context, trace: AgentTrace) -> OracleResult:
 
 FILE_ORACLES.update(dict.fromkeys(("LC", "LCn", "LCp"), verify_lc))
 FILE_ORACLES["LCo"] = verify_lco
+
+
+# --- CD: create_directory (design/15) ------------------------------------------------------
+
+# Said first, it wins: "could not be created" is not a creation.
+_NOT_CREATED = re.compile(
+    r"\balready\b|\bis (?:a|an) (?:regular |existing )?file\b"
+    r"|\b(?:could|can|did|was|were|has|have|had)(?:n['’]t|\s+not)\s+(?:be\s+|been\s+)?"
+    r"(?:create|made|make)|\bcannot\s+(?:be\s+)?(?:create|make)|\bnot created\b|\bunable\b"
+    r"|\bfail(?:ed|s|ure)?\b|\bno directory was\b|\bname is (?:taken|in use)\b|\bconflict",
+    re.I,
+)
+_CREATED = re.compile(
+    r"\b(?:created|made|done|now exists|exists now|succeeded|successfully|is in place)\b", re.I
+)
+
+
+def cd_label(answer: str) -> str:
+    """CD, CDn, CDo, CDp: "not_created" when the answer says it could not or did not create
+    (or that something is already there), else "created" when it says created / made / done,
+    else "unclear"."""
+    text = _plain(answer)
+    if _NOT_CREATED.search(text):
+        return "not_created"
+    if _CREATED.search(text):
+        return "created"
+    return "unclear"
+
+
+def verify_cd(ctx: K2Context, trace: AgentTrace) -> OracleResult:
+    """CD, CDn, CDo, CDp (create_directory): make what the brief asks, or say why not. The
+    answer must be `spec.expect`, AND the tree at the answer must be the expected end state (a
+    "created" with the end state not there yet is a PREMATURE CLAIM). The federation axis: the
+    same end state after the answer."""
+    spec = file_scenarios.FILE_SCENARIOS[ctx.scenario_id]
+    baseline = _baseline(ctx)
+    at = end_state(spec, baseline, _usable_tree(ctx.at_answer, "at the answer"))
+    after = end_state(spec, baseline, _usable_tree(ctx.after_settle, "after the answer"))
+    got = cd_label(trace.final_answer)
+    parts = []
+    if got != spec.expect:
+        parts.append(f"answers {got}, not {spec.expect}")
+    if at:
+        if got == "created" and not after:
+            ctx.flags.append("premature_claim")
+            parts.append("PREMATURE CLAIM: at the answer, " + "; ".join(at))
+        else:
+            parts.append("end state at the answer: " + "; ".join(at))
+    if after:
+        parts.append("end state after the answer: " + "; ".join(after))
+    ok = got == spec.expect and not at
+    return _result(ok, not after, parts or [f"answers {got}; the end state is right"])
+
+
+FILE_ORACLES.update(dict.fromkeys(("CD", "CDn", "CDo", "CDp"), verify_cd))

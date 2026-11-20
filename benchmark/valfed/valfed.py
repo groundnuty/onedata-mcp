@@ -631,6 +631,7 @@ async def _fixture_check() -> None:
         # the file-tool scenarios (design/13-15)
         "FA": SCENARIOS["FA"].fixture,  # modes set at the owner, seen at the local provider
         "LCp": SCENARIOS["LCp"].fixture,  # more than a page of entries, two empty directories
+        "CDn": SCENARIOS["CDn"].fixture,  # a regular file where CD's directory would go
     }
     problems: list[str] = []
     try:

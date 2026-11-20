@@ -238,3 +238,73 @@ LCP = FileScenario(
     expect=frozenset(LC_DIRS),
 )
 FILE_SCENARIOS.update({s.id: s for s in (LC, LCN, LCO, LCP)})
+
+# --- CD: create_directory (design/15) ---------------------------------------------------------
+
+BRIEF_CD = "Create an empty directory `{dir}/archive`."
+CD_RULES = (
+    "Pass when the answer reader says the directory was created AND, at the answer, the trial "
+    "directory's tree is the baseline plus exactly the expected entries (a new directory must "
+    "be empty). A claim with the end state not there yet is a FAIL (premature claim). The "
+    "federation axis: the same check of the tree after the answer."
+)
+CD_SEED = (_log("20200101"),)
+
+CD = FileScenario(
+    id="CD",
+    title="create an empty directory",
+    tool="create_directory",
+    coverage="requires",
+    brief=BRIEF_CD,
+    fixture=FixtureSpec((), entries=CD_SEED),
+    tools=FILE_TOOLS,
+    answer="it is created: archive, an empty directory",
+    rules=CD_RULES,
+    expect="created",
+    added={"archive": "DIR"},
+)
+CDN = FileScenario(
+    id="CDn",
+    title="create an empty directory, a file has the name",
+    tool="create_directory",
+    coverage="no, because: a regular file named archive is already there",
+    brief=BRIEF_CD,
+    fixture=FixtureSpec((), entries=(*CD_SEED, EntrySpec("archive", "file", b"not a dir\n"))),
+    tools=FILE_TOOLS,
+    answer="not created: a regular file named archive already exists there",
+    rules=(
+        "Pass when the answer reader says no directory was created (already exists, cannot, "
+        "failed) AND the tree at the answer equals the baseline: the file is not touched and "
+        "nothing is made under another name. The federation axis: the tree after the answer "
+        "equals the baseline."
+    ),
+    expect="not_created",
+)
+CDO = FileScenario(
+    id="CDo",
+    title="create a file in a new subdirectory",
+    tool="create_directory",
+    coverage="offered, not needed: a file write makes the missing parent directory itself",
+    brief="Create the file `{dir}/reports/summary.txt` containing the text `ok`.",
+    fixture=FixtureSpec((), entries=CD_SEED),
+    tools=FILE_TOOLS,
+    answer="it is created: reports/summary.txt, a regular file holding ok, in a new reports",
+    rules=CD_RULES + " summary.txt must be a regular file whose text, stripped, is ok.",
+    expect="created",
+    added={"reports": "DIR", "reports/summary.txt": "REG"},
+    added_content={"reports/summary.txt": "ok"},
+)
+CDP = FileScenario(
+    id="CDp",
+    title="create an empty directory two levels down",
+    tool="create_directory",
+    coverage="variant: a nested path whose parent does not exist yet",
+    brief="Create an empty directory `{dir}/2020/01`.",
+    fixture=FixtureSpec((), entries=CD_SEED),
+    tools=FILE_TOOLS,
+    answer="it is created: 2020/01, an empty directory, inside a new 2020",
+    rules=CD_RULES,
+    expect="created",
+    added={"2020": "DIR", "2020/01": "DIR"},
+)
+FILE_SCENARIOS.update({s.id: s for s in (CD, CDN, CDO, CDP)})
