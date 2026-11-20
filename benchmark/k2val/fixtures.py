@@ -180,6 +180,8 @@ class BuiltFixture:
     dir_id: str
     files: dict[str, BuiltFile] = field(default_factory=dict)
     qos_rules: dict[str, str] = field(default_factory=dict)  # file name -> rule id
+    # each file as the local provider reported it before the agent started (`_wait_files_baseline`)
+    files_baseline: dict[str, dict] = field(default_factory=dict)
     writer: ScheduledWriter | None = None
     started_at: float = 0.0
     ready_at: float = 0.0
@@ -187,6 +189,17 @@ class BuiltFixture:
     @property
     def dir_path(self) -> str:
         return f"/{self.space}/{self.dir_name}"
+
+
+def _baseline_holds(kind: str, reading: dict, want_qos: tuple[str, ...]) -> bool:
+    """The state a kind of file starts a trial in (see the module docstring)."""
+    if kind == "s2":
+        return reading["size_known"]
+    if not reading["size_known"] or reading["size"] != FILE_SIZE:
+        return False
+    if tuple(reading["qos_ids"]) != want_qos:
+        return False
+    return reading["local_bytes"] == 0 if kind == "s0" else reading["local_covered"]
 
 
 class FixtureBuilder:
@@ -311,8 +324,54 @@ class FixtureBuilder:
             fixture.writer = ScheduledWriter(
                 self.fed, s2, spec.writer_finish_s, self.clock, owner_id
             )
+        await self._wait_files_baseline(fixture, spec, local_id)
         fixture.ready_at = self.clock.time()
         return fixture
+
+    async def _wait_files_baseline(
+        self, fixture: BuiltFixture, spec: FixtureSpec, local_id: str
+    ) -> None:
+        """Before the agent starts: each file's state, as the LOCAL provider reports it (its own
+        blocks, the size, the effective QoS summary, read strictly), is the one its kind builds;
+        recorded in `fixture.files_baseline`. A reading that fails or differs is retried until
+        the timeout (a FixtureError, never a trial on an unknown start). `s2` files are recorded
+        only: their writer has not started yet, and their own waits confirmed the prefix."""
+        for fs in spec.files:
+            bf = fixture.files[fs.name]
+            want_qos = (fixture.qos_rules[fs.name],) if fs.name in fixture.qos_rules else ()
+            last: dict[str, dict] = {}
+
+            async def as_built(
+                bf: BuiltFile = bf, kind: str = fs.kind, want_qos=want_qos, last=last
+            ) -> bool:
+                reading = await self._local_reading(bf, local_id)
+                if reading is None:
+                    return False
+                last["reading"] = reading
+                return _baseline_holds(kind, reading, want_qos)
+
+            await self.fed.wait_until(
+                as_built,
+                timeout_s=CONFIRM_TIMEOUT_S,
+                what=f"the local provider reports {fs.name} as its kind {fs.kind} builds it "
+                f"(blocks, size, QoS requirements {list(want_qos)})",
+            )
+            fixture.files_baseline[fs.name] = {"kind": fs.kind, **last["reading"]}
+
+    async def _local_reading(self, bf: BuiltFile, local_id: str) -> dict | None:
+        """The local provider's own view of a file, or None while it cannot be read."""
+        try:
+            dist = await self.fed.distribution("local", bf.file_id)
+            qos = await self.fed.qos_ids("local", bf.file_id, missing_ok=False)
+        except Exception:  # noqa: BLE001 - not readable yet; the caller's timeout decides
+            return None
+        return {
+            "size": dist.size,
+            "size_known": dist.size_known and local_id not in dist.failed,
+            "local_bytes": dist.bytes_of(local_id),
+            "local_covered": dist.covers(local_id),
+            "qos_ids": list(qos),
+        }
 
     async def _wait_local_covered(self, bf: BuiltFile, local_id: str) -> None:
         async def covered() -> bool:
@@ -338,18 +397,30 @@ class FixtureBuilder:
 
     # --- reset ----------------------------------------------------------
 
-    async def purge_dir(self, dir_id: str) -> list[str]:
-        """Delete the QoS rules on a directory's files, then the directory. Returns problems."""
+    async def purge_dir(self, dir_id: str, tracked_rules: tuple[str, ...] = ()) -> list[str]:
+        """Delete the QoS rules the fixture made (`tracked_rules`) and any rule set ON one of the
+        directory's own entries, then the entries and the directory. Returns problems.
+
+        A file's QoS summary is effective: it also lists rules inherited from its ancestors, up
+        to the space root. A rule found there is deleted only when its own `fileId` is the entry
+        itself, so a rule set on the space root (or anywhere above the trial) is never touched.
+        """
         problems: list[str] = []
         ids = [dir_id]
         try:
             ids.extend(k["fileId"] for k in await self.fed.children("owner", dir_id))
         except Exception as e:  # noqa: BLE001
             problems.append(f"list {type(e).__name__}: {e}")
+        for qid in tracked_rules:
+            try:
+                await self.fed.delete_qos("local", qid)
+            except Exception as e:  # noqa: BLE001
+                problems.append(f"qos {type(e).__name__}: {e}")
         for fid in ids:
             try:
                 for qid in await self.fed.qos_ids("local", fid):
-                    await self.fed.delete_qos("local", qid)
+                    if qid not in tracked_rules and await self.fed.qos_file_id("local", qid) == fid:
+                        await self.fed.delete_qos("local", qid)
             except Exception as e:  # noqa: BLE001
                 problems.append(f"qos {type(e).__name__}: {e}")
         for fid in ids[1:]:
@@ -390,4 +461,4 @@ class FixtureBuilder:
     async def teardown(self, fixture: BuiltFixture) -> list[str]:
         if fixture.writer is not None:
             await fixture.writer.stop()
-        return await self.purge_dir(fixture.dir_id)
+        return await self.purge_dir(fixture.dir_id, tuple(fixture.qos_rules.values()))

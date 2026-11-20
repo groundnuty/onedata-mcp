@@ -296,10 +296,21 @@ class FakeFed:
             self.nodes.pop(cur, None)
         return httpx.Response(204)
 
+    def lineage(self, fid: str) -> set[str]:
+        """The node and its ancestors, up to the space root."""
+        out: set[str] = set()
+        cur = self.nodes.get(fid)
+        while cur is not None and cur.fid not in out:
+            out.add(cur.fid)
+            cur = self.nodes.get(cur.parent) if cur.parent else None
+        return out
+
     def _qos_summary(self, fid: str) -> httpx.Response:
         if fid not in self.nodes:
             return error(400)
-        reqs = {q: r["status"] for q, r in self.rules.items() if r["fileId"] == fid}
+        # effective, as Onedata's: the node's own rules and those inherited from its ancestors
+        lineage = self.lineage(fid)
+        reqs = {q: r["status"] for q, r in self.rules.items() if r["fileId"] in lineage}
         return httpx.Response(200, json={"requirements": reqs, "status": "fulfilled"})
 
     def _qos_post(self, body: dict) -> httpx.Response:

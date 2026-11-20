@@ -48,6 +48,12 @@ CAP_REASONS = {
 SETTLE_POLL_S = 5.0
 
 
+def trial_dir_name(trial_id: str) -> str:
+    """The trial's directory, as the brief shows it: opaque. The trial id starts with the
+    scenario id, and `logs-v3` beside `logs-v3n` would tell a model which variant it is in."""
+    return "logs-" + hashlib.sha1(f"dir/{trial_id}".encode()).hexdigest()[:12]
+
+
 def make_trial_id(run_id: str, model: str, scenario_id: str, ix: int) -> str:
     """Short, no 8-digit run (a file name's date is the first run of exactly 8 digits), unique
     per (run, config, scenario, trial): `v5-glm-k0-3fa91c`."""
@@ -105,7 +111,7 @@ async def run_trial(
     cfg = deps.cfg
     started = deps.clock.time()
     trial_id = make_trial_id(deps.run_id, conf.name, scenario.id, trial_ix)
-    dir_name = f"logs-{trial_id}"
+    dir_name = trial_dir_name(trial_id)
     directory = f"/{conf.space}/{dir_name}"
     local_name = cfg.federation.local.name
     brief = scenario.render_brief(directory=directory, local=local_name)
@@ -258,6 +264,7 @@ async def run_trial(
         }
         writer_record = fixture.writer.record() if fixture.writer else None
         common["writer"] = writer_record
+        common["files_baseline"] = fixture.files_baseline
         flags: list[str] = []
         if writer_record and writer_record.get("error"):
             flags.append("writer_error")

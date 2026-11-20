@@ -253,14 +253,35 @@ class FedApi:
 
     # --- QoS and transfers ---------------------------------------------
 
-    async def qos_ids(self, role: Role, file_id: str) -> tuple[str, ...]:
+    async def qos_ids(
+        self, role: Role, file_id: str, *, missing_ok: bool = True
+    ) -> tuple[str, ...]:
+        """The requirement ids of a file's EFFECTIVE QoS summary (its own and those inherited
+        from its ancestors). `missing_ok=False` (the snapshots): a 404 or an answer without a
+        `requirements` map raises, so an unreadable summary is never read as "none"."""
         try:
             r = await request(self._cfg[role], "GET", f"/data/{file_id}/qos/summary")
         except OnedataApiError as e:
-            if _is_absent(e):
+            if missing_ok and _is_absent(e):
                 return ()
             raise
-        return tuple(sorted((r["body"].get("requirements") or {}).keys()))
+        body = r["body"]
+        requirements = body.get("requirements") if isinstance(body, dict) else None
+        if not missing_ok and not isinstance(requirements, dict):
+            raise OnedataApiError("QoS summary without a 'requirements' map", response=r)
+        return tuple(sorted((requirements or {}).keys()))
+
+    async def qos_file_id(self, role: Role, qos_id: str) -> str | None:
+        """The file a requirement is set on (its own `fileId`, not a file that inherits it);
+        None if the requirement is gone."""
+        try:
+            r = await request(self._cfg[role], "GET", f"/qos_requirements/{quote(qos_id, safe='')}")
+        except OnedataApiError as e:
+            if _is_absent(e):
+                return None
+            raise
+        file_id = r["body"].get("fileId") if isinstance(r["body"], dict) else None
+        return file_id if isinstance(file_id, str) else None
 
     async def add_qos(self, role: Role, file_id: str, expression: str) -> str:
         r = await request(

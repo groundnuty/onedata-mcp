@@ -56,6 +56,8 @@ class K2TrialArtefact(TrialArtefact):
     calls: tuple[dict, ...] = ()
     fixture_error: str | None = None
     teardown_problems: tuple[str, ...] = ()
+    # Each file as the local provider reported it before the agent started (blocks, size, QoS).
+    files_baseline: dict | None = None
     # Filled in by hand after the run: harness bug / deployment artefact / model failure.
     classification: str = ""
 
