@@ -72,6 +72,16 @@ def forge_base_url() -> str:
 
 @pytest.fixture(scope="session")
 def mcp_application() -> Any:
-    from onedata_mcp.main import mcp
+    """A server with the preview flag on: these tests use tools master registers only with it
+    (the harvester tools). The server is built here rather than taken from ``main.mcp`` and the
+    flag is set only while it is built, so it does not leak into the other tests of a session.
+    An explicit ONEDATA_MCP_EXPERIMENTAL in the environment wins."""
+    from onedata_mcp import main
 
-    return mcp
+    patch = pytest.MonkeyPatch()
+    try:
+        if "ONEDATA_MCP_EXPERIMENTAL" not in os.environ:
+            patch.setenv("ONEDATA_MCP_EXPERIMENTAL", "1")
+        return main._create_onedata_mcp_server()
+    finally:
+        patch.undo()

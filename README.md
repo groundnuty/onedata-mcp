@@ -199,7 +199,7 @@ More documentation:
 
 ## Background
 
-The federation-state tools (distribution, QoS, transfers, providers, metadata queries) were built and evaluated for the PPAM 2026 paper *LLM-agentic access to a federated scientific data layer with Onedata* ([DOI 10.5281/zenodo.20213326](https://doi.org/10.5281/zenodo.20213326)). Its multi-LLM benchmark harness is in [`benchmark/`](benchmark/), and the 16-tool set it evaluated is [`benchmark/tool_allowlist.py`](benchmark/tool_allowlist.py). The project builds on an earlier open-source Onedata MCP server.
+The federation-state tools (distribution, QoS, transfers, providers, metadata queries) were built and evaluated for the PPAM 2026 paper *LLM-agentic access to a federated scientific data layer with Onedata* ([DOI 10.5281/zenodo.20213326](https://doi.org/10.5281/zenodo.20213326)). Its multi-LLM benchmark harness is in [`benchmark/`](benchmark/), and the 16-tool set it evaluated is [`benchmark/tool_allowlist.py`](benchmark/tool_allowlist.py). Exact reproduction of the published benchmark uses the snapshot branch `ppam2026/14-tools`. On master the harness runs with the preview flag on, so its scenarios keep the tools they offered. The project builds on an earlier open-source Onedata MCP server.
 
 ## License
 
