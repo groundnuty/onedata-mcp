@@ -461,46 +461,119 @@ async def create_file(path: str, content: str, *, create_parents: bool = False) 
         raise e
 
 
-async def create_directory(path: str, *, create_parents: bool = True) -> dict[str, Any]:
-    """Create a directory at the given /<space>/<path> location.
+_HOW_TO_NAME_A_DIRECTORY = "Give the new directory's full path, /<space_name>/<path_to_directory>."
 
-    Wraps ``PUT /data/{space_id}/path/{relative}?type=DIR&create_parents=...``
-    (Oneprovider 25.0 — see oneprovider-swagger paths/data/id/path.yaml,
-    operationId ``create_file_at_path``). Returns ``{fileId, path}``.
 
-    Raises ``FileExistsError`` if the path already exists. Raises
-    ``ValueError`` if ``path`` does not include a relative path under a
-    space root (i.e. the form must be ``/<space>/<dir...>``).
-
-    See research/empirical-mcp-server-findings.md M-11.
-    """
-    config = get_oneprovider_config()
+def _directory_path(path: str) -> tuple[str, str]:
+    """(the space's name, the new directory's path under its root), or a ValueError saying what
+    to give. An empty, `.` or `..` component is refused: in the request path the HTTP client
+    resolves `a/../b` to `b`, which would make the directory somewhere else."""
     normalized = path.strip("/")
+    if not normalized:
+        raise ValueError(f"The path is empty. {_HOW_TO_NAME_A_DIRECTORY}")
     if "/" not in normalized:
         raise ValueError(
-            "path must be /<space_name>/<path_to_directory>; got: "
-            f"{path!r}. To target the space root, use the existing "
-            f"namespace tools instead — the root always exists."
+            f"{_shown(path)} is the root directory of a space, which always exists. "
+            f"{_HOW_TO_NAME_A_DIRECTORY}"
         )
-    space_name, relative_path = normalized.split("/", 1)
-    if not relative_path:
-        raise ValueError("path must include a directory path under the space")
-    root_id = await get_file_id(f"/{space_name}")
-    encoded_path = quote(relative_path, safe="/")
+    space_name, relative = normalized.split("/", 1)
+    if any(part in ("", ".", "..") for part in relative.split("/")):
+        raise ValueError(
+            f"{_shown(path)} has an empty, '.' or '..' component. {_HOW_TO_NAME_A_DIRECTORY}"
+        )
+    return space_name, relative
+
+
+async def _no_such_space(space_name: str) -> str:
+    try:
+        names = sorted(
+            {s["name"] for s in await list_user_spaces() if isinstance(s.get("name"), str)}
+        )
+    except Exception:  # noqa: BLE001 - the hint is best effort
+        names = []
+    listed = f" Available spaces: {', '.join(repr(n) for n in names)}." if names else ""
+    return f"No space named {_shown(space_name)} is visible here, so nothing was created.{listed}"
+
+
+async def _type_at(path: str) -> str | None:
+    """What is at `path` (REG, DIR or SYMLNK), for the "already exists" error; None if unknown."""
+    try:
+        found = await get_file_attributes(path, attributes=["type"])
+    except Exception:  # noqa: BLE001 - the error says less, but still says it exists
+        return None
+    kind = found.get("type") if isinstance(found, dict) else None
+    return kind if isinstance(kind, str) else None
+
+
+_EXISTING = {
+    "DIR": "a directory, so nothing was created",
+    "REG": "a regular file, so no directory was created",
+    "SYMLNK": "a symbolic link, so no directory was created",
+}
+
+
+async def _create_directory_error(
+    error: OnedataApiError, path: str, create_parents: bool
+) -> Exception:
+    """What a failed creation tells the caller: what is in the way, and what to do."""
+    shown = _shown(path)
+    if error.errno == "eexist" or _status(error) == 409:
+        kind = await _type_at(path)
+        if kind in _EXISTING:
+            return FileExistsError(f"{shown} already exists as {_EXISTING[kind]}.")
+        return FileExistsError(f"Something already exists at {shown}, so no directory was created.")
+    if error.errno == "enotdir":
+        hint = (
+            f"A component of {shown} above the new directory is a regular file, not a "
+            "directory, so nothing was created."
+        )
+    elif _is_forbidden(error):
+        hint = (
+            f"Not allowed to create {shown}: the token may be read-only or have no write "
+            "access in this space. Calling again will not help."
+        )
+    elif not create_parents and _is_absent(error):
+        hint = (
+            f"The parent directory of {shown} does not exist, so nothing was created. Create "
+            "it first, or call again with create_parents set to true."
+        )
+    else:
+        return error
+    return _with_hint(hint, error)
+
+
+async def create_directory(path: str, *, create_parents: bool = True) -> dict[str, Any]:
+    """Create a directory at `/<space>/<path>`; returns `{fileId, path}`.
+
+    `PUT /data/{space root id}/path/{relative}?type=DIR&create_parents=..` (swagger
+    `create_file_at_path`). Every component of the relative path is percent-encoded, so a `?`
+    or `#` in a name is a character of the name. A path that cannot name a new directory is
+    refused before any request; a failure says what is in the way (an existing directory or
+    file, a file on the way, a missing parent, a missing space, no access)."""
+    space_name, relative = _directory_path(path)
+    config = get_oneprovider_config()
+    try:
+        root_id = await get_file_id(f"/{space_name}")
+    except FileNotFoundError:
+        raise FileNotFoundError(await _no_such_space(space_name)) from None
+    except OnedataApiError as e:
+        if not _is_absent(e):
+            raise
+        raise FileNotFoundError(await _no_such_space(space_name)) from e
     try:
         response = await request(
             config,
             "PUT",
-            f"/data/{root_id}/path/{encoded_path}",
+            f"/data/{quote(root_id, safe='')}/path/{quote(relative, safe='/')}",
             params={"type": "DIR", "create_parents": create_parents},
         )
     except OnedataApiError as e:
-        if e.errno == "eexist":
-            raise FileExistsError(f"Directory {path} already exists") from e
-        logger.error(f"Error creating directory {path}: {e}")
-        raise
-    file_id = response["body"]["fileId"]
-    return {"fileId": file_id, "path": path}
+        logger.debug(f"Error creating directory {path}: {e}")
+        replacement = await _create_directory_error(e, path, create_parents)
+        if replacement is e:
+            raise
+        raise replacement from e
+    return {"fileId": response["body"]["fileId"], "path": path}
 
 
 def _looks_like_directory_intent(path: str, content: str) -> bool:

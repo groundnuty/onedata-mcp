@@ -415,30 +415,19 @@ def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
     @mcp.tool(name="create_directory", annotations=ToolAnnotations(destructiveHint=True))
     async def mcp_create_directory(
         path: str = Field(
-            description="Path to the directory in format /<space_name>/<path_to_directory>"
+            description="Path of the new directory, /<space_name>/<path_to_directory>"
         ),
         create_parents: bool = Field(
             default=True,
-            description=(
-                "Create missing intermediate directories along the path. Defaults to True."
-            ),
+            description="Create missing parent directories along the path. Defaults to true.",
         ),
         ctx: Optional[Context] = None,
     ) -> dict[str, Any]:
-        """
-        Create a new DIRECTORY at the given path.
+        """Create a directory at the given path. Returns `{fileId, path}` of the new directory.
 
-        Returns ``{fileId, path}`` of the created directory.
-
-        Maps to ``PUT /data/{space_id}/path/{relative}?type=DIR``
-        (Oneprovider 25.0). Raises ``FileExistsError`` if the path
-        already exists.
-
-        Use this whenever you need a directory — never call
-        ``create_file`` with empty content for that purpose.
-
-        See research/empirical-mcp-server-findings.md M-11.
-        """
+        By default, missing parent directories along the path are created too. Fails if
+        anything already exists at the path; the error says whether it is a directory or a
+        regular file."""
         path = await _resolve_with_mcp_root(path, ctx)
         return await api_create_directory(path, create_parents=create_parents)
 

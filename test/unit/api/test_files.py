@@ -850,7 +850,7 @@ async def test_create_directory_rejects_space_root_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _set_env(monkeypatch)
-    with pytest.raises(ValueError, match="path must be /<space_name>/<path_to_directory>"):
+    with pytest.raises(ValueError, match="is the root directory of a space, which always exists"):
         await files.create_directory("/space")
 
 
