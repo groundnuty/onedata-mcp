@@ -544,7 +544,7 @@ async def test_remove_qos_requirement_any_2xx_is_a_success(
 
 
 HOSTS = ("oneprovider.example", "onezone.example")
-PEER_DOMAIN = "dev-oneprovider-krakow.default.svc.cluster.local"
+PEER_DOMAIN = "provider-b.default.svc.cluster.local"
 LONG_ID = "a" * 300
 
 
@@ -552,7 +552,7 @@ def _hostname_bearing(status_error_id: str, errno: str | None = None) -> dict:
     error: dict = {
         "id": status_error_id,
         "description": (
-            "Failed at oneprovider.example:443 (zone onezone.example, peer peer-krakow.plgrid.pl), "
+            "Failed at oneprovider.example:443 (zone onezone.example, peer peer-b.site-b.pl), "
             "see https://oneprovider.example/api/v3/oneprovider/qos_requirements/x and "
             "http://other.example/y"
         ),
@@ -596,7 +596,7 @@ async def test_remove_qos_requirement_the_complete_message_holds_no_host_url_or_
     assert "other.example" not in text and "://" not in text
     # a peer's domain, as a field value and as a bare name in the description
     assert PEER_DOMAIN not in text and "cluster.local" not in text
-    assert "peer-krakow" not in text and "plgrid.pl" not in text
+    assert "peer-b" not in text and "site-b.pl" not in text
     assert len(text) <= MAX_ERROR_CHARS
     assert LONG_ID not in text and "a" * 129 not in text
     assert text.count("a" * 80) <= 2  # the hint's echo and the path's: each cut short

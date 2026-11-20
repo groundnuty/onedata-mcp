@@ -561,7 +561,7 @@ async def test_an_unlisted_bare_host_name_is_masked_wherever_it_stands(
 ) -> None:
     text = (
         "Cannot reach other-node.site.example, x" + NODE_FQDN + ":" + NODE_PORT + " or "
-        "peer.plgrid.pl. Mail ops@peer.example.com; at krakow.example.com."
+        "peer.site-b.pl. Mail ops@peer.example.com; at node7.example.com."
     )
     _set_env(monkeypatch)
     answer = await _redacted_answer(monkeypatch, httpx_mock, text, node_names=node_names)
@@ -1167,7 +1167,7 @@ async def test_move_status_error_names_the_path_not_the_url(
 # answered, which is not necessarily a host this server is configured with.
 # ---------------------------------------------------------------------------
 
-PEER_DOMAIN = "dev-oneprovider-krakow.default.svc.cluster.local"
+PEER_DOMAIN = "provider-b.default.svc.cluster.local"
 PEER_SITE = "peer-lisbon.onedata.example.com"
 
 
@@ -1273,7 +1273,7 @@ async def test_a_qos_expression_survives_the_redaction(
         # a host name: generic, private-network and country TLDs; with a port; in an address
         ("peer.example.com", "<address>"),
         ("peer.example.com:8443.", "<address>."),
-        ("krakow.plgrid.pl", "<address>"),
+        ("store.site-b.pl", "<address>"),
         ("a.b.c.internal", "<address>"),
         ("peer.test and peer.example and peer.local", "<address> and <address> and <address>"),
         ("user@peer.example.com", "user@<address>"),
@@ -1294,7 +1294,7 @@ async def test_a_qos_expression_survives_the_redaction(
         ("peer.example.com0 xpeer.examples", "peer.example.com0 xpeer.examples"),
         # two labels ending in an ambiguous code stay; three or more are a host name
         ("data.pl", "data.pl"),
-        ("krakow.data.pl", "<address>"),
+        ("store.data.pl", "<address>"),
     ],
 )
 def test_a_bare_host_name_is_masked_and_a_file_name_a_version_or_an_attribute_is_not(
