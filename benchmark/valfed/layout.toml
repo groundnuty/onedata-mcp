@@ -13,7 +13,7 @@ support_bytes = 2147483648        # 2 GiB per supporting provider per space (a q
 
 [zone]
 port = 27443
-memory_limit = "3g"
+memory_limit = "2g"
 
 [providers.local]                 # the agent's site
 port = 27444
