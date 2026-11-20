@@ -1,0 +1,88 @@
+# The validation federation's layout (design/10-tool-maturity.md, "Test environment"), in the
+# layout format of the Compose federation tool that `benchmark/valfed/valfed.py` fetches. That
+# tool checks every key; `valfed.py` adds the CPU caps, which the format has no key for.
+#
+# One Onezone and two Oneproviders on the host's loopback only. Every space is written through
+# `owner` and mirrored by `local`, the agent's site, so the panel's data are written at `owner`
+# and read at `local`. Spaces start empty (baseline = false) and `reset --clean` empties them.
+
+project = "omcp-val"
+domain = "omcp-val.test"          # resolves only on the project's own network
+study_space = "omcp-live"         # the tool requires one; nothing else reads it here
+support_bytes = 2147483648        # 2 GiB per supporting provider per space (a quota, not reserved)
+
+[zone]
+port = 27443
+memory_limit = "3g"
+
+[providers.local]                 # the agent's site
+port = 27444
+memory_limit = "3584m"
+
+[providers.owner]                 # where the data are written and kept
+port = 27445
+memory_limit = "3584m"
+
+[spaces.omcp-live]                # the gated live tests (test/live/)
+owner = "owner"
+mirrors = ["local"]
+baseline = false
+
+# One space per validation-panel config (benchmark/k2val), so trials never meet.
+[spaces.omcp-sonnet]
+owner = "owner"
+mirrors = ["local"]
+baseline = false
+
+[spaces.omcp-haiku-low]
+owner = "owner"
+mirrors = ["local"]
+baseline = false
+
+[spaces.omcp-glm]
+owner = "owner"
+mirrors = ["local"]
+baseline = false
+
+[spaces.omcp-qwen36]
+owner = "owner"
+mirrors = ["local"]
+baseline = false
+
+[spaces.omcp-qwencoder]
+owner = "owner"
+mirrors = ["local"]
+baseline = false
+
+[spaces.omcp-deepseek]
+owner = "owner"
+mirrors = ["local"]
+baseline = false
+
+[spaces.omcp-smoke]               # no-model checks of the panel's federation layer
+owner = "owner"
+mirrors = ["local"]
+baseline = false
+
+# The one user. Both tokens valfed.py mints are this user's: the tools token (the MCP server's,
+# at `local` and Onezone) and the writer token (the panel's fixtures, at `owner`).
+[principals.omcp-tools]
+privileges = [
+    "space_view",
+    "space_read_data",
+    "space_write_data",
+    "space_view_qos",
+    "space_manage_qos",
+    "space_view_transfers",
+    "space_schedule_replication",
+]
+spaces = [
+    "omcp-live",
+    "omcp-sonnet",
+    "omcp-haiku-low",
+    "omcp-glm",
+    "omcp-qwen36",
+    "omcp-qwencoder",
+    "omcp-deepseek",
+    "omcp-smoke",
+]

@@ -19,6 +19,7 @@
         sweep sweep-cyfronet sweep-deepseek sweep-claude sweep-all \
         sweep-headline sweep-k8 \
         k2val k2val-scan k2val-jail-probe k2val-jail-smoke test-k2val-jail-live \
+        valfed-up valfed-reset valfed-down valfed-status valfed-check valfed-readiness-live \
         conformance inspect-smoke \
         report report-latest rescore \
         show-grid show-grid-rate show-headline show-trial inspect-fail list-runs \
@@ -77,6 +78,15 @@ help:
 	@echo "    k2val-jail-probe   leak probe of the CLI jail: PASS/FAIL table (K2VAL_JAIL_CLIS=codex,agy)"
 	@echo "    k2val-jail-smoke   one harmless prompt per CLI in the jail, no MCP (after the probe)"
 	@echo "    test-k2val-jail-live  the leak probe as a pytest (K2VAL_JAIL_LIVE=1)"
+	@echo ""
+	@echo "  Validation federation  (design/10; Onedata 25.0 in Compose on 127.0.0.1; VALFED_HOME=<dir>)"
+	@echo "    valfed-up          bring it up (or check it), cap CPUs, mint tokens, write"
+	@echo "                       benchmark/k2val/k2val.valfed.toml (VALFED_CORE_REPO, VALFED_KEY_DIR)"
+	@echo "    valfed-reset       empty every space; ids, users and tokens stay"
+	@echo "    valfed-down        remove it, its data and its tokens"
+	@echo "    valfed-status      containers, CPU and memory caps, peak memory, host load"
+	@echo "    valfed-check       no-model check: panel fixtures built and torn down in omcp-smoke"
+	@echo "    valfed-readiness-live  the gated live readiness test, in omcp-live"
 	@echo ""
 	@echo "  MCP-protocol validation  (paper-grade artifacts)"
 	@echo "    conformance        run modelcontextprotocol/conformance suite v0.1.16+"
@@ -395,6 +405,34 @@ k2val-jail-smoke:
 
 test-k2val-jail-live:
 	K2VAL_JAIL_LIVE=1 K2VAL_CONFIG=$(K2VAL_CONFIG) uv run pytest test/live/test_k2val_jail_live.py -v -s
+
+# ---------------------------------------------------------------------------
+# Validation federation (design/10, "Test environment")
+# ---------------------------------------------------------------------------
+#
+# The project's own two-provider Onedata 25.0 federation in Docker Compose, on 127.0.0.1 only:
+# benchmark/valfed/layout.toml, driven by benchmark/valfed/valfed.py (its docstring has the
+# details). Needs Docker and VALFED_HOME, an existing directory with room for all its data.
+# Run the panel on it with the SSL_CERT_FILE line at the top of benchmark/k2val/k2val.valfed.toml.
+VALFED = uv run python -m benchmark.valfed.valfed
+
+valfed-up:
+	$(VALFED) up
+
+valfed-reset:
+	$(VALFED) reset
+
+valfed-down:
+	$(VALFED) down
+
+valfed-status:
+	$(VALFED) status
+
+valfed-check:
+	$(VALFED) check
+
+valfed-readiness-live:
+	$(VALFED) readiness-live
 
 # ---------------------------------------------------------------------------
 # MCP-protocol validation
