@@ -87,7 +87,10 @@ def test_panel_config_passes_the_panels_own_checks(tmp_path: Path) -> None:
     assert cfg.federation.local.token_file == str(tmp_path / "tokens" / "tools.token")
     assert cfg.federation.onezone_token_file == cfg.federation.local.token_file
     assert {m.name: m.space for m in cfg.models.values()} == valfed.PANEL
-    assert all(m.key_file.startswith("/keys/") for m in cfg.models.values())
+    # the Claude configs run on the subscription (claude_sdk) and have no key file
+    keyed = [m for m in cfg.models.values() if not m.is_claude_sdk]
+    assert keyed and all(m.key_file.startswith("/keys/") for m in keyed)
+    assert all(not m.key_file for m in cfg.models.values() if m.is_claude_sdk)
 
 
 def test_panel_config_keeps_the_example_settings(tmp_path: Path) -> None:
