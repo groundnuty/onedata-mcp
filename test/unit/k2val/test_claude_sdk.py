@@ -649,7 +649,7 @@ async def test_a_session_that_does_not_offer_the_scenarios_tools_is_not_scored(
 
 
 def make_deps(cfg, api, clock, tmp_path, spend=None) -> RunDeps:
-    from test.unit.k2val.test_runner import FakeToolApp
+    from test.unit.k2val.test_runner import AgreeingJudge, FakeToolApp
 
     def factory(conf, on_cost):
         return ClaudeSdkAdapter(cfg, conf, tmp_path)
@@ -664,6 +664,7 @@ def make_deps(cfg, api, clock, tmp_path, spend=None) -> RunDeps:
         spend=spend,
         clock=clock,
         settle_poll_s=15.0,
+        judge=AgreeingJudge(),
     )
 
 

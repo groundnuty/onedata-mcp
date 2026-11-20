@@ -9,6 +9,7 @@ import json
 import pytest
 
 from benchmark._runtime_types import AgentTrace, RunContext
+from benchmark.k2val.judge import JudgeVerdict
 from benchmark.k2val.oracles import K2Context
 from benchmark.k2val.recording import CallRecord
 from benchmark.k2val.scenarios import SCENARIOS
@@ -397,7 +398,13 @@ def test_the_context_round_trips_through_the_artefact() -> None:
         again.at_answer.files[V3_FILE].qos_ids == ()
         and again.calls[0].tool == "get_file_qos_summary"
     )
-    assert rescore_stored(row) == {"outcome": "PASS", "diagnosis": run(ctx, V3N_RIGHT).diagnosis}
+    agreeing = JudgeVerdict("V3n", value="SAYS_NO_RULE", evidence="no placement rule")
+    assert rescore_stored(row, agreeing) == {
+        "outcome": "PASS",
+        "diagnosis": run(ctx, V3N_RIGHT).diagnosis,
+    }
+    # without a verdict, a stored trial is NEEDS_REVIEW, never scored on one reader
+    assert rescore_stored(row)["outcome"] == "NEEDS_REVIEW"
 
 
 def test_an_old_artefact_without_a_context_cannot_be_rescored() -> None:

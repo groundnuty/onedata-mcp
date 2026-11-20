@@ -7,6 +7,7 @@
     python -m benchmark.k2val.run scan   --config ... --models gpt-luna-low,gemini-flash-low
     python -m benchmark.k2val.run change --run-id ... --target ... --trigger-trial ... \\
         --reason ... --before-file ... --after-file ...
+    python -m benchmark.k2val.run rejudge --run-dir artefacts/k2val/<run id> [--config ...]
 
 `make k2val` runs the first form. Everything runs against the LOCAL Compose federation only.
 """
@@ -50,7 +51,21 @@ def _run_parser() -> argparse.ArgumentParser:
     p.add_argument("--run-id", default="", help="default: a UTC timestamp. Reuse to resume.")
     p.add_argument("--artefact-root", default="", help="override [run] artefact_root")
     p.add_argument("--no-report", action="store_true", help="do not write research/k2val-<id>.md")
+    p.add_argument(
+        "--no-judge",
+        action="store_true",
+        help="run without the judge: every judged trial is then NEEDS_REVIEW (judge_error)",
+    )
     return p
+
+
+def judge_conf(cfg: K2valConfig | None):
+    from benchmark.k2val.judge import JudgeConf
+
+    if cfg is None:
+        return JudgeConf()
+    j = cfg.judge
+    return JudgeConf(j.model, j.effort, j.binary, j.timeout_s, j.concurrency)
 
 
 def _select(cfg: K2valConfig, wanted: str) -> list[ModelConf]:
@@ -147,6 +162,8 @@ def run_main(argv: list[str]) -> int:
             return claude_sdk.make_claude_sdk_adapter(cfg, conf, run_dir)
         return api_factory(conf, on_cost)
 
+    from benchmark.k2val.judge import make_judge
+
     deps = RunDeps(
         cfg=cfg,
         run_id=run_id,
@@ -155,8 +172,10 @@ def run_main(argv: list[str]) -> int:
         app=app,
         adapter_factory=adapter_factory,
         spend=spend,
+        judge=None if args.no_judge else make_judge(judge_conf(cfg)),
     )
     meta = {
+        "judge": None if args.no_judge else vars(judge_conf(cfg)),
         "k": args.k,
         "models": [m.name for m in models],
         "scenarios": [s.id for s in scenarios],
@@ -220,6 +239,49 @@ def change_main(argv: list[str]) -> int:
     return 0
 
 
+def rejudge_main(argv: list[str]) -> int:
+    """Read stored answers again (rejudge.py): the current deterministic readers, the judge
+    (cached verdicts reused), and a new score where the artefact allows it. No trial runs."""
+    from benchmark.k2val.rejudge import (
+        VerdictCache,
+        compare,
+        iter_trials,
+        judge_trials,
+        write_outputs,
+    )
+
+    p = argparse.ArgumentParser(prog="python -m benchmark.k2val.run rejudge")
+    p.add_argument("--run-dir", action="append", required=True, help="a run's artefact directory")
+    p.add_argument("--config", default="", help="k2val.toml, for its [judge] (default: built-in)")
+    p.add_argument("--out", default="", help="output directory (default: <first run dir>/rejudge)")
+    p.add_argument("--cached-only", action="store_true", help="make no judge call")
+    a = p.parse_args(argv)
+    try:
+        cfg = load_config(a.config) if a.config else None
+    except ConfigError as e:
+        say(f"[k2val] {e}", file=sys.stderr)
+        return 2
+    conf = judge_conf(cfg)
+    dirs = [Path(d) for d in a.run_dir]
+    out = Path(a.out) if a.out else dirs[0] / "rejudge"
+    trials = list(iter_trials(dirs))
+    cache = VerdictCache(out / "verdicts.jsonl")
+    say(f"[k2val] rejudge: {len(trials)} trials from {[str(d) for d in dirs]} -> {out}")
+
+    def progress(t, v) -> None:
+        say(f"  {t.key}: {v.value!r}" + (f"  judge_error={v.error}" if v.error else ""))
+
+    from benchmark.k2val import judge as judge_module
+
+    judge = None if a.cached_only else judge_module.make_judge(conf)
+    verdicts = asyncio.run(judge_trials(trials, judge, conf, cache, on_verdict=progress))
+    rows = compare(trials, verdicts)
+    jsonl, md = write_outputs(rows, out)
+    disagree = sum(1 for r in rows if not r["agree"])
+    say(f"[k2val] {len(rows)} answers read; {disagree} disagreements -> {md} ({jsonl.name})")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     # The repository's `.env` points the PPAM harness at the live federation. It must never be
@@ -231,6 +293,8 @@ def main(argv: list[str] | None = None) -> int:
         return scan_main(argv[1:])
     if argv[:1] == ["change"]:
         return change_main(argv[1:])
+    if argv[:1] == ["rejudge"]:
+        return rejudge_main(argv[1:])
     if argv[:1] == ["jail-smoke"]:
         from benchmark.k2val.jail_smoke import smoke_main
 

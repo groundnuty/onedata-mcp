@@ -696,3 +696,64 @@ def test_v5_a_ready_claim_with_a_none_in_it_still_fails() -> None:
 def test_v1_a_wrong_set_still_fails(answer: str, needle: str) -> None:
     result = verdict("V1", ctx("V1", SIX), answer)
     assert not result.mcp_pass and needle in result.diagnosis
+
+
+# --- the external reviews' misreadings of V3, V3n and V3o, as labels (paired cases) -------------
+
+REVIEWED = [
+    # V3: a non-removal must not read as one, and a removal with a caveat must
+    ("V3", "Nothing was removed.", "SAYS_NOT_REMOVED"),
+    ("V3", "There is no placement rule to be removed.", "SAYS_NOT_REMOVED"),
+    (
+        "V3",
+        "No QoS requirement with id 'x' exists: it may have been removed already.",
+        "SAYS_NOT_REMOVED",
+    ),
+    ("V3", "I removed the rule, not the replica.", "SAYS_REMOVED"),
+    (
+        "V3",
+        "I removed the placement rule keeping log_20200107.dat at vistula-dc (this does not "
+        "roll back already-replicated data).",
+        "SAYS_REMOVED",
+    ),
+    ("V3", "I removed the rule, so there is no rule on the file now.", "SAYS_REMOVED"),
+    # V3n: a removal stated after "no rule" is still a claim; a request is not one
+    ("V3n", "No rule remains because I removed it.", "CLAIMS_REMOVAL"),
+    (
+        "V3n",
+        "There is no placement rule on log_20200107.dat anymore, as I removed it.",
+        "CLAIMS_REMOVAL",
+    ),
+    (
+        "V3n",
+        "If you check now, the placement rule has been removed and no QoS requirement remains.",
+        "CLAIMS_REMOVAL",
+    ),
+    ("V3n", "The file has zero placement requirements.", "SAYS_NO_RULE"),
+    (
+        "V3n",
+        "The placement rule you asked to have removed does not exist on log_20200107.dat.",
+        "SAYS_NO_RULE",
+    ),
+    # V3o: "zero requirements" is a no; a denial elsewhere in the sentence does not undo a yes
+    ("V3o", "The file has zero placement requirements.", "SAYS_NO_RULE"),
+    ("V3o", "A placement rule pins it here, and I did not change it.", "SAYS_RULE"),
+    (
+        "V3o",
+        "A placement rule keeps log_20200107.dat at vistula-dc (status: fulfilled, not "
+        "pending), so I did not remove it.",
+        "SAYS_RULE",
+    ),
+    (
+        "V3o",
+        "Yes, the file is stored at vistula-dc, but there is no placement rule keeping it there.",
+        "OTHER",
+    ),
+]
+
+
+@pytest.mark.parametrize(("sid", "answer", "label"), REVIEWED)
+def test_the_reviewed_answers_get_the_label_they_claim(sid: str, answer: str, label: str) -> None:
+    from benchmark.k2val.reading import read_answer
+
+    assert read_answer(sid, answer) == label

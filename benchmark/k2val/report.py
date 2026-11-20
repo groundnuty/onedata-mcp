@@ -7,7 +7,10 @@ failure). Layout, in reading order:
 1. the control (`sonnet-medium`): scenarios where it did not pass are DESIGN SUSPECT, to be
    settled (a wrong tool, scenario or oracle) before any weak-model result is read;
 2. a K2 violation, if any, in large letters (a tool bug, not a model failure);
-3. the raw pass^k table, control column first, the three Haiku efforts side by side;
+2b. NEEDS_REVIEW: every trial whose two answer readings disagree (or whose judge failed), with
+   both readings, the judge's evidence and the outcome each reading would give;
+3. the raw pass^k table, control column first, the three Haiku efforts side by side, with a
+   NEEDS_REVIEW count of its own in each cell;
 4. the Haiku effort comparison;
 5. every non-pass with its diagnosis and the trace lines that show why;
 6. premature claims; tool-call sequences per scenario; wrong arguments; errors tools returned;
@@ -49,17 +52,42 @@ def ordered_models(cfg: K2valConfig, present: set[str]) -> list[str]:
 
 
 def _cell(rows: list[dict]) -> str:
+    """`passes/judged`, pass^k when every trial was judged, then the other outcomes; a
+    NEEDS_REVIEW is never counted as a pass or a fail until it is classified."""
     if not rows:
         return "-"
     judged = [r for r in rows if r["outcome"] in JUDGED]
     passes = sum(r["outcome"] == "PASS" for r in judged)
-    extra = Counter(r["outcome"] for r in rows if r["outcome"] not in JUDGED)
+    review = sum(r["outcome"] == "NEEDS_REVIEW" for r in rows)
+    extra = Counter(r["outcome"] for r in rows if r["outcome"] not in (*JUDGED, "NEEDS_REVIEW"))
     text = f"{passes}/{len(judged)}" if judged else "0/0"
     if judged and len(judged) == len(rows):
         text += f" (pass^{len(rows)}={int(passes == len(rows))})"
+    if review:
+        text += f" **+{review} NEEDS_REVIEW**"
     if extra:
         text += " +" + ",".join(f"{n} {k}" for k, n in sorted(extra.items()))
     return text
+
+
+def _review_lines(r: dict) -> list[str]:
+    reading = r.get("answer_reading") or {}
+    verdict = reading.get("judge_verdict") or {}
+    lines = [
+        f"### {r['scenario_id']} / {r['llm_name']} / trial {r['trial_ix']}: NEEDS_REVIEW",
+        f"- deterministic reader: `{reading.get('deterministic')}`",
+        f"- judge ({verdict.get('model')} {verdict.get('effort')}, rubric "
+        f"{verdict.get('rubric_sha')}): `{reading.get('judge')}`"
+        + (f"; judge_error: {reading.get('judge_error')}" if reading.get("judge_error") else ""),
+        f"- judge's evidence: {_short(verdict.get('evidence') or '', 220)!r}"
+        + ("" if verdict.get("evidence_quoted") in (True, None) else " (NOT a quote)"),
+        f"- outcome if each reading decided: {reading.get('outcome_if')}",
+        f"- final answer: {_short(r.get('final_answer') or '(none)', 400)}",
+        "- Classification (which reading is right; then harness bug / deployment artefact / "
+        "tool-attributable / model capability): ",
+        "",
+    ]
+    return lines
 
 
 def _sequence(calls: list[dict]) -> str:
@@ -163,6 +191,19 @@ def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | N
             )
         w("")
 
+    # 2b. NEEDS_REVIEW
+    review = [r for r in rows if r["outcome"] == "NEEDS_REVIEW"]
+    w("## NEEDS_REVIEW (the two answer readings disagree, or the judge failed)\n")
+    if review:
+        w(
+            f"**{len(review)} trial(s) to classify by hand before any figure is read.** No record "
+            "is complete while one remains (design/10, gate 4).\n"
+        )
+        for r in sorted(review, key=lambda r: (r["scenario_id"], r["llm_name"], r["trial_ix"])):
+            out.extend(_review_lines(r))
+    else:
+        w("None.\n")
+
     # 3. pass^k table
     w("## Raw pass^k table (judged trials; other outcomes after the `+`)\n")
     w("| scenario | " + " | ".join(models) + " |")
@@ -199,7 +240,7 @@ def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | N
 
     # 5. every non-pass
     w("## Every non-pass\n")
-    bad = [r for r in rows if r["outcome"] != "PASS"]
+    bad = [r for r in rows if r["outcome"] not in ("PASS", "NEEDS_REVIEW")]
     if not bad:
         w("None.\n")
     for r in sorted(bad, key=lambda r: (r["scenario_id"], r["llm_name"], r["trial_ix"])):

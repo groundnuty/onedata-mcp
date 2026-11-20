@@ -54,7 +54,9 @@ def raw_config(secret_files: dict[str, Path]) -> dict:
                 "token_file": str(secret_files["owner"]),
             },
         },
-        "run": {"settle_s": 30, "wall_cap_s": 5, "tool_call_cap_s": 5},
+        # wall_cap_s: far above any trial's own time on a loaded host (a 5 s cap failed a real-
+        # tool trial at a load of 15); the tests of the cap set their own (0.2-0.3 s)
+        "run": {"settle_s": 30, "wall_cap_s": 120, "tool_call_cap_s": 5},
         "spend": {"cap_usd": 1.0, "reserve_usd": 0.5},
         "models": {
             "sonnet-medium": {

@@ -70,9 +70,28 @@ class FakeToolApp:
         return SimpleNamespace(structured_content=out, content=[])
 
 
+class AgreeingJudge:
+    """A fake judge (never the real one in unit tests): it reads the answer as the scenario's
+    deterministic reader does, from what a judge sees (the brief, the site, the answer)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    async def __call__(self, scenario_id, *, brief, local, answer):
+        from benchmark.k2val.judge import JudgeVerdict
+        from benchmark.k2val.reading import read_answer
+
+        self.calls.append((scenario_id, answer))
+        value = read_answer(scenario_id, answer, {"brief": brief}, local=local)
+        return JudgeVerdict(
+            scenario_id=scenario_id, value=value, evidence=answer[:40], model="fake"
+        )
+
+
 def make_deps(
     cfg, api, clock, tmp_path, script_for, *, app=None, spend=None, settle_poll_s=15.0, **kw
 ) -> RunDeps:
+    kw.setdefault("judge", AgreeingJudge())
     adapters: dict[str, ScriptedAdapter] = {}
 
     def factory(conf, on_cost):

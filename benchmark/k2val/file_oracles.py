@@ -166,10 +166,23 @@ def verify_fa(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     Right answer: `spec.expect`. The federation axis is not judged (None): nothing in the K1 set
     changes the trial directory's tree."""
     spec = file_scenarios.FILE_SCENARIOS[ctx.scenario_id]
-    got = fa_label(trace.final_answer, file_scenarios.FA_NAMES)
-    if got == spec.expect:
-        return _result(True, None, [f"answers {got}"])
-    return _result(False, None, [f"answers {got}, not {spec.expect}"])
+    got = ctx.decided(lambda: fa_names(trace.final_answer))
+    want = fa_names_of(str(spec.expect))
+    shown = "unclear" if got is None else (sorted(got) or "none")
+    if got == want:
+        return _result(True, None, [f"answers {shown}"])
+    return _result(False, None, [f"answers {shown}, not {sorted(want) or 'none'}"])
+
+
+def fa_names_of(label: str) -> frozenset[str] | None:
+    """`fa_label`'s label as the name set both readers give (rubrics: kind "names")."""
+    if label == "unclear":
+        return None
+    return frozenset() if label == "none" else frozenset({label})
+
+
+def fa_names(answer: str) -> frozenset[str] | None:
+    return fa_names_of(fa_label(answer, file_scenarios.FA_NAMES))
 
 
 FILE_ORACLES.update(dict.fromkeys(("FA", "FAi", "FAn"), verify_fa))

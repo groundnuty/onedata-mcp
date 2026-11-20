@@ -10,6 +10,8 @@ Outcomes: `PASS` and `FAIL` come from the oracle. `NO_RESULT` is a cap reached (
 20 minute wall, tokens, a refusal): no result, not a failure. `BUDGET_STOP` and
 `BUDGET_REFUSED` come from the Anthropic spend cap. `RESET_FAIL`, `ADAPTER_ERROR` and
 `ORACLE_ERROR` and `HARNESS_ERROR` are the harness or the deployment, not the model.
+`NEEDS_REVIEW`: the deterministic reader and the judge read the answer differently, or the judge
+failed (`answer_reading`); it is classified by hand, and no record is complete while one remains.
 """
 
 from __future__ import annotations
@@ -31,9 +33,11 @@ OUTCOMES = (
     "ADAPTER_ERROR",
     "ORACLE_ERROR",
     "HARNESS_ERROR",
+    "NEEDS_REVIEW",
 )
 # Outcomes that count as the model's answer being judged.
 JUDGED = ("PASS", "FAIL")
+# The two answer readers disagreed, or the judge failed: classified by hand before it counts.
 
 
 @dataclass(frozen=True)
@@ -67,6 +71,10 @@ class K2TrialArtefact(TrialArtefact):
     # What scoring needs beside the snapshots, baseline, writer and calls (scoring.py), so that
     # a trial can be scored again offline.
     oracle_context: dict | None = None
+    # Both readings of the final answer (scoring.score_dual): the deterministic reader's, the
+    # judge's verdict (label or names, evidence, model, effort, rubric hash, error), whether they
+    # agree, the reading that decided, and for NEEDS_REVIEW the outcome each would give.
+    answer_reading: dict | None = None
     # Filled in by hand after the run: harness bug / deployment artefact / model failure.
     classification: str = ""
 

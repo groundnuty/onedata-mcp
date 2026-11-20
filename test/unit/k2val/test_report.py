@@ -210,3 +210,34 @@ def test_recorded_changes_appear_with_before_and_after(cfg, tmp_path) -> None:
 def test_the_scenario_range_syntax() -> None:
     assert parse_scenarios("V1..V7") == [f"V{i}" for i in range(1, 8)]
     assert parse_scenarios("V5,V2") == ["V5", "V2"]
+
+
+def test_needs_review_is_its_own_count_and_section_never_a_pass_or_a_fail(cfg, tmp_path) -> None:
+    reading = {
+        "deterministic": "NOT_READY_ELSEWHERE",
+        "judge": "SAYS_READY",
+        "judge_error": None,
+        "judge_verdict": {
+            "evidence": "they are ready",
+            "model": "claude-sonnet-5-5",
+            "effort": "medium",
+            "rubric_sha": "abc",
+            "evidence_quoted": True,
+        },
+        "outcome_if": {"deterministic": "PASS", "judge": "FAIL"},
+    }
+    text = build(
+        cfg,
+        tmp_path,
+        [
+            art("glm", "V4", 0, "PASS"),
+            art("glm", "V4", 1, "NEEDS_REVIEW", answer_reading=reading, final_answer="Not ready."),
+        ],
+    )
+    assert "| V4 check, remote | 1/1 **+1 NEEDS_REVIEW** |" in text
+    section = text.split("## NEEDS_REVIEW")[1].split("\n## ")[0]
+    assert "V4 / glm / trial 1: NEEDS_REVIEW" in section
+    assert "`NOT_READY_ELSEWHERE`" in section and "`SAYS_READY`" in section
+    assert "they are ready" in section and "'deterministic': 'PASS'" in section
+    every_non_pass = text.split("## Every non-pass")[1].split("\n## ")[0]
+    assert "NEEDS_REVIEW" not in every_non_pass  # listed once, in its own section

@@ -312,7 +312,7 @@ CDN = FileScenario(
     answer="not created: a regular file named archive already exists there",
     rules=(
         "Pass when the answer says no directory was created BECAUSE a regular file named "
-        "archive is in the way (NOT_CREATED_FILE_IN_WAY; \"a directory already exists\" or a "
+        'archive is in the way (NOT_CREATED_FILE_IN_WAY; "a directory already exists" or a '
         "bare failure is a wrong answer) AND the tree at the answer equals the baseline: the "
         "file is not touched and nothing is made under another name. The federation axis: the "
         "tree after the answer equals the baseline."

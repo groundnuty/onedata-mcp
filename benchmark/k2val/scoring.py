@@ -14,6 +14,12 @@ shares, and decides the outcome:
 - **writes inside**: every successful write targets the trial's own directory (a path under
   it, or an id of one of its entries).
 
+The answer is read twice (`score_dual`): by the scenario's deterministic reader (`reading.py`)
+and by the judge (`judge.py`). When they agree, that reading decides; when they disagree, or
+the judge failed, the outcome is NEEDS_REVIEW, with both readings, the judge's evidence and
+the outcome each reading would give (`answer_reading.outcome_if`) kept for the hand
+classification. A judge failure is never a silent fallback to the deterministic reading.
+
 `federation_pass` None means "not applicable", never a pass by default. An unusable reading is
 not scored at all: `UnusableSnapshot`, which the runner records as ORACLE_ERROR.
 
@@ -26,7 +32,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from benchmark._runtime_types import AgentTrace, OracleResult, RunContext
@@ -60,10 +66,12 @@ class Check:
 
 @dataclass
 class Scored:
-    outcome: str  # PASS | FAIL
+    outcome: str  # PASS | FAIL | NEEDS_REVIEW
     oracle: OracleResult
     checks: list[Check] = field(default_factory=list)
     flags: list[str] = field(default_factory=list)
+    # both readings of the answer, the one that decided, and (NEEDS_REVIEW) the outcome of each
+    answer_reading: dict[str, Any] | None = None
 
     @property
     def diagnosis(self) -> str:
@@ -337,6 +345,41 @@ def score(scenario: Scenario, ctx: K2Context, trace: AgentTrace) -> Scored:
     return Scored("PASS" if passed else "FAIL", oracle, checks, flags)
 
 
+def score_dual(scenario: Scenario, ctx: K2Context, trace: AgentTrace, verdict: Any) -> Scored:
+    """`score`, with the answer read by both readers. `verdict`: the judge's `JudgeVerdict`, or
+    None when no judge ran (NEEDS_REVIEW, judge_error "no judge")."""
+    from benchmark.k2val.reading import read_in_context
+    from benchmark.k2val.rubrics import reading_to_json, same_reading
+
+    det = read_in_context(scenario.id, trace.final_answer, ctx)
+    error = "no judge" if verdict is None else verdict.error
+    reading: dict[str, Any] = {
+        "deterministic": reading_to_json(det),
+        "judge": None if verdict is None or error else reading_to_json(verdict.value),
+        "judge_verdict": None if verdict is None else verdict.to_json(),
+        "judge_error": error,
+    }
+    if error is None and same_reading(det, verdict.value):
+        ctx.reading = det
+        scored = score(scenario, ctx, trace)
+        reading.update(agree=True, decided=reading_to_json(det))
+        scored.answer_reading = reading
+        return scored
+    outcome_if: dict[str, str] = {}
+    det_ctx = replace(ctx, flags=[], reading=det)
+    scored = score(scenario, det_ctx, trace)
+    outcome_if["deterministic"] = scored.outcome
+    if error is None:
+        judge_ctx = replace(ctx, flags=[], reading=verdict.value)
+        outcome_if["judge"] = score(scenario, judge_ctx, trace).outcome
+    ctx.flags.extend(det_ctx.flags)
+    reading.update(agree=False, decided=None, outcome_if=outcome_if)
+    scored.outcome = "NEEDS_REVIEW"
+    scored.flags.append("judge_error" if error else "readers_disagree")
+    scored.answer_reading = reading
+    return scored
+
+
 # ---------------------------------------------------------------------------------------------
 # The context, kept in the artefact and rebuilt from it
 # ---------------------------------------------------------------------------------------------
@@ -412,14 +455,19 @@ def context_from_artefact(row: dict[str, Any]) -> K2Context | None:
 
 
 def rescore_stored(row: dict[str, Any], verdict: Any = None) -> dict[str, Any] | None:
-    """Score a stored trial again with the current code; None when the artefact cannot be."""
+    """Score a stored trial again with the current code, the answer read by the current
+    deterministic reader and `verdict` (the judge's; None: NEEDS_REVIEW). None when the
+    artefact cannot be scored again (it predates `oracle_context`)."""
     ctx = context_from_artefact(row)
     scenario = SCENARIOS.get(row.get("scenario_id", ""))
     if ctx is None or scenario is None:
         return None
     trace = AgentTrace(final_answer=row.get("final_answer") or "", tool_calls=())
     try:
-        scored = score(scenario, ctx, trace)
+        scored = score_dual(scenario, ctx, trace, verdict)
     except UnusableSnapshot as e:
         return {"outcome": "ORACLE_ERROR", "diagnosis": str(e)}
-    return {"outcome": scored.outcome, "diagnosis": scored.diagnosis}
+    out = {"outcome": scored.outcome, "diagnosis": scored.diagnosis}
+    if scored.outcome == "NEEDS_REVIEW":
+        out["outcome_if"] = (scored.answer_reading or {}).get("outcome_if")
+    return out

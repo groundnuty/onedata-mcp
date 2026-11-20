@@ -19,7 +19,7 @@
         smoke smoke-d1 smoke-fast \
         sweep sweep-cyfronet sweep-deepseek sweep-claude sweep-all \
         sweep-headline sweep-k8 \
-        k2val k2val-scan k2val-jail-probe k2val-jail-smoke test-k2val-jail-live \
+        k2val k2val-rejudge k2val-scan k2val-jail-probe k2val-jail-smoke test-k2val-jail-live \
         valfed-up valfed-reset valfed-down valfed-status valfed-check valfed-readiness-live \
         valfed-qos-live valfed-transfer-live test-transfer-live \
         test-files-live valfed-files-live \
@@ -80,6 +80,11 @@ help:
 	@echo "      make k2val                                  all configs, V1..V7, K=3"
 	@echo "      make k2val K2VAL_MODELS=sonnet-medium,haiku-low K2VAL_SCENARIOS=V2,V5 K2VAL_K=1"
 	@echo "                         (K2VAL_CONFIG=... K2VAL_RID=<run id to resume>)"
+	@echo "                       Each answer is read by its deterministic reader AND a rubric judge"
+	@echo "                       ([judge], default claude-sonnet-5-5 at effort medium, on the"
+	@echo "                       subscription); a disagreement is NEEDS_REVIEW (design/08)"
+	@echo "    k2val-rejudge      read a run's stored answers again, offline: RID=<run id> (or"
+	@echo "                       K2VAL_RUN_DIRS=\"dir1 dir2\"); cached verdicts are reused; no trial runs"
 	@echo "    k2val-scan         pre-flight scan for the CLI legs (wave 2; K2VAL_MODELS=gpt-luna-low,..)"
 	@echo "    k2val-jail-probe   leak probe of the CLI jail: PASS/FAIL table (K2VAL_JAIL_CLIS=codex,agy)"
 	@echo "    k2val-jail-smoke   one harmless prompt per CLI in the jail, no MCP (after the probe)"
@@ -404,6 +409,15 @@ K2VAL_MODELS ?=
 K2VAL_SCENARIOS ?= V1..V7
 K2VAL_K ?= 3
 K2VAL_RID ?=
+
+RID ?=
+K2VAL_RUN_DIRS ?= $(if $(RID),artefacts/k2val/$(RID))
+
+k2val-rejudge:
+	@test -n "$(K2VAL_RUN_DIRS)" || { echo "set RID=<run id> or K2VAL_RUN_DIRS=..."; exit 2; }
+	uv run python -m benchmark.k2val.run rejudge \
+	  $(foreach d,$(K2VAL_RUN_DIRS),--run-dir $(d)) \
+	  $(if $(wildcard $(K2VAL_CONFIG)),--config $(K2VAL_CONFIG))
 
 k2val:
 	uv run python -m benchmark.k2val.run --config $(K2VAL_CONFIG) \

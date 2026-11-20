@@ -32,7 +32,7 @@ from benchmark.k2val.legs import AdapterFactory
 from benchmark.k2val.oracles import K2Context, k2_violations, settled
 from benchmark.k2val.recording import CallRecord, RecordingApp
 from benchmark.k2val.scenarios import SYSTEM_PROMPT_TEMPLATE, Scenario
-from benchmark.k2val.scoring import context_to_json, score
+from benchmark.k2val.scoring import context_to_json, score_dual
 from benchmark.k2val.secrets import redact, say
 from benchmark.k2val.snapshot import Snapshot, UnusableSnapshot, take_snapshot
 from benchmark.k2val.spend import SpendTracker
@@ -81,6 +81,8 @@ class RunDeps:
     writer_finish_override: float | None = None
     settle_poll_s: float = SETTLE_POLL_S
     notes: list[str] = field(default_factory=list)
+    # The second reader of every answer (judge.py); None: every judged trial is NEEDS_REVIEW.
+    judge: Any = None
 
 
 def _tools_for(deps: RunDeps, scenario: Scenario) -> frozenset[str]:
@@ -348,9 +350,10 @@ async def run_trial(
         trace = AgentTrace(final_answer=final_answer, tool_calls=common["tool_calls"])
         try:
             # One usability rule for every scenario (snapshot.py): nothing is judged on a reading
-            # that failed, whatever the oracle would make of it. Then the oracle and the checks
-            # every scenario of a kind shares (scoring.py).
-            scored = score(scenario, ctx, trace)
+            # that failed, whatever the oracle would make of it. Then the answer, read by both
+            # readers, the oracle and the checks every scenario of a kind shares (scoring.py).
+            verdict = await _judge(deps, scenario, brief, local_name, final_answer)
+            scored = score_dual(scenario, ctx, trace, verdict)
         except UnusableSnapshot as e:
             return persist(
                 artefact(
@@ -377,6 +380,7 @@ async def run_trial(
                 oracle_federation_pass=scored.oracle.federation_pass,
                 oracle_diagnosis=scored.diagnosis,
                 checks=tuple(c.to_json() for c in scored.checks),
+                answer_reading=scored.answer_reading,
                 flags=tuple(dict.fromkeys([*flags, *ctx.flags, *scored.flags])),
                 k2_violations=tuple(k2_violations(ctx)),
                 **common,
@@ -392,6 +396,19 @@ async def run_trial(
                 deps.notes.append(f"{trial_id}: teardown problems: {teardown_problems}")
         if tracked:
             deps.spend.end_trial()
+
+
+async def _judge(deps: RunDeps, scenario: Scenario, brief: str, local: str, answer: str) -> Any:
+    """The judge's verdict, or None when the run has no judge. A judge that raises gives a
+    verdict with its error: NEEDS_REVIEW, never a silent fallback."""
+    if deps.judge is None:
+        return None
+    from benchmark.k2val.judge import JudgeVerdict
+
+    try:
+        return await deps.judge(scenario.id, brief=brief, local=local, answer=answer)
+    except Exception as e:  # noqa: BLE001 - the judge's failure, recorded
+        return JudgeVerdict(scenario_id=scenario.id, error=f"{type(e).__name__}: {e}"[:500])
 
 
 def _surface_problem(scenario: Scenario, tools: frozenset[str], offered: list[str]) -> str | None:

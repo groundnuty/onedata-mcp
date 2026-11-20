@@ -181,3 +181,60 @@ key_file = "/nonexistent"
     code = run_module.main(["--config", str(toml)])
     assert code == 2
     assert "refusing to run" in capsys.readouterr().err
+
+
+BRIEF_V3N = "A placement rule keeps `/s/logs-x/log_20200107.dat` at vistula-dc. Remove that rule."
+
+
+def test_rejudge_reads_stored_answers_offline_with_cached_verdicts(tmp_path, monkeypatch) -> None:
+    """`make k2val-rejudge`: no trial, no federation; with --cached-only, no judge call either.
+    An answer without a cached verdict is reported as a judge error, never as agreement."""
+    import json
+
+    from benchmark.k2val import rejudge
+    from benchmark.k2val.judge import JudgeConf, JudgeVerdict
+
+    run_dir = tmp_path / "R1"
+    run_dir.mkdir()
+    rows = [
+        {
+            "scenario_id": "V3n",
+            "llm_name": "glm",
+            "outcome": "PASS",
+            "brief": BRIEF_V3N,
+            "final_answer": "There is no placement rule on that file, so nothing was removed.",
+        },
+        {
+            "scenario_id": "V3n",
+            "llm_name": "glm",
+            "outcome": "PASS",
+            "brief": BRIEF_V3N,
+            "final_answer": "No rule remains because I removed it.",
+        },
+    ]
+    (run_dir / "glm__V3n.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    out = tmp_path / "out"
+    trials = list(rejudge.iter_trials([run_dir]))
+    cache = rejudge.VerdictCache(out / "verdicts.jsonl")
+    key = rejudge.cache_key(
+        "V3n", rows[0]["brief"], "vistula-dc", rows[0]["final_answer"], JudgeConf()
+    )
+    cache.put(
+        key, trials[0].key, JudgeVerdict("V3n", value="SAYS_NO_RULE", evidence="no placement rule")
+    )
+
+    def no_judge(*a, **k):
+        raise AssertionError("a judge was built")
+
+    monkeypatch.setattr("benchmark.k2val.judge.make_judge", no_judge)
+    code = run_module.main(
+        ["rejudge", "--run-dir", str(run_dir), "--out", str(out), "--cached-only"]
+    )
+    assert code == 0
+    got = [json.loads(line) for line in (out / "rejudge.jsonl").read_text().splitlines()]
+    assert [r["agree"] for r in got] == [True, False]
+    assert got[1]["deterministic"] == "CLAIMS_REMOVAL" and got[1]["judge_error"]
+    report = (out / "rejudge.md").read_text()
+    assert "| V3n | 2 | 1 | 0 | 1 |" in report
+    assert "## Stored PASSes the judge reads as a wrong claim" in report
+    assert not (run_dir / "glm__V3n.jsonl").read_text().count("agree")  # the run is untouched

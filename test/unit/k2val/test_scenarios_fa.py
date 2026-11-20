@@ -108,15 +108,16 @@ def test_fa_label_a_bare_enumeration_is_read_by_its_last_line() -> None:
 
 
 @pytest.mark.parametrize("sid", FA_IDS)
-def test_the_oracle_judges_the_answer_and_not_the_federation(sid: str) -> None:
-    """Nothing in the K1 set changes the trial directory: the federation axis is None, and an
-    unreadable tree does not matter."""
+def test_the_oracle_judges_the_answer_its_federation_axis_is_none(sid: str) -> None:
+    """The oracle reads the answer only (federation None); that nothing changed, the K1 set
+    offering write tools, is scoring.py's restraint check, which also refuses an unreadable
+    tree (test_scoring.py)."""
     expect = FILE_SCENARIOS[sid].expect
     right = expect if expect == "none" else f"It is {expect}."
     assert verdict(sid, ctx(sid, snap(None, "x")), right).mcp_pass is True
     wrong = verdict(sid, ctx(sid, snap(None, "x")), "log_20200104.dat")
     assert (wrong.mcp_pass, wrong.federation_pass) == (False, None)
-    assert "answers log_20200104.dat" in wrong.diagnosis
+    assert "answers ['log_20200104.dat']" in wrong.diagnosis
 
 
 # --- full trials with the real tools ------------------------------------------------------------

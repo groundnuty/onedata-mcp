@@ -188,6 +188,17 @@ class ScanConf:
 
 
 @dataclass(frozen=True)
+class JudgeSection:
+    """`[judge]`: the second reader of every answer (judge.py), on the subscription."""
+
+    model: str = "claude-sonnet-5-5"
+    effort: str = "medium"
+    binary: str = ""
+    timeout_s: float = 180.0
+    concurrency: int = 2
+
+
+@dataclass(frozen=True)
 class K2valConfig:
     federation: FederationConf
     models: dict[str, ModelConf]
@@ -197,6 +208,7 @@ class K2valConfig:
     scan: ScanConf = field(default_factory=ScanConf)
     tools_k1: tuple[str, ...] = K1_TOOLS
     tools_k2: tuple[str, ...] = K2_TOOLS
+    judge: JudgeSection = field(default_factory=JudgeSection)
     artefact_root: Path = Path("artefacts/k2val")
     research_dir: Path = Path("research")
     path: Path | None = None
@@ -360,7 +372,9 @@ def parse_config(raw: dict[str, Any], *, path: Path | None = None) -> K2valConfi
     jail_raw = _table(_table(raw, "cli"), "jail")
     scan_raw = _table(_table(raw, "cli"), "scan")
     tools = _table(raw, "tools")
+    judge = _judge_section(_table(raw, "judge"))
     return K2valConfig(
+        judge=judge,
         federation=federation,
         models=models,
         limits=limits,
@@ -376,6 +390,21 @@ def parse_config(raw: dict[str, Any], *, path: Path | None = None) -> K2valConfi
         research_dir=Path(run.get("research_dir", "research")),
         path=path,
     )
+
+
+def _judge_section(raw: dict[str, Any]) -> JudgeSection:
+    section = JudgeSection(
+        model=str(raw.get("model", JudgeSection.model)),
+        effort=str(raw.get("effort", JudgeSection.effort)),
+        binary=str(raw.get("binary", "")),
+        timeout_s=float(raw.get("timeout_s", JudgeSection.timeout_s)),
+        concurrency=int(raw.get("concurrency", JudgeSection.concurrency)),
+    )
+    if section.effort not in CLAUDE_EFFORTS:
+        raise ConfigError(f"judge.effort must be one of {CLAUDE_EFFORTS}")
+    if not 1 <= section.concurrency <= 4:
+        raise ConfigError("judge.concurrency must be 1 to 4")
+    return section
 
 
 def load_config(path: str | Path) -> K2valConfig:
