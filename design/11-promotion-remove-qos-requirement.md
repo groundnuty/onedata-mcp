@@ -1,6 +1,8 @@
 # Promotion record: `remove_qos_requirement`
 
-Status: **in progress** (2026-11-20). Gates 1 and 2 are done. Gate 3's live test is built but has not been run. Gate 4's scenarios are built and unit-tested on the fake federation, but the run has not happened. The validation federation is on hold, so nothing here touched a live Onedata. The tool stays `experimental` until gates 3 and 4 pass. It moves to `STABLE` in the PR that completes this record.
+Status: **in progress** (2026-11-20). Gate 1 is done. Gate 2 is done except for `make conformance`, which has not been run. Gate 3's live test is built but has not been run. Gate 4's scenarios are built and unit-tested on the fake federation, but the run has not happened. The validation federation is on hold, so nothing here touched a live Onedata. The tool stays `experimental` until gates 2–4 are complete. It moves to `STABLE` in the PR that completes this record.
+
+The short commit ids below are **branch commits** on `feat/promote-remove-qos-requirement`. A squash merge leaves them unreachable from `master`. **The anchor is the surface hash.**
 
 The protocol is [`10-tool-maturity.md`](10-tool-maturity.md). The panel and its scenarios are in [`08-readiness-validation-panel.md`](08-readiness-validation-panel.md).
 
@@ -13,9 +15,9 @@ The protocol is [`10-tool-maturity.md`](10-tool-maturity.md). The panel and its 
 
 ## The surface being promoted
 
-`make tools-manifest` with `ONEDATA_MCP_TOOLS` set to the selection, hashed with sha256, the same way as [`09-readiness-freeze-record.md`](09-readiness-freeze-record.md):
+The listing is `scripts/tools_manifest.py`'s output (`make -s tools-manifest`) with `ONEDATA_MCP_TOOLS` set to the selection, hashed with sha256, the same way as [`09-readiness-freeze-record.md`](09-readiness-freeze-record.md). Without `-s`, make prints the recipe line too, and the hash differs.
 
-| Selection | Before (master `4cd4c47`) | Promoted surface (since `ac6141a`) |
+| Selection | Before (master `4cd4c47`) | Promoted surface (since branch commit `ac6141a`) |
 |---|---|---|
 | `remove_qos_requirement` alone | `471147719eef6f8c9e0b42c1ff6b3d7816ba014bebcbc02e23950923eddb7924` | `1e6ccb560597d0887484b0fdccfc0c59616cb2265ebe09944f79d619deef7b78` |
 | the panel's K1 set (11 tools) | `4c8ef3f22fee7805e7c7ef72b4258a6a3bc4ee2f95ef1dafb7d0edd8ebf61b66` (= design/09's "existing 11") | `f72ad02e712d8f8d761095bcf54f978b8ad18bac1b10704973ecdc1c3d4f9a04` |
@@ -28,13 +30,13 @@ The protocol is [`10-tool-maturity.md`](10-tool-maturity.md). The panel and its 
   +    "description": "Remove a QoS requirement by id. Returns nothing on success.\nDoes not roll back already-replicated data.",
   ```
 
-- **Earlier evidence is supporting only.** The earlier panel run (V1–V7, K=3, before this record) had V3 pass in every trial, with the tool called and no error. That run used the old description. Gate 4 needs a run at the surface above.
+- **Earlier evidence is supporting only.** The triage of the experimental tools (2026-11-20) counted the earlier panel run (V1–V7) and reported 28 V3 trials, all passing, with the tool called and no error. Those were eight API configs at K=3 and two CLI agents. The figure is reported here, not recounted. That run used the old description; gate 4 needs a run at the surface above.
 
 **Before the gate-4 run**, check that the surface has not moved:
 
-    ONEDATA_MCP_TOOLS=remove_qos_requirement make tools-manifest | sha256sum   # expect 1e6ccb56...
+    ONEDATA_MCP_TOOLS=remove_qos_requirement make -s tools-manifest | sha256sum   # expect 1e6ccb56...
 
-## Gate 1: implementation (done, `6a9fe20`)
+## Gate 1: implementation (done, branch commit `6a9fe20`)
 
 Every error path a model can trigger, and what the model now reads. The tests are in `test/unit/api/test_qos.py`, plus `test/unit/modules/test_qos_wrapper.py` for the text as it arrives through the MCP client.
 
@@ -53,7 +55,7 @@ Every error path a model can trigger, and what the model now reads. The tests ar
 - The protocol's "empty result" path has no separate case for a removal. Removing an id that names nothing is the unknown-id path above.
 - `get_qos_requirement`, a stable tool, puts its id into the path the same way, unencoded. It is not changed here; a fix would need gates 1 and 3 for that tool.
 
-## Gate 2: surface review (done, `ac6141a`)
+## Gate 2: surface review (done except `make conformance`, branch commit `ac6141a`)
 
 Checked against the protocol's rules; `test_the_description_follows_the_surface_rules` covers the first three:
 
@@ -64,7 +66,7 @@ Checked against the protocol's rules; `test_the_description_follows_the_surface_
 - **`make conformance`: TODO.** It needs `npx` and a local port, and was not run here. Command: `make conformance`.
 - **Open point, not fixed:** a file's QoS summary also lists requirements *inherited* from ancestor directories. Removing such an id removes the directory's requirement, for every file under it, and the description does not say so. No scenario exercises it, and the protocol does not call it a defect, so it is left as it is. If it is to be added, add it **before** the gate-4 run: after promotion the same change costs a smoke re-run.
 
-## Gate 3: live check (built in `d5f7ff5`, not run)
+## Gate 3: live check (built in branch commit `d5f7ff5`, not run)
 
 [`test/live/test_qos_live.py`](../test/live/test_qos_live.py) calls the tools through an in-process MCP client, as a model would. It covers:
 
@@ -89,7 +91,9 @@ Like the readiness live test, it is skipped unless `ONEDATA_MCP_LIVE_QOS=1`. It 
 
 If a status is not 404, or the error is the permission hint, change the hint mapping and the unit tests' bodies before the gate-4 run.
 
-## Gate 4: validation run (scenarios built in `a04db6d`, not run)
+**If the summary takes any time to drop the id, give V3n and V3o a settle wait before the run.** Both now settle nothing: their federation axis reads the snapshot taken right after the answer. That snapshot would then miss a removal the summary had not yet shown, and a V3o trial that removed the rule could pass. V3 polls for the same reason.
+
+## Gate 4: validation run (scenarios built in branch commits `a04db6d` and `90984db`, not run)
 
 ### Scenario coverage (design/10)
 
@@ -147,9 +151,9 @@ Classify every non-pass before anything counts. The classes are harness or oracl
 
 This file. To complete it:
 
-1. Fill in the gate-3 and gate-4 TODOs.
+1. Fill in the TODOs of gates 2 to 4: conformance, the live results and the panel's results.
 2. Then, in the same PR, move `remove_qos_requirement` from `EXPERIMENTAL` to `STABLE` in `onedata_mcp/tool_maturity.py`, and change its tier in README's tool table.
 
 ## Also on this branch
 
-`65df0b3` fixes a unit test that failed on master `4cd4c47`. Once the Claude configs moved to the subscription backend, they had no key file, and the test still expected every config to have one. `make check` was red on master before this branch.
+Branch commit `65df0b3` fixes a unit test that failed on master `4cd4c47`. Once the Claude configs moved to the subscription backend, they had no key file, and the test still expected every config to have one. `make check` was red on master before this branch.
