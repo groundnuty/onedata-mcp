@@ -1334,8 +1334,10 @@ async def test_a_peer_providers_domain_does_not_reach_the_invalid_space_error(
         },
     )
 
-    with pytest.raises(OnedataInvalidSpaceError) as excinfo:
+    # list_children reads spaceNotSupportedBy as "this provider does not support the space"
+    # (the file tools' review: the space may still exist), not as a missing space
+    with pytest.raises(OnedataApiError) as excinfo:
         await files.list_children("dsadas", limit=10, offset=0)
 
-    assert str(excinfo.value).startswith('Space "<address>" does not exist.')
+    assert str(excinfo.value).startswith("This provider does not support the space of file id")
     assert PEER_SITE not in str(excinfo.value) and PEER_DOMAIN not in str(excinfo.value)
