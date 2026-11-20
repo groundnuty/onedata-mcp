@@ -70,7 +70,8 @@ async def test_the_description_follows_the_surface_rules(transfers_mcp: FastMCP)
     assert "Scheduled does not mean copied" in text and "the data arrive later" in text
     # the done-signal: the blocks at the target, not the transfer's status
     assert "can read completed before the copied blocks show" in text
-    assert "not from the transfer's status" in text
+    assert "re-check the target provider's blocks of the file until they cover all of it" in text
+    assert "not by the transfer's status" in text
     assert "nothing keeps the data at the target afterwards" in text  # a copy, not a rule
     assert "given by its provider id, not its name" in text
     others = (ALL_KNOWN | FLAG_GATED) - {TOOL}
@@ -107,7 +108,7 @@ async def test_a_relative_path_is_refused_without_a_request(
     [
         (404, {"error": {"id": "notFound", "description": "not found"}}, "No file is known"),
         (403, {"error": {"id": "forbidden", "description": "no"}}, "will not help"),
-        (400, {"error": {"id": "spaceNotSupportedBy"}}, "not a provider that supports"),
+        (400, {"error": {"id": "spaceNotSupportedBy"}}, "no provider with that id supports"),
         (500, {"error": {"id": "internalServerError"}}, "status=500"),
     ],
 )

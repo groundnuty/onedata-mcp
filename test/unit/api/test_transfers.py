@@ -223,6 +223,12 @@ def test_the_space_id_is_read_from_a_file_id_of_the_25_shape() -> None:
         ("   ", "is empty"),
         (".", "is not a file id or a path"),
         ("..", "is not a file id or a path"),
+        # a path must name its space first
+        ("/log_20200105.dat", "must name the space first"),
+        ("/", "must name the space first"),
+        ("/k2val-x", "must name the space first"),
+        ("/k2val-x/", "must name the space first"),
+        (" /log_20200105.dat ", "must name the space first"),
     ],
 )
 async def test_a_wrong_form_of_file_is_refused_before_any_request(
@@ -369,7 +375,7 @@ async def test_a_target_that_does_not_support_the_space_lists_the_providers_that
 
     text = await _failure(FILE_ID, "pOder")
 
-    assert text.startswith("Cannot replicate to 'pOder': it is not a provider that supports")
+    assert text.startswith("Cannot replicate to 'pOder': no provider with that id supports")
     assert "vistula-dc (id 'pLocal0123456789abcdef')" in text
     assert "nordic-marine-dc (id 'pOwner0123456789abcdef')" in text
     assert "is a provider's name" not in text
@@ -378,24 +384,49 @@ async def test_a_target_that_does_not_support_the_space_lists_the_providers_that
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "body",
+    ("status", "body"),
     [
-        {"error": {"id": "spaceNotSupportedBy", "details": {"spaceId": SPACE_ID}}},
-        {"error": {"id": "badValueIdentifier", "details": {"key": "replicatingProviderId"}}},
-        {"error": {"id": "badValue", "description": "bad value"}},  # a bare 400
+        (400, {"error": {"id": "spaceNotSupportedBy", "details": {"spaceId": SPACE_ID}}}),
+        (400, {"error": {"id": "badValueIdentifier", "details": {"key": "replicatingProviderId"}}}),
+        (400, {"error": {"id": "badValue", "description": "bad value"}}),  # a bare 400
+        (404, {"error": {"id": "notFound", "description": "not found"}}),
     ],
 )
-async def test_a_provider_name_given_as_the_id_is_answered_with_its_id(
-    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, body: dict
+async def test_a_provider_name_given_as_the_id_is_answered_with_its_id_first(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, status: int, body: dict
 ) -> None:
-    """By name: a brief names the site, and the tool takes its id."""
+    """By name: a brief names the site, and the tool takes its id. The hint opens with what to
+    do, and never says that a provider which supports the space does not."""
     _set_env(monkeypatch)
-    _post_error(httpx_mock, 400, body)
+    _post_error(httpx_mock, status, body)
     httpx_mock.add_response(method="GET", url=f"{BASE}/spaces/{SPACE_ID}", json=PROVIDERS)
 
     text = await _failure(FILE_ID, "vistula-dc")
 
-    assert "'vistula-dc' is a provider's name; its id is 'pLocal0123456789abcdef'" in text
+    assert text.startswith("Pass its id 'pLocal0123456789abcdef', not its name: 'vistula-dc'")
+    hint = text.split(" [", 1)[0]
+    assert "no provider with that id" not in hint and "not a valid provider id" not in hint
+    assert "not a provider that supports" not in hint and "No file is known" not in hint
+
+
+@pytest.mark.asyncio
+async def test_a_provider_field_key_without_a_provider_list_claims_no_non_support(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """Onedata names the provider field but the providers cannot be listed: the value is not a
+    valid provider id for the space; whether some provider supports the space is not claimed."""
+    _set_env(monkeypatch)
+    _post_error(
+        httpx_mock, 400, {"error": {"id": "badValueIdentifier", "details": {"key": "providerId"}}}
+    )
+
+    text = await _failure("file-id-x", "vistula-dc")
+
+    hint = text.split(" [", 1)[0]
+    assert hint.startswith("Cannot replicate to 'vistula-dc': it is not a valid provider id for")
+    assert "Give the id (not the name)" in hint
+    assert "no provider with that id supports" not in hint
+    assert len(httpx_mock.get_requests()) == 1  # nothing to list the providers from
 
 
 @pytest.mark.asyncio
@@ -526,3 +557,119 @@ async def test_a_long_value_is_echoed_cut_short(
 
     hint = text.split(" [", 1)[0]
     assert "a" * 81 not in hint and "..." in hint
+
+
+# --- paths: the lookup's errors, a not-found after it, the providers from the space name ------
+
+ONEZONE = "https://onezone.example/api/v3/onezone"
+PATH = "/k2val-x/logs/log_20200110.dat"
+LOOKUP_URL = f"{BASE}/lookup-file-id/%2Fk2val-x%2Flogs%2Flog_20200110.dat"
+PLAIN_ID = "file0000000000000000000000000001"  # not of the guid shape: no space id inside
+
+
+def _resolves(httpx_mock: HTTPXMock, file_id: str = PLAIN_ID) -> None:
+    httpx_mock.add_response(method="POST", url=LOOKUP_URL, json={"fileId": file_id})
+
+
+def _space_name_resolves(httpx_mock: HTTPXMock) -> None:
+    """The space name `k2val-x` to its id: the user's spaces at the provider, each named by
+    Onezone; then the space's providers."""
+    httpx_mock.add_response(method="GET", url=f"{BASE}/spaces", json=[{"spaceId": SPACE_ID}])
+    named = {"spaceId": SPACE_ID, "name": "k2val-x"}
+    httpx_mock.add_response(method="GET", url=f"{ONEZONE}/spaces/{SPACE_ID}", json=named)
+    httpx_mock.add_response(method="GET", url=f"{BASE}/spaces/{SPACE_ID}", json=PROVIDERS)
+
+
+@pytest.mark.asyncio
+async def test_both_arguments_are_stripped_before_they_are_checked_and_sent(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    _resolves(httpx_mock)
+    httpx_mock.add_response(method="POST", url=TRANSFERS_URL, json={"transferId": "t1"})
+
+    await transfers.schedule_file_replication(f"  {PATH}\n", " pLocal0123456789abcdef ")
+
+    lookup, post = httpx_mock.get_requests()
+    assert lookup.url.raw_path.decode() == LOOKUP_URL.removeprefix("https://oneprovider.example")
+    assert json.loads(post.content)["replicatingProviderId"] == "pLocal0123456789abcdef"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (403, {"error": {"id": "forbidden", "description": "You are not authorized."}}),
+        (400, {"error": {"id": "posix", "details": {"errno": "eacces"}, "description": "eacces"}}),
+    ],
+)
+async def test_a_permission_error_of_the_path_lookup_gets_the_permission_hint(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, status: int, body: dict
+) -> None:
+    _set_env(monkeypatch)
+    httpx_mock.add_response(method="POST", url=LOOKUP_URL, status_code=status, json=body)
+
+    text = await _failure(PATH, "pLocal0123456789abcdef")
+
+    assert text.startswith(f"Not allowed to schedule a replication of '{PATH}'")
+    assert "will not help" in text
+    assert len(httpx_mock.get_requests()) == 1  # no transfer was posted
+
+
+@pytest.mark.asyncio
+async def test_another_lookup_error_passes_unchanged(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    body = {"error": {"id": "internalServerError"}}
+    httpx_mock.add_response(method="POST", url=LOOKUP_URL, status_code=500, json=body)
+
+    text = await _failure(PATH, "pLocal0123456789abcdef")
+
+    assert text.startswith("Onedata API request failed: POST /lookup-file-id/")
+
+
+@pytest.mark.asyncio
+async def test_a_not_found_after_the_path_resolved_points_at_the_target_not_the_file(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """The path resolved to a file, so a 404 of the POST is not about the file. The providers
+    come from the path's space name, since this file id carries no space id."""
+    _set_env(monkeypatch)
+    _resolves(httpx_mock)
+    _post_error(httpx_mock, 404, {"error": {"id": "notFound", "description": "not found"}})
+    _space_name_resolves(httpx_mock)
+
+    text = await _failure(PATH, "pUnknown")
+
+    hint = text.split(" [", 1)[0]
+    assert "No file is known" not in hint and "A file name alone" not in hint
+    assert "The path resolved to a file, so check the target" in hint
+    assert "vistula-dc (id 'pLocal0123456789abcdef')" in hint
+
+
+@pytest.mark.asyncio
+async def test_a_not_found_naming_the_file_field_still_blames_the_file(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    _resolves(httpx_mock)
+    _post_error(httpx_mock, 404, {"error": {"id": "notFound", "details": {"key": "fileId"}}})
+
+    text = await _failure(PATH, "pLocal0123456789abcdef")
+
+    assert text.startswith(f"No file is known by '{PATH}'")
+
+
+@pytest.mark.asyncio
+async def test_a_provider_name_with_a_path_is_resolved_through_the_space_name(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    _resolves(httpx_mock)
+    _post_error(httpx_mock, 400, {"error": {"id": "spaceNotSupportedBy"}})
+    _space_name_resolves(httpx_mock)
+
+    text = await _failure(PATH, "vistula-dc")
+
+    assert text.startswith("Pass its id 'pLocal0123456789abcdef', not its name")

@@ -80,9 +80,9 @@ def register_module(mcp: FastMCP) -> None:
         `{"transferId": "<id>"}` as soon as the transfer is scheduled.
         Scheduled does not mean copied: no data has moved yet, and the data
         arrive later. A transfer's status can read completed before the
-        copied blocks show at the target, so judge whether the copy is whole
-        from the target provider's blocks of the file, not from the transfer's
-        status.
+        copied blocks show at the target, so re-check the target provider's
+        blocks of the file until they cover all of it, and judge the copy by
+        those blocks, not by the transfer's status.
 
         Replication only — does not evict or migrate. The copy is one-off:
         nothing keeps the data at the target afterwards.
