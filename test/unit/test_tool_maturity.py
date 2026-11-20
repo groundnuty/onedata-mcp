@@ -17,11 +17,12 @@ def _registered() -> set[str]:
 # --- classification integrity ---------------------------------------------
 
 
-def test_stable_matches_benchmark_headline() -> None:
-    """The 'stable' set must stay identical to the benchmark HEADLINE-16."""
+def test_stable_contains_the_benchmark_headline() -> None:
+    """Every tool the earlier benchmark evaluated is stable; STABLE may grow beyond it
+    by the promotion protocol (design/10-tool-maturity.md)."""
     from benchmark.tool_allowlist import HEADLINE
 
-    assert tm.STABLE == HEADLINE
+    assert HEADLINE <= tm.STABLE
 
 
 def test_all_known_covers_exactly_the_registered_surface() -> None:

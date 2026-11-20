@@ -1,30 +1,30 @@
 """Per-tool maturity + provenance classification, and launch-time selection.
 
 **Model-invisible.** None of this appears in the tool descriptions the LLM
-reads. It documents which tools are panel-validated and drives which tools the
-server exposes at launch (``ONEDATA_MCP_MATURITY`` / ``ONEDATA_MCP_TOOLS``).
+reads. It records each tool's maturity and drives which tools the server
+exposes at launch (``ONEDATA_MCP_MATURITY`` / ``ONEDATA_MCP_TOOLS``).
 
 Two axes:
 
 ``maturity``
-  ``stable``       — validated against the PPAM 7-LLM K=8 panel (== the
-                     benchmark HEADLINE-16). Proven against weaker models.
-  ``experimental`` — registered but NOT panel-validated: either added to this
-                     project after the paper freeze, or inherited from the
-                     upstream base surface and never swept against our panel.
+  ``stable``       — passed the promotion protocol at its current surface
+                     (design/10-tool-maturity.md): validated with several LLMs
+                     against a live Onedata federation.
+  ``experimental`` — registered, but not (or not yet again) through that
+                     protocol. Every new tool starts here.
 
 ``origin`` (a distrust signal for anything unvalidated)
   ``ours``     — authored here after the upstream base commit (85b8515).
   ``upstream`` — inherited from the upstream base surface, or adapted from its
                  later commits (the flag-gated tools, see ``FLAG_GATED``).
 
-Note **panel-validation trumps origin**: an upstream-origin tool that made it
-into the HEADLINE-16 and survived K=8 was hardened by us (M-1..M-13 findings)
-and is ``stable``. The genuine distrust set is ``experimental`` ∩ ``upstream``.
+Validation trumps origin: an upstream-origin tool that passed validation is
+``stable``. The least-trusted set is ``experimental`` ∩ ``upstream``.
 
-The ``stable`` set is kept identical to ``benchmark.tool_allowlist.HEADLINE``;
-a unit test asserts the two stay in sync without a runtime import (the server
-package must not depend on the benchmark package).
+The initial ``stable`` set is the 16 tools the earlier multi-LLM benchmark
+evaluated (``benchmark.tool_allowlist.HEADLINE``, frozen as that benchmark's
+record). ``STABLE`` must contain it and grows only by promotion; a unit test
+asserts the containment (the server package must not import the benchmark).
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 # --- classification (the 29 tools registered by default; 27 verified against fork 85b8515) ---
 
-# maturity == "stable": panel-validated (the HEADLINE-16).
+# maturity == "stable": passed the promotion protocol (design/10-tool-maturity.md).
 STABLE: frozenset[str] = frozenset(
     {
         "add_file_qos_requirement",
@@ -58,17 +58,17 @@ STABLE: frozenset[str] = frozenset(
     }
 )
 
-# maturity == "experimental": registered but not panel-validated.
+# maturity == "experimental": registered, not (yet) through the promotion protocol.
 EXPERIMENTAL: frozenset[str] = frozenset(
     {
-        # ours, added after the paper freeze — not yet swept
+        # ours, not yet validated
         "create_directory",
         "remove_qos_requirement",
         "schedule_file_replication",
         # ours, the readiness tools (design/07-readiness-tools.md)
         "check_readiness",
         "ensure_readiness",
-        # inherited from the upstream base surface, never panel-swept (the
+        # inherited from the upstream base surface, not yet validated (the
         # genuine distrust set)
         "get_file_attributes",
         "get_file_id",
@@ -106,7 +106,7 @@ UPSTREAM: frozenset[str] = frozenset(
 # Registered ONLY when ONEDATA_MCP_EXPERIMENTAL is on (onedata_mcp/experimental.py);
 # with the flag off they do not exist on the server, so they are kept out of
 # ALL_KNOWN, the surface registered by default. Both are ``experimental`` (never
-# panel-validated, and ``maturity_of`` already answers that for anything outside
+# validated, and ``maturity_of`` already answers that for anything outside
 # STABLE) and ``upstream`` in origin: adapted from later upstream commits
 # (``list_space_datasets`` from 63c21b5, ``set_file_xattrs`` from 46f030a) rather
 # than present at the base commit, so they are not in UPSTREAM. They are therefore
