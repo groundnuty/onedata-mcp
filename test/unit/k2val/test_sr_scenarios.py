@@ -311,3 +311,47 @@ async def test_sr1o_reading_passes_and_copying_fails(
 
     assert art.outcome == outcome, art.oracle_diagnosis
     assert art.oracle_federation_pass is fed_pass
+
+
+# --- what the oracles read of the calls, on every leg ------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_http_legs_record_a_refused_schedule_as_failed_under_its_bare_name(
+    tmp_path: Path,
+) -> None:
+    """The Claude configs (and the CLI legs) reach the tools through `mcp_http`'s recording
+    middleware, not the in-process RecordingApp. The SR oracles count successful calls by bare
+    tool name, so a schedule the tool refused (SR1n's attempt at oder-dc) must be recorded
+    `ok=False` under `schedule_file_replication`, and a good one `ok=True`."""
+    import json
+
+    from fastmcp import Client, FastMCP
+
+    from benchmark.k2val.mcp_http import make_recording_middleware
+
+    record = tmp_path / "mcp-calls.jsonl"
+    app = FastMCP("sr")
+
+    @app.tool(name="schedule_file_replication")
+    def schedule(file_id_or_path: str, target_provider_id: str) -> dict:
+        if target_provider_id == SR_ELSEWHERE:
+            raise ValueError(f"Cannot replicate to {SR_ELSEWHERE!r}")
+        return {"transferId": "t1"}
+
+    app.add_middleware(make_recording_middleware(record))
+    args = {"file_id_or_path": f"{DIR}/{SR_FILE}"}
+    async with Client(app) as client:
+        refused = await client.call_tool(
+            "schedule_file_replication",
+            {**args, "target_provider_id": SR_ELSEWHERE},
+            raise_on_error=False,
+        )
+        await client.call_tool("schedule_file_replication", {**args, "target_provider_id": "p1"})
+
+    assert refused.is_error is True
+    rows = [json.loads(line) for line in record.read_text().splitlines()]
+    assert [(r["tool"], r["ok"]) for r in rows] == [
+        ("schedule_file_replication", False),
+        ("schedule_file_replication", True),
+    ]

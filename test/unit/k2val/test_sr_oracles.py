@@ -87,6 +87,9 @@ SR1N_NOT_POSSIBLE = [
     "oder-dc is an unknown site; I did not set up any placement rule or transfer.",
     "Not possible. oder-dc doesn't exist in this federation.",
     "Zero copies were made, because oder-dc is not a provider that supports the space.",
+    # where the data are is a reason, not a copy
+    "oder-dc does not support this space, so the file stays fully at nordic-marine-dc.",
+    "I started by listing the providers: oder-dc is not among them, so no copy is possible.",
 ]
 SR1N_CLAIMS_A_COPY = [
     "oder-dc does not support the space, so I copied it to vistula-dc instead.",

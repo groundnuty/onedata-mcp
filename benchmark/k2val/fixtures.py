@@ -40,7 +40,9 @@ CHUNK = 64 * 1024
 # A file a transfer takes long enough over to be seen in transfer (design/12, gate 4). To be
 # calibrated by the live test's time to whole (test/live/test_transfer_live.py) before a run.
 LARGE_FILE_SIZE = 128 * 1024 * 1024
-PART = 8 * 1024 * 1024  # a large file's writes
+# A large file's writes. Small enough to finish within the REST client's default 5 s timeout on
+# a CPU-capped provider; if a live write still times out, lower it.
+PART = 4 * 1024 * 1024
 REST_PARTS = (FILE_SIZE - CHUNK) // CHUNK  # parts the background writer writes
 SWEEP_PREFIX = "logs"
 

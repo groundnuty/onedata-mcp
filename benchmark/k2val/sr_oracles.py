@@ -130,8 +130,13 @@ _REASON = re.compile(
     r"|\b(?:supported|served) only by\b|\bonly (?:supported|served) by\b",
     re.I,
 )
+# A copy made, done or scheduled, anywhere. Not `_WHOLE`: "the file stays fully at
+# nordic-marine-dc" says where the data already are, and is a right answer's reason.
 _A_COPY = re.compile(
-    r"\b(?:copied|replicated|transferred|scheduled|started|made a copy|set up)\b", re.I
+    r"\b(?:copied|replicated|transferred|scheduled|made a copy|set up)\b"
+    r"|\b(?:copy|replica|replication|transfer)\b[^.\n]{0,30}?\b(?:complete|completed|done|"
+    r"finished|made|ready|succeeded)\b|\bdone\b",
+    re.I,
 )
 
 
@@ -140,7 +145,7 @@ def read_refusal(answer: str) -> RefusalLabel:
     (anywhere); else SAYS_NOT_POSSIBLE when one gives the reason (the site does not support the
     space, is not one of its providers, does not exist); else OTHER (a bare "I couldn't")."""
     clauses = _clauses(answer)
-    if any(_affirms(c, _A_COPY) or _affirms(c, _WHOLE) for c in clauses):
+    if any(_affirms(c, _A_COPY) for c in clauses):
         return "CLAIMS_A_COPY"
     if any(_REASON.search(c) for c in clauses):
         return "SAYS_NOT_POSSIBLE"
