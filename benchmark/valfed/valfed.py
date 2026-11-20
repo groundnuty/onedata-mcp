@@ -7,6 +7,7 @@
     make valfed-check             no-model check of the panel's federation layer, in omcp-smoke
     make valfed-readiness-live    the gated live readiness test, in omcp-live
     make valfed-qos-live          the gated live test of remove_qos_requirement, in omcp-live
+    make valfed-files-live        the gated live test of the three file tools, in omcp-live
 
 One Onezone and two Oneproviders of Onedata 25.0 in Docker Compose, published on 127.0.0.1 only,
 as `layout.toml` beside this file declares them. The work is done by the Compose federation tool
@@ -564,6 +565,12 @@ LIVE_TESTS = {
         "ONEDATA_MCP_LIVE_READINESS_SPACE",
     ),
     "qos": ("test/live/test_qos_live.py", "ONEDATA_MCP_LIVE_QOS", "ONEDATA_MCP_LIVE_QOS_SPACE"),
+    # get_file_attributes, list_children and create_directory (design/13-15)
+    "files": (
+        "test/live/test_files_live.py",
+        "ONEDATA_MCP_LIVE_FILES",
+        "ONEDATA_MCP_LIVE_FILES_SPACE",
+    ),
 }
 
 
@@ -597,6 +604,11 @@ def readiness_live(home: Home) -> None:
 def qos_live(home: Home) -> None:
     """test/live/test_qos_live.py (remove_qos_requirement) against omcp-live."""
     live_test(home, "qos")
+
+
+def files_live(home: Home) -> None:
+    """test/live/test_files_live.py (the three file tools of design/13-15) against omcp-live."""
+    live_test(home, "files")
 
 
 async def _fixture_check() -> None:
@@ -663,6 +675,7 @@ COMMANDS = {
     "check": check,
     "readiness-live": readiness_live,
     "qos-live": qos_live,
+    "files-live": files_live,
 }
 
 
