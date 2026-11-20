@@ -72,6 +72,8 @@ class RunDeps:
 
 
 def _tools_for(deps: RunDeps, scenario: Scenario) -> frozenset[str]:
+    if scenario.tools is not None:  # a scenario's own set (the file-tool scenarios)
+        return frozenset(scenario.tools)
     return frozenset(deps.cfg.tools_k2 if scenario.tier == "K2" else deps.cfg.tools_k1)
 
 
@@ -180,6 +182,9 @@ async def run_trial(
                 )
             )
 
+        if fixture.entries:  # a brief may give an entry's file id, known only now
+            brief = scenario.render_brief(directory=directory, local=local_name, ids=fixture.ids())
+
         tools = _tools_for(deps, scenario)
         rec_app = RecordingApp(
             deps.app, allowed=tools, call_cap_s=cfg.limits.tool_call_cap_s, clock=deps.clock.time
@@ -253,6 +258,7 @@ async def run_trial(
             if dispatch
             else (),
             "snapshot_at_answer": at_answer.to_json(),
+            "fixture_baseline": fixture.baseline_tree,
             "calls": tuple(r.to_json() for r in records),
             "directory": directory,
         }
@@ -299,6 +305,7 @@ async def run_trial(
                 name: (fixture.qos_rules[name],) if name in fixture.qos_rules else ()
                 for name in fixture.files
             },
+            baseline_tree=fixture.baseline_tree,
         )
         trace = AgentTrace(final_answer=final_answer, tool_calls=common["tool_calls"])
         try:

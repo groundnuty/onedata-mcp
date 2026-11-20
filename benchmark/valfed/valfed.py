@@ -625,6 +625,8 @@ async def _fixture_check() -> None:
             kinds = ",".join(sorted({f.kind for f in spec.files}))
             took = time.monotonic() - began
             line = f"{label}: built {len(fixture.files)} files ({kinds}) in {took:.1f} s"
+            if fixture.baseline_tree is not None:
+                line += f", {len(fixture.baseline_tree)} entries seen at the local provider"
             if fixture.writer is not None:
                 fixture.writer.start()
                 await fixture.writer.wait()

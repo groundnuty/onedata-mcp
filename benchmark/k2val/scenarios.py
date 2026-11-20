@@ -13,6 +13,7 @@ V3o a question the QoS state answers with the tool offered but not needed. They 
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -51,12 +52,23 @@ class Scenario:
     brief: str
     fixture: FixtureSpec
     settle: Settle = "none"
+    # The tools offered, when not the tier's set (the file-tool scenarios, design/13-15).
+    tools: tuple[str, ...] | None = None
 
-    def render_brief(self, *, directory: str, local: str) -> str:
+    def render_brief(
+        self, *, directory: str, local: str, ids: Mapping[str, str] | None = None
+    ) -> str:
         """`{dir}`, `{local}`, and `{files}`: the fixture's file names, for a brief that must
-        name what the offered tools cannot list."""
+        name what the offered tools cannot list. `{ids[<path>]}`: the file id of a fixture entry
+        (known only once it is built; before that, a placeholder)."""
         files = ", ".join(f.name for f in self.fixture.files)
-        return self.brief.format(dir=directory, local=local, files=files)
+        known = _IdsOrPlaceholder(ids or {})
+        return self.brief.format(dir=directory, local=local, files=files, ids=known)
+
+
+class _IdsOrPlaceholder(dict):
+    def __missing__(self, path: str) -> str:
+        return f"<id of {path}>"
 
 
 def _five(kinds: dict[str, str] | None = None, finish: float | None = None) -> FixtureSpec:
@@ -137,6 +149,18 @@ SCENARIOS: dict[str, Scenario] = {
         ),
     )
 }
+
+
+# --- the file-tool scenarios (FA, LC, CD; design/13-15) ---------------------------------------
+# Defined, with their answers and rules, in file_scenarios.py (a leaf module: no import cycle).
+from benchmark.k2val.file_scenarios import FILE_SCENARIOS  # noqa: E402
+
+SCENARIOS.update(
+    {
+        s.id: Scenario(s.id, s.title, "K1", s.brief, s.fixture, tools=s.tools)
+        for s in FILE_SCENARIOS.values()
+    }
+)
 
 
 def parse_scenarios(text: str) -> list[str]:

@@ -38,6 +38,11 @@ class FileState:
 class Snapshot:
     taken_at: float
     files: dict[str, FileState] = field(default_factory=dict)
+    # The file-tool scenarios (design/13-15): the trial directory's tree at the LOCAL provider
+    # (`FedApi.tree`'s form, plus `content` for a small file that is not in the baseline), or the
+    # error that kept it from being read. Never an empty tree in place of an unreadable one.
+    tree: dict[str, dict] | None = None
+    tree_error: str | None = None
 
     def all_local_covered(self, names: list[str] | None = None) -> bool:
         pick = names if names is not None else list(self.files)
@@ -58,13 +63,20 @@ class Snapshot:
         return any(self.files[n].qos_ids for n in pick if n in self.files)
 
     def errors(self) -> list[str]:
-        return [f"{f.name}: {f.error}" for f in self.files.values() if f.error]
+        out = [f"{f.name}: {f.error}" for f in self.files.values() if f.error]
+        if self.tree_error:
+            out.append(f"tree: {self.tree_error}")
+        return out
 
     def to_json(self) -> dict:
-        return {
+        out: dict = {
             "taken_at": self.taken_at,
             "files": {n: {**vars(f), "qos_ids": list(f.qos_ids)} for n, f in self.files.items()},
         }
+        if self.tree is not None or self.tree_error is not None:
+            out["tree"] = self.tree
+            out["tree_error"] = self.tree_error
+        return out
 
 
 async def _file_state(fed: FedApi, name: str, file_id: str, owner_id: str, local_id: str):
@@ -100,4 +112,35 @@ async def take_snapshot(fed: FedApi, fixture: BuiltFixture, clock: Clock) -> Sna
             for name, bf in fixture.files.items()
         ]
     )
-    return Snapshot(taken_at=taken, files={s.name: s for s in states})
+    snap = Snapshot(taken_at=taken, files={s.name: s for s in states})
+    if fixture.baseline_tree is not None:
+        await _take_tree(fed, fixture, snap)
+    return snap
+
+
+# A file the agent made with at most this many bytes has its content read (CDo checks it).
+SMALL_FILE = 1024
+
+
+async def _take_tree(fed: FedApi, fixture: BuiltFixture, snap: Snapshot) -> None:
+    """The file-tool scenarios: the trial directory's tree at the LOCAL provider, where the agent
+    works. A failed listing or read is recorded as `tree_error` (the oracle then refuses to
+    judge), never as an empty tree."""
+    known = {e["fileId"] for e in (fixture.baseline_tree or {}).values()}
+    try:
+        tree = await fed.tree("local", fixture.dir_id)
+        for entry in tree.values():
+            size = entry.get("size")
+            new_small_file = (
+                entry.get("type") == "REG"
+                and entry.get("fileId") not in known
+                and isinstance(size, int)
+                and size <= SMALL_FILE
+            )
+            if new_small_file:
+                data = await fed.content("local", entry["fileId"])
+                entry["content"] = data.decode("utf-8", errors="replace")
+    except Exception as e:  # noqa: BLE001 - recorded; the oracle refuses an unusable snapshot
+        snap.tree_error = f"{type(e).__name__}: {e}"
+        return
+    snap.tree = tree

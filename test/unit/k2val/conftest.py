@@ -145,3 +145,17 @@ def api(fed: FakeFed, clock: FakeClock) -> FedApi:
         clock=clock,
         poll_s=1.0,
     )
+
+
+@pytest.fixture
+def tools_app(monkeypatch: pytest.MonkeyPatch):
+    """The in-process server with the real tool modules, pointed at the fake local provider
+    (the file-tool scenarios' full trials, test_scenarios_{fa,lc,cd}.py)."""
+    from benchmark.k2val.app import build_app
+
+    monkeypatch.setenv("ONEDATA_ONEPROVIDER_HOST", LOCAL_HOST)
+    monkeypatch.setenv("ONEDATA_ONEPROVIDER_TOKEN", TOKEN_LOCAL)
+    monkeypatch.setenv("ONEDATA_ONEZONE_HOST", ZONE_HOST)
+    monkeypatch.setenv("ONEDATA_ONEZONE_TOKEN", TOKEN_LOCAL)
+    monkeypatch.setenv("ONEDATA_ALLOW_INSECURE_TLS", "false")
+    return build_app()
