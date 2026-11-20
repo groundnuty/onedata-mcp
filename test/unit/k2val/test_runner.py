@@ -312,7 +312,7 @@ async def test_v3n_a_made_up_id_gets_the_tools_hint_and_changes_nothing(
 
     (call,) = seen
     assert call.ok is False
-    assert "get_file_qos_summary" in (call.error or "")
+    assert "keys of `requirements` in its QoS summary" in (call.error or "")  # names no tool
     assert art.outcome == "PASS", art.oracle_diagnosis
 
 
