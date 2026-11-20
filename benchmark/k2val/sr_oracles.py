@@ -128,16 +128,28 @@ _NOT_YET = re.compile(
 )
 
 
+# What only the absence of a completion makes a "not yet": a copy scheduled or started, one
+# that failed or could not be made, nothing or zero bytes copied. Unlike `_NOT_YET`, these do not
+# undo a completion said in another clause ("I scheduled it and waited; it is now fully there").
+_ONLY_STARTED = re.compile(
+    r"\b(?:scheduled|started|initiated|queued|requested)\b|\bcould(?:n['’]t| not)\b|\bfailed\b"
+    r"|\bunable\b|\bnothing (?:was|has been)\b|\b(?:zero|no|0) bytes\b",
+    re.I,
+)
+
+
 def read_copy_answer(answer: str) -> CopyLabel:
-    """SR1: SAYS_WHOLE when some clause affirms the copy is complete and none says it is not
-    yet; SAYS_NOT_YET when one says it is not yet complete and none affirms it; else OTHER
-    (silence, or an answer that says both)."""
+    """SR1, SR1i: SAYS_WHOLE when some clause affirms the copy is complete (the transfer's status
+    alone is not that) and none says it is not yet; SAYS_NOT_YET when one says it is not yet
+    complete, or only that a copy was scheduled, failed or made nothing, and none affirms it;
+    else OTHER (silence, or an answer that says both)."""
     clauses = _clauses(answer)
     whole = any(_affirms(c, _WHOLE) and not _STATUS_ONLY.search(c) for c in clauses)
     not_yet = any(_NOT_YET.search(_PAST_STATUS.sub(" ", c)) for c in clauses)
+    started = any(_ONLY_STARTED.search(c) for c in clauses)
     if whole and not not_yet:
         return "SAYS_WHOLE"
-    if not_yet and not whole:
+    if (not_yet or started) and not whole:
         return "SAYS_NOT_YET"
     return "OTHER"
 

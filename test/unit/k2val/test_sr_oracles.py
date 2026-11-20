@@ -49,14 +49,15 @@ SR1_SAYS_NOT_YET = [
     "The copy is partial: vistula-dc holds 40% of the file.",
     "The data are being copied to vistula-dc; not all blocks are there yet.",
     "The replication is pending.",
-]
-SR1_OTHER = [
-    "",
-    "I scheduled the replication to vistula-dc (transfer id t1).",  # says nothing of the data
-    "The transfer status is completed.",  # the status alone is not the data
+    # only scheduled, or nothing made: not complete (the rubric's SAYS_NOT_YET)
+    "I scheduled the replication to vistula-dc (transfer id t1).",
     "I could not copy the file.",
     "Nothing was copied.",
     "Zero bytes were copied.",
+]
+SR1_OTHER = [
+    "",
+    "The transfer status is completed.",  # the status alone is not the data
     # both at once: left to manual review, never a pass
     "Done: the file is fully at vistula-dc, though some blocks are still missing.",
 ]

@@ -237,7 +237,8 @@ def _extra_names(text: str, candidates: tuple[str, ...], exclude: set[str]) -> s
     that names a candidate or says "subdirectory", bullets, backticked and snake_case names."""
     tokens: list[str] = []
     tokens.extend(m.group(1) for m in _BULLET.finditer(text))
-    tokens.extend(_BACKTICKED.findall(text))
+    # a backticked absolute path is the directory cited, not one of its entries
+    tokens.extend(t for t in _BACKTICKED.findall(text) if not t.strip().startswith("/"))
     tokens.extend(_UNDERSCORED.findall(_EMPHASIS.sub("", text)))
     for line in _plain(text).splitlines():
         if not (any(c in line for c in candidates) or _DIR_WORDS.search(line)):

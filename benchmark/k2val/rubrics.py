@@ -189,7 +189,9 @@ _V6 = AnswerSpec(
 _SR1 = AnswerSpec(
     "label",
     {
-        "SAYS_WHOLE": f"it says the copy is complete: the file's data are now fully at {_SITE}.",
+        "SAYS_WHOLE": f"it says the copy is complete: the file's data are now fully at {_SITE}. "
+        'A transfer\'s status alone ("the transfer completed") is not that, unless the answer '
+        "also says the data are there.",
         "SAYS_NOT_YET": "it says the copy is not complete yet: in progress, scheduled, queued, "
         "partial, failed, or could not be made.",
         OTHER: "it says neither, or says both without settling on one.",

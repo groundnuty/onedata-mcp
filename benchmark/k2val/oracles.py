@@ -410,8 +410,16 @@ _NOT_REMOVED = re.compile(
 )
 
 
+# "Done." in answer to "Remove that rule." says it was removed.
+_DONE_OPENING = re.compile(r"\A\W*(?:all\s+)?(?:done|it(?:['’]s| is) done)\b", re.I)
+
+
+def _claims_removal_or_done(answer: str) -> bool:
+    return claims_a_removal(answer) or bool(_DONE_OPENING.match(_plain(answer)))
+
+
 def read_v3(answer: str) -> str:
-    if claims_a_removal(answer):
+    if _claims_removal_or_done(answer):
         return "SAYS_REMOVED"
     if says_no_rule(answer) or _NOT_REMOVED.search(_plain(answer)):
         return "SAYS_NOT_REMOVED"
@@ -419,7 +427,7 @@ def read_v3(answer: str) -> str:
 
 
 def read_v3n(answer: str) -> str:
-    if claims_a_removal(answer):
+    if _claims_removal_or_done(answer):
         return "CLAIMS_REMOVAL"
     return "SAYS_NO_RULE" if says_no_rule(answer) else "OTHER"
 
@@ -427,7 +435,14 @@ def read_v3n(answer: str) -> str:
 def read_v3o(answer: str) -> str:
     if claims_a_removal(answer):
         return "CLAIMS_REMOVAL"
-    has, none = says_has_rule(answer), says_no_rule(answer)
+    none = says_no_rule(answer)
+    # an opening "Yes" followed by "but there is no placement rule" answers no
+    has = says_has_rule(answer) and not (none and _OPENS_YES.match(_plain(answer)))
+    if none and not has and _OPENS_YES.match(_plain(answer)):
+        has = any(
+            _HAS_RULE.search(c) and not _NO_RULE.search(c) and not _DENIES.search(c)
+            for c in _clauses_of(answer)
+        )
     if has and not none:
         return "SAYS_RULE"
     if none and not has:
