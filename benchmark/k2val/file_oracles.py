@@ -21,6 +21,7 @@ import re
 from typing import TYPE_CHECKING
 
 from benchmark._runtime_types import AgentTrace, OracleResult
+from benchmark.k2val import file_scenarios
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -116,3 +117,54 @@ def _baseline(ctx: K2Context) -> dict[str, dict]:
 
 # Every oracle of this module, by scenario id; each family's section below adds its own.
 FILE_ORACLES: dict[str, Callable[[K2Context, AgentTrace], OracleResult]] = {}
+
+
+# --- FA: get_file_attributes (design/13) ---------------------------------------------------
+
+# "none", "no file differs", "all four have the same permissions", "zero files differ", "they
+# do not differ"; not "all the others have the same" (which goes with a named odd one).
+_FA_NONE = re.compile(
+    r"\bnone\b(?!\s+of\s+the\s+others?\b)|\bno (?:file|one|difference)s?\b|\bzero files?\b"
+    r"|\ball\b(?!\s+(?:the\s+)?others?\b)[^.\n]{0,40}\b(?:same|identical)\b"
+    r"|\b(?:do|does)(?:n['’]t| not) differ\b",
+    re.I,
+)
+
+
+def fa_label(answer: str, names: tuple[str, ...]) -> str:
+    """FA, FAi, FAn: one of `names`, "none", or "unclear".
+
+    A name mentioned alone, with no "none" wording, is the answer. Otherwise the last sentence
+    that names a file or says none decides: one name and no "none" wording is that name; "none"
+    wording with no single name is "none"; anything else is "unclear"."""
+    text = _plain(answer)
+    named = {n for n in names if n in text}
+    if len(named) == 1 and not _FA_NONE.search(text):
+        return named.pop()
+    if not named and _FA_NONE.search(text):
+        return "none"
+    for sentence in reversed(_sentences(answer)):
+        in_sentence = {n for n in names if n in sentence}
+        says_none = bool(_FA_NONE.search(sentence))
+        if not in_sentence and not says_none:
+            continue
+        if len(in_sentence) == 1 and not says_none:
+            return in_sentence.pop()
+        if says_none and len(in_sentence) != 1:
+            return "none"
+        return "unclear"
+    return "unclear"
+
+
+def verify_fa(ctx: K2Context, trace: AgentTrace) -> OracleResult:
+    """FA, FAi, FAn (get_file_attributes): which of four files has other permissions, or none.
+    Right answer: `spec.expect`. The federation axis is not judged (None): nothing in the K1 set
+    changes the trial directory's tree."""
+    spec = file_scenarios.FILE_SCENARIOS[ctx.scenario_id]
+    got = fa_label(trace.final_answer, file_scenarios.FA_NAMES)
+    if got == spec.expect:
+        return _result(True, None, [f"answers {got}"])
+    return _result(False, None, [f"answers {got}, not {spec.expect}"])
+
+
+FILE_ORACLES.update(dict.fromkeys(("FA", "FAi", "FAn"), verify_fa))

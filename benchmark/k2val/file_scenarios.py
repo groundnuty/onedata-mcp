@@ -77,3 +77,72 @@ def _log(day: str, mode: str | None = None, *, under: str = "") -> EntrySpec:
 
 def _dir(path: str) -> EntrySpec:
     return EntrySpec(path, "dir")
+
+
+# --- FA: get_file_attributes (design/13) --------------------------------------------------------
+
+FA_DAYS = ("20200101", "20200102", "20200103", "20200104")
+FA_NAMES = tuple(f"log_{d}.dat" for d in FA_DAYS)
+# FA and FAn share it word for word; only the modes differ.
+BRIEF_FA = (
+    "Which of these files in `{dir}` has file permissions that differ from those of the others: "
+    + ", ".join(FA_NAMES)
+    + "? Reply with its name, or with none if they all have the same permissions."
+)
+BRIEF_FAI = (
+    "These are the file ids of four log files in `{dir}`: "
+    + ", ".join(f"{{ids[{name}]}}" for name in FA_NAMES)
+    + ". Which of these files has file permissions that differ from those of the others? Reply "
+    "with its name, or with none if they all have the same permissions."
+)
+
+
+def _fa_fixture(odd: str | None) -> FixtureSpec:
+    """Four small logs, mode 644 each, except `odd` (a day), which is 600."""
+    return FixtureSpec((), entries=tuple(_log(d, "600" if d == odd else "644") for d in FA_DAYS))
+
+
+FA_RULES = (
+    "Pass when the answer reader returns the expected name (or none). The reader takes a name "
+    "named alone, else the last sentence that names one file or says none; an answer it cannot "
+    "settle is a FAIL for the manual sort. Nothing in the K1 set changes the trial directory, "
+    "so the federation axis is not judged (None)."
+)
+
+FA = FileScenario(
+    id="FA",
+    title="which file's permissions differ",
+    tool="get_file_attributes",
+    coverage="requires",
+    brief=BRIEF_FA,
+    fixture=_fa_fixture("20200103"),
+    tools=None,
+    answer="log_20200103.dat (mode 600; the other three are 644)",
+    rules=FA_RULES,
+    expect="log_20200103.dat",
+)
+FAI = FileScenario(
+    id="FAi",
+    title="which file's permissions differ, by id",
+    tool="get_file_attributes",
+    coverage="variant: the files are given by file id, and the answer must name the file",
+    brief=BRIEF_FAI,
+    fixture=_fa_fixture("20200102"),
+    tools=None,
+    answer="log_20200102.dat (mode 600; the other three are 644)",
+    rules=FA_RULES,
+    expect="log_20200102.dat",
+)
+FAN = FileScenario(
+    id="FAn",
+    title="which file's permissions differ, none does",
+    tool="get_file_attributes",
+    coverage="no, because: all four have the same permissions",
+    brief=BRIEF_FA,
+    fixture=_fa_fixture(None),
+    tools=None,
+    answer="none: all four files have mode 644",
+    rules=FA_RULES,
+    expect="none",
+)
+FILE_SCENARIOS.update({s.id: s for s in (FA, FAI, FAN)})
