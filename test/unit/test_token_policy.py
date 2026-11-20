@@ -85,6 +85,34 @@ async def test_fails_open_when_examine_raises(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("flag", [None, "1"], ids=["flag-off", "flag-on"])
+async def test_write_tool_names_match_the_destructive_annotations(
+    monkeypatch: pytest.MonkeyPatch, flag: str | None
+) -> None:
+    """WRITE_TOOL_NAMES == the destructive-annotated tools + ensure_readiness.
+
+    ensure_readiness places QoS rules but is annotated destructiveHint=False (documented
+    in token_policy.py), so it is the one write tool without the annotation. Checked with
+    the preview flag off and on, because the flag registers more tools.
+    """
+    if flag is None:
+        monkeypatch.delenv("ONEDATA_MCP_EXPERIMENTAL", raising=False)
+    else:
+        monkeypatch.setenv("ONEDATA_MCP_EXPERIMENTAL", flag)
+    monkeypatch.delenv("ONEDATA_MCP_TOOLS", raising=False)
+    monkeypatch.delenv("ONEDATA_MCP_MATURITY", raising=False)
+    monkeypatch.setattr("onedata_mcp.main.resolve_register_write_tools_sync", lambda: True)
+    from onedata_mcp import main
+
+    tools = await main._create_onedata_mcp_server().list_tools()
+    destructive = {
+        t.name for t in tools if t.annotations is not None and t.annotations.destructiveHint is True
+    }
+    assert destructive | {"ensure_readiness"} == token_policy.WRITE_TOOL_NAMES
+    assert "ensure_readiness" not in destructive
+
+
+@pytest.mark.asyncio
 async def test_every_write_tool_name_is_a_real_registered_tool() -> None:
     """WRITE_TOOL_NAMES must reference tools that actually exist (catch renames)."""
     server_tools = {t.name for t in await mcp.list_tools()}
