@@ -6,12 +6,15 @@ model receives tells it how to fix the call and holds no host, and what a succes
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from fastmcp import Client, FastMCP
 from pytest_httpx import HTTPXMock
 
 from onedata_mcp.modules import transfers as transfers_module
 from onedata_mcp.token_policy import WRITE_TOOL_NAMES
+from onedata_mcp.tool_maturity import ALL_KNOWN, FLAG_GATED
 
 HOST = "provider.example"
 BASE = f"https://{HOST}/api/v3/oneprovider"
@@ -51,6 +54,28 @@ async def test_it_is_a_write_tool_annotated_as_such_with_no_list_input(
     props = tool.inputSchema["properties"]
     assert sorted(props) == ["file_id_or_path", "target_provider_id"]
     assert all(p["type"] == "string" for p in props.values())  # no list input to cap
+
+
+@pytest.mark.asyncio
+async def test_the_description_follows_the_surface_rules(transfers_mcp: FastMCP) -> None:
+    """design/10, gate 2: it says what it returns and what "scheduled" does not mean, names no
+    other tool (one may not be offered alongside it) and cites no document the model cannot
+    read."""
+    async with Client(transfers_mcp) as client:
+        tool = next(t for t in await client.list_tools() if t.name == TOOL)
+    fields = " ".join(p["description"] for p in tool.inputSchema["properties"].values())
+    text = " ".join(f"{tool.description} {fields}".split())  # one line, as a model reads it
+
+    assert '`{"transferId": "<id>"}`' in text  # what it returns
+    assert "Scheduled does not mean copied" in text and "the data arrive later" in text
+    # the done-signal: the blocks at the target, not the transfer's status
+    assert "can read completed before the copied blocks show" in text
+    assert "not from the transfer's status" in text
+    assert "nothing keeps the data at the target afterwards" in text  # a copy, not a rule
+    assert "given by its provider id, not its name" in text
+    others = (ALL_KNOWN | FLAG_GATED) - {TOOL}
+    assert [name for name in others if name in text] == []
+    assert not re.search(r"\.md\b|design/|https?://|§|\bM-\d", text)
 
 
 @pytest.mark.asyncio
