@@ -46,15 +46,26 @@ def test_gate_off_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     assert experimental.experimental_enabled() is False
 
 
-# --- surface: off is the base surface (29), on adds exactly the 2 tools (31) --
+# --- surface: off is the default list (23), on adds exactly the 8 preview tools (31) --
+
+# Inherited tools moved off the default list (design/10-tool-maturity.md).
+MOVED_OFF_DEFAULT = frozenset(
+    {
+        "get_file_id",
+        "grep_file_content",
+        "list_marketplace_spaces",
+        "list_user_harvesters",
+        "get_harvester_index_schema",
+        "query_harvester_index",
+    }
+)
 
 
 @pytest.mark.asyncio
-async def test_flag_off_registers_the_29_base_tools() -> None:
+async def test_flag_off_registers_the_23_default_tools() -> None:
     tools = {t.name for t in await _build(False).list_tools()}
-    assert len(tools) == 29
-    assert "set_file_xattrs" not in tools
-    assert "list_space_datasets" not in tools
+    assert len(tools) == 23
+    assert not (tools & tm.FLAG_GATED)
 
 
 @pytest.mark.asyncio
@@ -62,37 +73,38 @@ async def test_flag_on_registers_31_tools() -> None:
     off = {t.name for t in await _build(False).list_tools()}
     on = {t.name for t in await _build(True).list_tools()}
     assert len(on) == 31
-    assert on - off == {"set_file_xattrs", "list_space_datasets"}
+    assert on - off == tm.FLAG_GATED
+    assert MOVED_OFF_DEFAULT | {"set_file_xattrs", "list_space_datasets"} == tm.FLAG_GATED
+    assert off < on  # the flag only adds tools
 
 
-# --- the harvester query tool: flag off is exactly the base definition ------
+@pytest.mark.asyncio
+async def test_the_six_moved_tools_exist_only_with_the_flag() -> None:
+    off = {t.name for t in await _build(False).list_tools()}
+    on = {t.name for t in await _build(True).list_tools()}
+    assert not (off & MOVED_OFF_DEFAULT)
+    assert on >= MOVED_OFF_DEFAULT
 
-_BASE_QUERY_SCHEMA = {
-    "additionalProperties": True,
-    "description": (
-        "Plugin-specific query payload for the index "
-        '(for example: {"method": "get", "path": "resource_id"})'
-    ),
-    "type": "object",
-}
+
+# --- the harvester query tool: it exists only with the flag, in its tolerant form ---
+
 _BASE_QUERY_DESCRIPTION = "Execute a query against a specific harvester index."
 
 
 async def _query_tool(exp: bool):
     tools = {t.name: t for t in await _build(exp).list_tools()}
-    return tools["query_harvester_index"]
+    return tools.get("query_harvester_index")
 
 
 @pytest.mark.asyncio
-async def test_flag_off_query_harvester_index_is_the_base_definition() -> None:
-    tool = await _query_tool(False)
-    assert tool.description == _BASE_QUERY_DESCRIPTION
-    assert tool.parameters["properties"]["query"] == _BASE_QUERY_SCHEMA
+async def test_flag_off_query_harvester_index_is_not_registered() -> None:
+    assert await _query_tool(False) is None
 
 
 @pytest.mark.asyncio
 async def test_flag_on_query_harvester_index_accepts_a_json_string() -> None:
     tool = await _query_tool(True)
+    assert tool is not None
     query = tool.parameters["properties"]["query"]
     assert {"type": "string"} in query["anyOf"]
     assert tool.description.startswith(_BASE_QUERY_DESCRIPTION)
@@ -103,7 +115,7 @@ async def test_flag_on_query_harvester_index_accepts_a_json_string() -> None:
 async def test_query_harvester_index_forwards_a_json_string_as_an_object(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The api layer coerces a string payload, with the flag off or on."""
+    """The api layer coerces a string payload as well as an object."""
     from onedata_mcp.api import harvesters as api_h
 
     seen: list[dict] = []
@@ -137,7 +149,7 @@ async def test_main_build_off(monkeypatch: pytest.MonkeyPatch) -> None:
 
     srv = main._create_onedata_mcp_server()
     assert srv.instructions == main._BASE_INSTRUCTIONS
-    assert len({t.name for t in await srv.list_tools()}) == 29
+    assert len({t.name for t in await srv.list_tools()}) == 23
 
 
 @pytest.mark.asyncio
@@ -162,14 +174,18 @@ async def test_registered_surface_matches_the_classification_in_both_modes() -> 
     assert tm.registered_surface(True) == tm.ALL_KNOWN | tm.FLAG_GATED
 
 
-def test_flag_gated_tools_are_experimental_and_upstream_adapted() -> None:
-    """Never panel-validated; adapted from later upstream commits (not in UPSTREAM)."""
-    assert {"list_space_datasets", "set_file_xattrs"} == tm.FLAG_GATED
+def test_flag_gated_tools_are_experimental_and_upstream_origin() -> None:
+    """Never panel-validated. Two were adapted from later upstream commits (not in
+    UPSTREAM); the six moved off the default list are inherited (still in UPSTREAM)."""
+    adapted = {"list_space_datasets", "set_file_xattrs"}
+    assert adapted | MOVED_OFF_DEFAULT == tm.FLAG_GATED
     assert not (tm.FLAG_GATED & tm.ALL_KNOWN)  # absent from the default surface
     for name in tm.FLAG_GATED:
         assert tm.maturity_of(name) == "experimental"
         assert tm.origin_of(name) == "upstream"
-        assert name not in tm.STABLE | tm.EXPERIMENTAL | tm.UPSTREAM
+        assert name not in tm.STABLE | tm.EXPERIMENTAL
+    assert not (adapted & tm.UPSTREAM)
+    assert MOVED_OFF_DEFAULT <= tm.UPSTREAM
 
 
 # --- launch-time selection and the read-only token prune see the new tools ---

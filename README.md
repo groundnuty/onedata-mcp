@@ -11,21 +11,18 @@ It talks to the Onezone and Oneprovider REST APIs of **Onedata 25.0**.
 
 ## Tools
 
-The server registers 29 tools by default. **Access** `W` marks the 9 tools that change state in the federation. **Maturity** is explained [below](#maturity).
+The server registers 23 tools by default. **Access** `W` marks the 9 tools that change state in the federation. **Maturity** is explained [below](#maturity).
 
 | Tool | What it does | Access | Maturity |
 |---|---|---|---|
 | **Spaces and providers** | | | |
 | `list_user_spaces` | List the spaces the user belongs to | R | stable |
-| `list_marketplace_spaces` | List spaces advertised in the marketplace | R | experimental |
 | `list_space_providers` | List the providers supporting a space (by name or id) | R | stable |
 | **Files and directories** | | | |
 | `list_files_recursively` | List all files under a directory | R | stable |
 | `list_children` | List the direct children of a directory | R | experimental |
-| `get_file_id` | Resolve a path to a file id | R | experimental |
 | `get_file_attributes` | Read a file's attributes (size, type, replication state, …) | R | experimental |
 | `download_file` | Read a file's content | R | stable |
-| `grep_file_content` | Search a file's content for a pattern | R | experimental |
 | `create_file` | Create a file with given content | W | stable |
 | `create_directory` | Create a directory | W | experimental |
 | `move_file` | Move or rename a file or directory within a space | W | stable |
@@ -46,12 +43,8 @@ The server registers 29 tools by default. **Access** `W` marks the 9 tools that 
 | **Data readiness** | | | |
 | `check_readiness` | Are the declared data complete and readable at this provider, and if not, why | R | experimental |
 | `ensure_readiness` | Bring the declared data here, wait, and keep them here | W | experimental |
-| **Harvesters** | | | |
-| `list_user_harvesters` | List the user's harvesters and their indices | R | experimental |
-| `get_harvester_index_schema` | Read a harvester index and its schema | R | experimental |
-| `query_harvester_index` | Query a harvester index | R | experimental |
 
-The live list is whatever `tools/list` returns; `make tools-manifest` prints it as JSON.
+The live list is whatever `tools/list` returns; `make tools-manifest` prints it as JSON. Eight more tools are available as [preview features](#choosing-which-tools-to-expose).
 
 ### Maturity
 
@@ -90,11 +83,18 @@ ONEDATA_MCP_MATURITY=stable uv run onedata-mcp
 
 **Preview features** are a separate switch from the maturity tiers. `ONEDATA_MCP_EXPERIMENTAL=1` turns them on:
 
-- two extra tools, `list_space_datasets` (list a space's top-level datasets) and `set_file_xattrs` (merge extended attributes; hidden under a read-only token);
-- `query_harvester_index` also accepts its query as a JSON string;
+- eight extra tools, all experimental:
+  - `list_space_datasets`: list a space's top-level datasets;
+  - `set_file_xattrs`: merge extended attributes (hidden under a read-only token);
+  - `get_file_id`: resolve a path to a file id (not needed: every tool that takes a path resolves it itself);
+  - `grep_file_content`: return the lines of a file that contain a literal, case-sensitive substring (not a regex);
+  - `list_marketplace_spaces`: list spaces advertised in the marketplace, including spaces the user does not belong to, which no other tool can act on;
+  - `list_user_harvesters`: list the user's harvesters and their indices;
+  - `get_harvester_index_schema`: read a harvester index and its schema;
+  - `query_harvester_index`: query a harvester index, with the query given as an object or as a JSON string (the three harvester tools need a harvester, which the test federation does not have);
 - extra guidance in the server instructions.
 
-Off by default; with it off, the tool list is exactly the one above.
+Off by default; with it off, the tool list is exactly the one above. A preview tool can join the default list through the promotion protocol in [`design/10-tool-maturity.md`](design/10-tool-maturity.md).
 
 ## Requirements
 

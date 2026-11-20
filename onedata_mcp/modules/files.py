@@ -82,9 +82,10 @@ async def _resolve_with_mcp_root(path_or_id: str, ctx: Optional[Context]) -> str
 def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
     """Register onedata files module tools and prompts with the MCP server.
 
-    When ``experimental`` is set, additionally registers un-validated tools
-    (currently ``set_file_xattrs``) gated behind ONEDATA_MCP_EXPERIMENTAL —
-    see onedata_mcp/experimental.py and onedata-mcp#1.
+    When ``experimental`` is set, additionally registers the preview tools
+    ``set_file_xattrs``, ``get_file_id`` and ``grep_file_content``, gated behind
+    ONEDATA_MCP_EXPERIMENTAL — see onedata_mcp/experimental.py and
+    design/10-tool-maturity.md.
     """
 
     if experimental:
@@ -106,16 +107,18 @@ def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
             """Merge file extended attributes without replacing JSON/RDF metadata."""
             return await set_file_xattrs(file_id_or_path, xattrs)
 
-    @mcp.tool(name="get_file_id", annotations=ToolAnnotations(readOnlyHint=True))
-    async def mcp_get_file_id(
-        path: str = Field(description="Path to the file in format /<space_name>/<path_to_file>"),
-        ctx: Optional[Context] = None,
-    ) -> str:
-        """
-        Get the file id for a given path.
-        """
-        path = await _resolve_with_mcp_root(path, ctx)
-        return await get_file_id(path)
+        @mcp.tool(name="get_file_id", annotations=ToolAnnotations(readOnlyHint=True))
+        async def mcp_get_file_id(
+            path: str = Field(
+                description="Path to the file in format /<space_name>/<path_to_file>"
+            ),
+            ctx: Optional[Context] = None,
+        ) -> str:
+            """
+            Get the file id for a given path.
+            """
+            path = await _resolve_with_mcp_root(path, ctx)
+            return await get_file_id(path)
 
     @mcp.tool(name="get_file_attributes", annotations=ToolAnnotations(readOnlyHint=True))
     async def mcp_get_file_attributes(
@@ -298,21 +301,23 @@ def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
             "content_type": content_type,
         }
 
-    @mcp.tool(name="grep_file_content", annotations=ToolAnnotations(readOnlyHint=True))
-    async def mcp_grep_file_content(
-        file_id_or_path: str = Field(
-            description="File id or path to the file in format /<space_name>/<path_to_file>"
-        ),
-        pattern: str = Field(
-            description="Pattern to search for in the file content",
-        ),
-        ctx: Optional[Context] = None,
-    ) -> str:
-        """
-        Search for a pattern in the content of a given file id or path.
-        """
-        file_id_or_path = await _resolve_with_mcp_root(file_id_or_path, ctx)
-        return await grep_file_content(file_id_or_path, pattern)
+    if experimental:
+
+        @mcp.tool(name="grep_file_content", annotations=ToolAnnotations(readOnlyHint=True))
+        async def mcp_grep_file_content(
+            file_id_or_path: str = Field(
+                description="File id or path to the file in format /<space_name>/<path_to_file>"
+            ),
+            pattern: str = Field(
+                description="Pattern to search for in the file content",
+            ),
+            ctx: Optional[Context] = None,
+        ) -> str:
+            """
+            Search for a pattern in the content of a given file id or path.
+            """
+            file_id_or_path = await _resolve_with_mcp_root(file_id_or_path, ctx)
+            return await grep_file_content(file_id_or_path, pattern)
 
     @mcp.tool(name="create_file", annotations=ToolAnnotations(destructiveHint=True))
     async def mcp_create_file(

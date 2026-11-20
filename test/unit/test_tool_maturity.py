@@ -39,7 +39,8 @@ def test_stable_and_experimental_are_disjoint() -> None:
 
 
 def test_upstream_is_subset_of_known() -> None:
-    assert tm.UPSTREAM <= tm.ALL_KNOWN
+    """UPSTREAM may name inherited tools that sit behind the preview flag (FLAG_GATED)."""
+    assert tm.UPSTREAM <= tm.ALL_KNOWN | tm.FLAG_GATED
 
 
 def test_maturity_and_origin_helpers() -> None:
@@ -48,22 +49,24 @@ def test_maturity_and_origin_helpers() -> None:
     assert tm.maturity_of("totally_unknown_tool") == "experimental"  # safe default
     assert tm.origin_of("list_user_spaces") == "upstream"
     assert tm.origin_of("move_file") == "ours"
+    # flag-gated tools keep their labels: the six moved off the default list are
+    # inherited, so upstream-origin, and never validated, so experimental
+    assert tm.maturity_of("get_file_id") == "experimental"
+    assert tm.origin_of("get_file_id") == "upstream"
     assert tm.origin_of("totally_unknown_tool") == "ours"
 
 
 def test_the_genuine_distrust_set_is_upstream_experimental() -> None:
-    """Sanity-check the 8 inherited-and-never-swept tools."""
-    distrust = tm.EXPERIMENTAL & tm.UPSTREAM
-    assert distrust == {
-        "get_file_attributes",
+    """The inherited-and-never-swept tools: 2 on the default list, 6 behind the flag."""
+    assert {"get_file_attributes", "list_children"} == tm.EXPERIMENTAL & tm.UPSTREAM
+    assert {
         "get_file_id",
         "get_harvester_index_schema",
         "grep_file_content",
-        "list_children",
         "list_marketplace_spaces",
         "list_user_harvesters",
         "query_harvester_index",
-    }
+    } == tm.FLAG_GATED & tm.UPSTREAM
 
 
 # --- selection logic -------------------------------------------------------
@@ -115,8 +118,8 @@ def test_explicit_unknown_names_ignored(monkeypatch: pytest.MonkeyPatch) -> None
 # --- end-to-end against the live server ------------------------------------
 
 
-def test_default_server_exposes_all_29() -> None:
-    assert len(_registered()) == len(tm.ALL_KNOWN) == 29
+def test_default_server_exposes_all_23() -> None:
+    assert len(_registered()) == len(tm.ALL_KNOWN) == 23
 
 
 def test_readiness_tools_are_experimental_and_ours() -> None:

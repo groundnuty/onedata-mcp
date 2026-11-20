@@ -79,7 +79,7 @@ If the deployment's `-spice-v1` patch on onezone changes the response shape of `
 
 **Decided:** recursive primitives. New tool `query_by_metadata` lives in `onedata_mcp/api/metadata.py`, composing `list_files_recursively` + `get_file_metadata` with a small `key=value` / `key=*` predicate parser. Bounded by `max_depth`, `max_results`, and an internal `MAX_FILES_VISITED=1000` hard cap. Returns `truncated: true` whenever any cap fires.
 
-Harvester-based tools (`query_harvester_index`, `get_harvester_index_schema`, `list_user_harvesters`) inherited from the base surface stay in the codebase and remain callable, but are excluded from the PPAM headline 14-tool benchmark allowlist.
+Harvester-based tools (`query_harvester_index`, `get_harvester_index_schema`, `list_user_harvesters`) inherited from the base surface stay in the codebase and remain callable only with `ONEDATA_MCP_EXPERIMENTAL=1` (they are not on the default tool list), and are excluded from the PPAM headline 14-tool benchmark allowlist.
 
 Full rationale and tradeoffs: **[`design/02-query-by-metadata-no-harvester.md`](design/02-query-by-metadata-no-harvester.md)**.
 
