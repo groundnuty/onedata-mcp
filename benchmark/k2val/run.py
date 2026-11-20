@@ -94,7 +94,7 @@ def run_main(argv: list[str]) -> int:
         say(f"[k2val] {e}", file=sys.stderr)
         return 2
 
-    from benchmark.k2val import cli_agents
+    from benchmark.k2val import claude_sdk, cli_agents
 
     models: list[ModelConf] = []
     skipped: list[str] = []
@@ -125,7 +125,9 @@ def run_main(argv: list[str]) -> int:
         for conf in models:  # fail now, not after a fixture is built
             if conf.key_file:
                 read_model_key(conf)
-    except (ConfigError, SecretFileError) as e:
+            if conf.is_claude_sdk:
+                claude_sdk.resolve_cli(conf)
+    except (ConfigError, SecretFileError, FileNotFoundError) as e:
         say(f"[k2val] {e}", file=sys.stderr)
         return 2
 
@@ -141,6 +143,8 @@ def run_main(argv: list[str]) -> int:
     def adapter_factory(conf, on_cost):
         if conf.is_cli:
             return cli_agents.make_cli_adapter(cfg, conf, run_dir, secrets)
+        if conf.is_claude_sdk:  # the subscription: no key to read, nothing to cost
+            return claude_sdk.make_claude_sdk_adapter(cfg, conf, run_dir)
         return api_factory(conf, on_cost)
 
     deps = RunDeps(

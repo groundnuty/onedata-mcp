@@ -33,28 +33,32 @@ concurrency_per_model = 2            # at most 2 trials at once per model (2 is 
 artefact_root = "artefacts/k2val"    # gitignored
 research_dir = "research"            # where research/k2val-<run_id>.md is written
 
-[spend]                              # the Haiku configs and the Sonnet control share it
-cap_usd = 50.0
-reserve_usd = 0.50
+[spend]                              # applies to the "anthropic" backend (an API key, billed per
+cap_usd = 50.0                       # token) only. The Claude configs below use "claude_sdk"
+reserve_usd = 0.50                   # (the subscription), so nothing here is spent by them
 
 # Tool sets of the agent study (override only if its sets change).
 # [tools]
 # k1 = [...]
 # k2 = [...]
 
-# ---- Wave 1: the API configs (LLM Lab, Anthropic) ---------------------------------------
+# ---- Wave 1: the API configs (LLM Lab) and the Claude configs ------------------------------
+#
+# The Claude configs use backend "claude_sdk": Claude Code on the operator's logged-in
+# subscription, through the Python claude-agent-sdk. They need no ANTHROPIC_API_KEY, no
+# key_file and no price (both are refused here), and the [spend] cap does not apply to them.
+# `effort` is required: low | medium | high | xhigh | max. Optional: `thinking` ("adaptive",
+# "disabled" or a token budget) and `binary` (the `claude` executable; default: `claude` on
+# PATH, else the copy bundled with the SDK, which can be too old to know the newest models).
+# For the same Claude models on an API key, use backend = "anthropic" with key_file, effort
+# and [price]: that backend is still in the code.
 
 [models.sonnet-medium]               # the control: should pass every scenario
-backend = "anthropic"
+backend = "claude_sdk"
 control = true
 api_id = "claude-sonnet-5-5"
 space = "k2val-sonnet"
-key_file = "<key dir>/anthropic.key"
-effort = "medium"                    # low | medium | high | xhigh | max
-max_tokens = 16000                   # non-streaming: at most 21333
-[models.sonnet-medium.price]         # USD per Mtok
-input_low = 2.00
-output_low = 10.00
+effort = "medium"
 
 [models.glm]
 backend = "openai_compat"
@@ -99,43 +103,22 @@ top_p = 0.95
 
 # The Haiku effort sweep: the same model at three efforts.
 [models.haiku-low]
-backend = "anthropic"
+backend = "claude_sdk"
 api_id = "claude-haiku-5-5"
 space = "k2val-haiku-low"
-key_file = "<key dir>/anthropic.key"
 effort = "low"
-[models.haiku-low.price]             # prompt tiers by the size of the call's prompt
-input_low = 0.10
-output_low = 0.50
-input_high = 0.50
-output_high = 2.50
-threshold_tokens = 200000
 
 [models.haiku-medium]
-backend = "anthropic"
+backend = "claude_sdk"
 api_id = "claude-haiku-5-5"
 space = "k2val-haiku-medium"
-key_file = "<key dir>/anthropic.key"
 effort = "medium"
-[models.haiku-medium.price]
-input_low = 0.10
-output_low = 0.50
-input_high = 0.50
-output_high = 2.50
-threshold_tokens = 200000
 
 [models.haiku-high]
-backend = "anthropic"
+backend = "claude_sdk"
 api_id = "claude-haiku-5-5"
 space = "k2val-haiku-high"
-key_file = "<key dir>/anthropic.key"
 effort = "high"
-[models.haiku-high.price]
-input_low = 0.10
-output_low = 0.50
-input_high = 0.50
-output_high = 2.50
-threshold_tokens = 200000
 
 # ---- Wave 2: the CLI agent legs (disabled until [cli.jail] wrapper is set AND a clean
 # `k2val scan` exists for the config; otherwise the run skips them and says so) -------------
