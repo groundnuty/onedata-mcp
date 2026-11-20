@@ -18,6 +18,7 @@ from benchmark.k2val.oracles import (
 )
 from benchmark.k2val.recording import CallRecord
 from benchmark.k2val.snapshot import FileState, Snapshot
+from test.unit.k2val.real_answers import V1_REAL, V4_REAL, V5_REAL
 
 FIVE = [f"log_2020010{d}.dat" for d in range(1, 6)]
 SIX = [f"log_2020010{d}.dat" for d in range(1, 7)]  # V1 offers all six in its brief
@@ -408,3 +409,140 @@ def test_the_tools_ready_sentence_is_a_claim_for_v6_and_other_site_wording_is_no
     late = ctx("V6", FIVE, at=snap(FIVE), after=snap(FIVE))
     result = verdict("V6", late, "The files are complete at another provider.")
     assert not result.mcp_pass and "PREMATURE" not in result.diagnosis
+
+
+# --- real answers the oracle misread -------------------------------------------------------------
+#
+# The fixtures are final answers from the panel's first two runs that were correct and still
+# scored FAIL (test/unit/k2val/real_answers.py). Each group names the misreading.
+
+
+@pytest.mark.parametrize(("case", "answer"), V1_REAL, ids=[c for c, _ in V1_REAL])
+def test_v1_real_answers_that_list_every_status_then_name_the_two_files_pass(
+    case: str, answer: str
+) -> None:
+    result = verdict("V1", ctx("V1", SIX), answer)
+    assert result.mcp_pass, result.diagnosis
+
+
+@pytest.mark.parametrize(("case", "answer"), V4_REAL, ids=[c for c, _ in V4_REAL])
+def test_v4_real_answers_pass(case: str, answer: str) -> None:
+    # "none ... readable" and "complete elsewhere" are not claims of readiness; "No." and "not
+    # at your site" and "can't be read locally" are "not ready"
+    result = verdict("V4", ctx("V4", FIVE), answer)
+    assert result.mcp_pass, result.diagnosis
+
+
+@pytest.mark.parametrize(("case", "answer"), V5_REAL, ids=[c for c, _ in V5_REAL])
+def test_v5_real_answers_pass(case: str, answer: str) -> None:
+    result = verdict("V5", ctx("V5", FIVE), answer)
+    assert result.mcp_pass, result.diagnosis
+
+
+def test_none_and_neither_are_negations_of_a_ready_claim() -> None:
+    assert not claims_ready("None of the bytes are available locally.")
+    assert not claims_ready("Neither complete nor readable at vistula-dc.")
+    assert not claims_done("None of the files are there yet.")
+    # but "none" next to a problem word is the usual way to say all went well
+    assert claims_ready("All five files are ready, and none are missing.")
+    assert claims_done("The files are now fully replicated and none of them were lost.")
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "**Not ready.** The five files are **complete** at **another provider**, not at your site.",
+        "No — they are complete elsewhere and have not been transferred to vistula-dc.",
+        "No. The files are complete at another provider.",
+    ],
+)
+def test_v4_markdown_and_an_opening_no(answer: str) -> None:
+    result = verdict("V4", ctx("V4", FIVE), answer)
+    assert result.mcp_pass, result.diagnosis
+
+
+def test_v5_emphasis_does_not_split_the_reason() -> None:
+    answer = (
+        "Not ready: `log_20200102.dat` and `log_20200104.dat` are still being **written**; "
+        "the other three are at another provider."
+    )
+    result = verdict("V5", ctx("V5", FIVE), answer)
+    assert result.mcp_pass, result.diagnosis
+
+
+def test_v1_a_conclusion_is_read_from_its_own_sentence_and_list() -> None:
+    # the intro sentence has no names and no list; the per-file lines are not claims
+    answer = (
+        "To see which files are fully stored I looked at each one.\n\n"
+        "- log_20200101.dat: 50% replicated\n"
+        "- log_20200102.dat: 100%\n"
+        "- log_20200103.dat: 12% replicated\n\n"
+        "Fully stored at vistula-dc:\n\n"
+        "- log_20200102.dat\n"
+        "- log_20200105.dat\n\n"
+        "Not fully stored:\n"
+        "- log_20200101.dat\n"
+        "- log_20200103.dat"
+    )
+    assert verdict("V1", ctx("V1", SIX), answer).mcp_pass
+    assert claimed_names("Two files are fully stored: log_20200102.dat and log_20200105.dat.") == {
+        "log_20200102.dat",
+        "log_20200105.dat",
+    }
+
+
+# --- ... and what must keep failing ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "All five files are ready at your site.",
+        "No issues. All five files are ready at your site.",
+        "No problem: all five files are complete and readable at vistula-dc.",
+        "Yes. All five files are complete and readable at vistula-dc, none are missing.",
+    ],
+)
+def test_v4_an_answer_that_claims_ready_still_fails(answer: str) -> None:
+    result = verdict("V4", ctx("V4", FIVE), answer)
+    assert not result.mcp_pass and "CLAIMS READY" in result.diagnosis
+
+
+def test_v4_an_answer_with_no_reason_still_fails_even_when_it_opens_with_no() -> None:
+    result = verdict("V4", ctx("V4", FIVE), "No. None of the files are readable.")
+    assert not result.mcp_pass and "another site" in result.diagnosis
+
+
+def test_v5_a_ready_claim_with_a_none_in_it_still_fails() -> None:
+    answer = "All five files are ready and readable here, and none are missing. Two were written."
+    result = verdict("V5", ctx("V5", FIVE), answer)
+    assert not result.mcp_pass and "CLAIMS READY" in result.diagnosis
+
+
+@pytest.mark.parametrize(
+    ("answer", "needle"),
+    [
+        # three names
+        ("Fully stored: log_20200101.dat, log_20200102.dat and log_20200105.dat.", "extra"),
+        (
+            "log_20200102.dat, log_20200105.dat and log_20200101.dat are fully stored.",
+            "extra",
+        ),
+        # one name
+        ("Only log_20200102.dat is fully stored.", "missing"),
+        # lists every status, then concludes with the wrong set
+        (
+            "1. log_20200101.dat: Has 0 physical size\n"
+            "2. log_20200102.dat: Has full physical size\n"
+            "3. log_20200105.dat: Has full physical size\n\n"
+            "The files that are fully stored at vistula-dc are:\n\n"
+            "log_20200101.dat\nlog_20200102.dat\nlog_20200105.dat",
+            "extra",
+        ),
+        # a negated conclusion names nothing as stored
+        ("Not fully stored: log_20200101.dat, log_20200102.dat.", "missing"),
+    ],
+)
+def test_v1_a_wrong_set_still_fails(answer: str, needle: str) -> None:
+    result = verdict("V1", ctx("V1", SIX), answer)
+    assert not result.mcp_pass and needle in result.diagnosis

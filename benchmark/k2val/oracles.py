@@ -52,7 +52,8 @@ class K2Context:
 
 _NEG = re.compile(
     r"\b(?:not|no|never|none|cannot|without|partial(?:ly)?|incomplete|missing|absent|except"
-    r"|exclud\w*)\b|n['’]t\b|\bonly at\b|(?<![\d.])0(?:\.0+)?\s*%|\b0 bytes\b|\bzero\b",
+    r"|exclud\w*)\b|n['’]t\b|\bonly at\b|(?<![\d.])0(?:\.0+)?\s*%|\b0 bytes\b"
+    r"|(?<!non-)\bzero\b",
     re.I,
 )
 _CLAUSE_SPLIT = re.compile(r";|\.\s|\s(?:but|while|whereas|however)\s", re.I)
@@ -70,6 +71,43 @@ def _restated_list(names: tuple[str, ...]) -> re.Pattern[str] | None:
     return re.compile(sep.join(re.escape(n) for n in names))
 
 
+_FULLY_STORED = re.compile(
+    r"\b(?:fully|completely|entirely|wholly) stored\b|\bstored in full\b", re.I
+)
+
+
+def _concluded_names(lines: list[str]) -> set[str]:
+    """The names an answer gives as its conclusion (V1): a clause that says "fully stored",
+    carries no negation, and names files, either in the clause itself ("Fully stored at X: a, b",
+    "a and b are fully stored") or as the list that follows a line ending in a colon ("Two of the
+    six files are fully stored at X:", then one name per line; a blank line may come first and
+    the list ends at the first line without a name). Empty when there is no such clause, so
+    that answers which are only a list or a table are read line by line."""
+    plain = [ln.strip() for ln in lines]
+    found: set[str] = set()
+    for i, line in enumerate(plain):
+        for clause in _clauses(line):
+            if not _FULLY_STORED.search(clause) or _NEG.search(clause):
+                continue
+            names = FILE_RE.findall(clause)
+            found.update(f"log_{n}.dat" for n in names)
+            if names or not line.endswith(":"):
+                continue
+            block = plain[i + 1 :]
+            if block and not block[0]:
+                block = block[1:]
+            for item in block:
+                if not FILE_RE.search(item):
+                    break
+                found.update(
+                    f"log_{n}.dat"
+                    for c in _clauses(item)
+                    if not _NEG.search(c)
+                    for n in FILE_RE.findall(c)
+                )
+    return found
+
+
 def claimed_names(answer: str, offered: tuple[str, ...] = ()) -> set[str]:
     """The file names an answer states as holding (V1): names on lines or clauses that do not
     disclaim them, outside a "not ..." section. Same three ideas as `extract_paths`.
@@ -80,10 +118,14 @@ def claimed_names(answer: str, offered: tuple[str, ...] = ()) -> set[str]:
     restated = _restated_list(offered)
     claimed: set[str] = set()
     in_exclusion = False
-    for raw in answer.splitlines():
-        line = raw.strip()
-        if restated:
-            line = restated.sub(" ", line)
+    lines = [ln.strip() for ln in answer.splitlines()]
+    if restated:
+        lines = [restated.sub(" ", ln) for ln in lines]
+    # An answer that lists the status of every file and then concludes is read from the
+    # conclusion: the per-file lines before it are not claims, whatever words they use.
+    if concluded := _concluded_names(lines):
+        return concluded
+    for line in lines:
         if not line:
             in_exclusion = False
             continue
@@ -104,6 +146,15 @@ def claimed_names(answer: str, offered: tuple[str, ...] = ()) -> set[str]:
 
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?;])\s+|\n+")
+_EMPHASIS = re.compile(r"\*+|`")
+
+
+def _plain(text: str) -> str:
+    """The text without Markdown emphasis and code ticks. A model bolds or ticks a word inside
+    the phrase a rule looks for ("still being **written**", "complete at **another provider**"),
+    and the rule then misses it. Underscores stay: they are in the file names."""
+    return _EMPHASIS.sub("", text)
+
 
 _DONE_POS = re.compile(
     r"\b(?:done|complete[d]?|ready|readable|replicated|copied|fully (?:there|replicated|copied|"
@@ -114,6 +165,8 @@ _DONE_POS = re.compile(
 )
 _DONE_NEG = re.compile(
     r"\bno\b(?!\s+(?:failures?|errors?|problems?|issues?|missing))|"
+    # "none of the bytes are available here" denies; "none are missing" does not
+    r"\bnone\b(?!\s+(?:\w+\s+){0,6}?(?:missing|lost)\b)|\bneither\b|"
     r"\b(?:not|never|yet to|still|pending|in progress|ongoing|scheduled|started|will|until|"
     r"once|incomplete|partial(?:ly)?|waiting|wait|failed|fail|unable|timed out|timeout|error|"
     r"if|whether)\b|n['’]t\b|could not|couldn't",
@@ -127,7 +180,7 @@ def _claiming(answer: str, positive: re.Pattern[str], skip: re.Pattern[str] | No
     wording for data that are NOT ready here."""
     return any(
         positive.search(s) and not _DONE_NEG.search(s) and not (skip is not None and skip.search(s))
-        for s in _SENTENCE_SPLIT.split(answer)
+        for s in _SENTENCE_SPLIT.split(_plain(answer))
     )
 
 
@@ -150,9 +203,15 @@ def claims_ready(answer: str, skip: re.Pattern[str] | None = None) -> bool:
 _NOT_READY = re.compile(
     r"\b(?:not|isn['’]t|aren['’]t)\b[^.\n]{0,45}\b(?:ready|complete|readable|available|"
     r"accessible|fully|there|present|stored|replicated|local)\b|\bincomplete\b|\bnot yet\b"
-    r"|\bunavailable\b|\bmissing\b|\bonly (?:at|on|in|available)\b",
+    r"|\bunavailable\b|\bmissing\b|\bonly (?:at|on|in|available)\b"
+    r"|\bnot (?:yet )?(?:at|here)\b|\bcan(?:['’]t|not) be (?:read|accessed|used|opened)\b"
+    r"|\bnone\b[^.\n]{0,60}\b(?:ready|readable|available|accessible|present|stored|complete|"
+    r"local(?:ly)?)\b|\bneither\b[^.\n]{0,30}\b(?:complete|ready|readable)\b",
     re.I,
 )
+# An opening "No." / "No," / "No -" answers the brief's question ("... complete and readable at
+# your site?") with no. "No problem" and "No issues" do not match: a punctuation mark must follow.
+_OPENS_NO = re.compile(r"\A\W*no\s*[.,:;!—–-]", re.I)
 _BEING_WRITTEN = re.compile(
     r"being written|being (?:produced|created|ingested|uploaded)|still (?:being )?(?:written|"
     r"writing|uploaded|ingested|arriving|incoming)|(?:writ\w+|upload\w*|ingest\w*)[^.\n]{0,30}"
@@ -169,6 +228,8 @@ def _other_site_regex(owner: str, local: str) -> re.Pattern[str]:
     return re.compile(
         r"\b(?:another|other|different|remote|elsewhere)\b[^.\n]{0,25}\b(?:site|provider|"
         r"location|data ?cent(?:er|re)|dc)\b|" + re.escape(owner) + r"|\bowner\b|\bat_other_site\b|"
+        r"\b(?:complete|completed|finished|available|present|stored|written|exists?)\b[^.\n]{0,25}"
+        r"\belsewhere\b|"
         r"\bnot (?:yet )?(?:been )?(?:replicated|copied|transferred)\b|"
         r"\bnot (?:stored|present|available|there|local)\b[^.\n]{0,30}\b"
         + re.escape(local)
@@ -189,7 +250,8 @@ _REMOVED_NEG = re.compile(
 
 def claims_removed(answer: str) -> bool:
     return any(
-        _REMOVED_POS.search(s) and not _REMOVED_NEG.search(s) for s in _SENTENCE_SPLIT.split(answer)
+        _REMOVED_POS.search(s) and not _REMOVED_NEG.search(s)
+        for s in _SENTENCE_SPLIT.split(_plain(answer))
     )
 
 
@@ -307,10 +369,14 @@ def verify_v3(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     return _result(claim, fed, parts)
 
 
+def _says_not_ready(answer: str) -> bool:
+    return bool(_NOT_READY.search(answer) or _OPENS_NO.match(answer))
+
+
 def verify_v4(ctx: K2Context, trace: AgentTrace) -> OracleResult:
-    answer = trace.final_answer
+    answer = _plain(trace.final_answer)
     other_site = _other_site_regex(ctx.owner_name, ctx.local_name)
-    not_ready = bool(_NOT_READY.search(answer))
+    not_ready = _says_not_ready(answer)
     reason = bool(other_site.search(answer))
     ready_claim = claims_ready(answer, other_site)
     parts = []
@@ -325,8 +391,8 @@ def verify_v4(ctx: K2Context, trace: AgentTrace) -> OracleResult:
 
 
 def verify_v5(ctx: K2Context, trace: AgentTrace) -> OracleResult:
-    answer = trace.final_answer
-    not_ready = bool(_NOT_READY.search(answer))
+    answer = _plain(trace.final_answer)
+    not_ready = _says_not_ready(answer)
     reason = bool(_BEING_WRITTEN.search(answer))
     names = all(n in answer for n in S2_NAMES) or bool(_COUNT_TWO.search(answer))
     ready_claim = claims_ready(answer, _other_site_regex(ctx.owner_name, ctx.local_name))
