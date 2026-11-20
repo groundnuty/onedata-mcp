@@ -226,4 +226,5 @@ conformance-results/
 
 # K2 validation panel: local config (paths to token and key files) and per-run artefacts
 benchmark/k2val/k2val.toml
+benchmark/k2val/k2val.valfed.toml
 artefacts/k2val/

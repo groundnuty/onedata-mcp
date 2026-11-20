@@ -78,6 +78,15 @@ Prompts are neutral: they name no tool and give no workflow advice. Each model c
 
 Validation runs use a two-provider Onedata 25.0 federation run locally with Docker Compose, owned by this project and reset between runs. It is never a shared or production deployment. Live tests refuse any host that is not local.
 
+The federation is declared in [`benchmark/valfed/layout.toml`](../benchmark/valfed/layout.toml) and driven by [`benchmark/valfed/valfed.py`](../benchmark/valfed/valfed.py). The driver fetches the Compose federation tool of papers-experiments-core at a pinned commit, which brings the federation up, resets it and takes it down.
+
+- **Layout.** One Onezone and two Oneproviders, published on `127.0.0.1` only. Every space is written through `owner` and mirrored by `local`, the agent's site. There is one space per panel config, plus `omcp-live` for the live tests and `omcp-smoke` for no-model checks.
+- **Commands.** `make valfed-up`, `valfed-reset` (empties every space) and `valfed-down` manage it. `valfed-status` shows the containers, their caps, peak memory and the host's load.
+- **Host limits.** The driver caps each container's CPUs with `docker update` and re-applies the caps after every start. It refuses to start above a 5-minute load of 20, and stops a start if the load passes 20.
+- **Tokens and panel config.** The driver mints the tokens and writes the panel's config, `benchmark/k2val/k2val.valfed.toml` (gitignored). TLS is verified against the federation's own CA.
+- **Checks.** `make valfed-readiness-live` runs the live readiness test. `make valfed-check` builds and tears down the panel's fixtures without calling any model.
+- **Location.** Everything lives under `$VALFED_HOME`. The federation's CA is valid for 30 days; to renew it, run `valfed-down` and remove `$VALFED_HOME/ca`.
+
 ## Leaving the default surface
 
 A tool that cannot be validated in any environment we have, or that duplicates a stable tool, moves behind the preview flag rather than being deleted. Removing a tool from the default list breaks clients that use it, so that happens only in a PR that says so.
