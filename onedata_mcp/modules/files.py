@@ -51,21 +51,30 @@ DEFAULT_ATTRIBUTES_DOC = (
 )
 
 
+# The longest JSON text read as a list of names: 64 names of 128 characters, quoted and
+# separated. Anything longer is refused before it is decoded.
+MAX_ATTRIBUTES_TEXT = MAX_ATTRIBUTES * 132
+
+
 def _attribute_list(value: Any) -> Any:
     """Read a list sent as its JSON text (`'["size", "mtime"]'`, seen from Qwen3-Coder) as that
-    list. Any other string is refused, with what to send instead. Everything else goes on to
-    pydantic's own list check, so the published schema stays a list of strings."""
+    list. Any other string is refused, with what to send instead: one longer than
+    MAX_ATTRIBUTES_TEXT before it is decoded, and one nested too deeply to decode. Everything
+    else goes on to pydantic's own list check, so the published schema stays a list of
+    strings."""
     if not isinstance(value, str):
         return value
-    try:
-        parsed = json.loads(value)
-    except ValueError:
-        parsed = None
+    parsed = None
+    if len(value) <= MAX_ATTRIBUTES_TEXT:
+        try:
+            parsed = json.loads(value)
+        except (ValueError, RecursionError):
+            parsed = None
     if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
         return parsed
     raise ValueError(
         'attributes must be a list of attribute names, for example ["size", "mtime"]; '
-        f"got the string {value[:80]!r}"
+        f"got the string {value[:80]!r}" + ("..." if len(value) > 80 else "")
     )
 
 
@@ -138,6 +147,18 @@ async def _resolve_with_mcp_root(path_or_id: str, ctx: Optional[Context]) -> str
     return f"{root_path.rstrip('/')}/{path_or_id.lstrip('/')}"
 
 
+async def _resolve_or_hint(path_or_id: str, ctx: Optional[Context], form: str) -> str:
+    """`_resolve_with_mcp_root` for get_file_attributes, list_children and create_directory
+    (design/13-15), with the same hint when there is no MCP session to ask for roots. An
+    in-process call, as the validation panel's API legs make, has none: `ctx.list_roots()` then
+    raises a RuntimeError ("session is not available"), which said nothing about the path. The
+    stable tools keep `_resolve_with_mcp_root` as it is."""
+    try:
+        return await _resolve_with_mcp_root(path_or_id, ctx)
+    except RuntimeError:
+        raise ValueError(f"Paths must start with '/': use {form} (got {path_or_id!r}).") from None
+
+
 def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
     """Register onedata files module tools and prompts with the MCP server.
 
@@ -193,7 +214,9 @@ def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
         attributes: AttributeNames = Field(default=None, description=ATTRIBUTE_NAMES_DOC),
         ctx: Optional[Context] = None,
     ) -> dict[str, Any]:
-        file_id_or_path = await _resolve_with_mcp_root(file_id_or_path, ctx)
+        file_id_or_path = await _resolve_or_hint(
+            file_id_or_path, ctx, "/<space_name>/<path_to_file>"
+        )
         return await get_file_attributes(file_id_or_path, attributes=attributes)
 
     @mcp.tool(
@@ -228,7 +251,9 @@ def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
         ),
         ctx: Optional[Context] = None,
     ) -> dict[str, Any]:
-        parent_id_or_path = await _resolve_with_mcp_root(parent_id_or_path, ctx)
+        parent_id_or_path = await _resolve_or_hint(
+            parent_id_or_path, ctx, "/<space_name>/<path_to_directory>"
+        )
         return await list_children(
             parent_id_or_path, attributes=attributes, limit=limit, offset=offset, token=token
         )
@@ -426,9 +451,9 @@ def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
         """Create a directory at the given path. Returns `{fileId, path}` of the new directory.
 
         By default, missing parent directories along the path are created too. Fails if
-        anything already exists at the path; the error says whether it is a directory or a
-        regular file."""
-        path = await _resolve_with_mcp_root(path, ctx)
+        something already exists at the path; when the provider can tell, the error says
+        whether it is a directory or a regular file."""
+        path = await _resolve_or_hint(path, ctx, "/<space_name>/<path_to_directory>")
         return await api_create_directory(path, create_parents=create_parents)
 
     @mcp.tool(name="delete_file", annotations=ToolAnnotations(destructiveHint=True))

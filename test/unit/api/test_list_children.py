@@ -155,8 +155,26 @@ async def test_listing_a_regular_file_says_only_a_directory_has_entries(
         await files.list_children("/Alpha/a.dat", limit=10, offset=0)
 
     assert str(caught.value).startswith(
-        "The path '/Alpha/a.dat' is a regular file, not a directory: only a directory has "
-        "entries to list."
+        "The path '/Alpha/a.dat' is not a directory: only a directory has entries to list."
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_file_on_the_way_of_the_path_names_a_component(httpx_mock: HTTPXMock) -> None:
+    """`enotdir` while resolving `/Alpha/a.dat/sub`: a component is not a directory, which says
+    nothing of `sub` itself."""
+    httpx_mock.add_response(
+        method="POST",
+        url=lookup_url("/Alpha/a.dat/sub"),
+        **onedata_error(400, "posix", "enotdir"),
+    )
+
+    with pytest.raises(OnedataApiError) as caught:
+        await files.list_children("/Alpha/a.dat/sub", limit=10, offset=0)
+
+    assert str(caught.value).startswith(
+        "A component of path '/Alpha/a.dat/sub' before its last part is not a directory, so "
+        "this provider cannot resolve the path."
     )
 
 
@@ -164,9 +182,23 @@ async def test_listing_a_regular_file_says_only_a_directory_has_entries(
 @pytest.mark.parametrize(
     ("error", "starts"),
     [
-        (onedata_error(404, "notFound"), f"Nothing exists at file id '{DIR}'"),
-        (onedata_error(400, "posix", "enoent"), f"Nothing exists at file id '{DIR}'"),
-        (onedata_error(400, "badValueIdentifier", key="id"), f"Onedata rejected file id '{DIR}'"),
+        (onedata_error(404, "notFound"), f"This provider reports nothing at file id '{DIR}'"),
+        (
+            onedata_error(400, "posix", "enoent"),
+            f"This provider reports nothing at file id '{DIR}'",
+        ),
+        (
+            onedata_error(400, "badValueIdentifier", key="id"),
+            f"This provider rejected file id '{DIR}'",
+        ),
+        (
+            onedata_error(400, "spaceNotSupportedBy"),
+            f"This provider does not support the space of file id '{DIR}', so it cannot list",
+        ),
+        (
+            {"status_code": 404, "json": {"error": {"description": "(Onedata's own text)"}}},
+            f"This provider answered 404 for file id '{DIR}' without saying why",
+        ),
         (onedata_error(403, "forbidden"), f"Not allowed to list file id '{DIR}'"),
         (onedata_error(400, "posix", "eacces"), f"Not allowed to list file id '{DIR}'"),
     ],

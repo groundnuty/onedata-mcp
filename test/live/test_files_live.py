@@ -15,21 +15,23 @@ Environment (the usual four, plus the space to work in):
     ONEDATA_ONEZONE_HOST, ONEDATA_ONEZONE_TOKEN
     ONEDATA_MCP_LIVE_FILES_SPACE   name of a space the local provider supports
 
-Everything is made under one probe directory, `/<space>/files-live-<time>-<hex>`, deleted at the
-end. The tools are called through an in-process MCP client, so what is checked is what a model
-gets: the answer on success and the error text on failure. Each test PRINTS what the unit tests
-cannot pin (they use fakes; the swagger gives only statuses): the real error bodies, the form of
-`posixPermissions`, the unit of the times, the order of a listing.
+Everything is made under one probe directory, `/<space>/files-live-<time>-<hex>`, which the test
+creates exclusively (a taken name is retried, never adopted) and deletes by its id at the end; a
+failed deletion is reported. The tools are called through an in-process MCP client, so what is
+checked is what a model gets: the answer on success and the error text on failure. Each test
+PRINTS what the unit tests cannot pin (they use fakes; the swagger gives only statuses): the real
+error bodies, the form of `posixPermissions`, the unit of the times, the order of a listing. The
+failure contracts expected of 25.0 are asserted and marked `TODO(first live run)`: pin them, or
+correct them, from what the first run prints.
 """
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import secrets
 import time
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import pytest
 import pytest_asyncio
@@ -38,10 +40,11 @@ from fastmcp import Client, FastMCP
 from onedata_mcp.api.files import create_file, delete_file, get_file_id
 from onedata_mcp.config import get_oneprovider_config
 from onedata_mcp.modules import files as files_module
-from onedata_mcp.utils import request
+from onedata_mcp.utils import OnedataApiError, request
 
 ENABLE = "ONEDATA_MCP_LIVE_FILES"
 SPACE_ENV = "ONEDATA_MCP_LIVE_FILES_SPACE"
+PROBE_TRIES = 5
 
 pytestmark = pytest.mark.skipif(
     os.environ.get(ENABLE) != "1", reason=f"live test: set {ENABLE}=1 (local Compose only)"
@@ -82,15 +85,41 @@ def files_mcp() -> FastMCP:
     return mcp
 
 
+async def _new_probe_directory(space: str) -> tuple[str, str]:
+    """A directory made EXCLUSIVELY under the space root, and its id. `POST /data/{root}/children`
+    with `type=DIR` fails when the name is taken, so a directory that was already there is never
+    adopted (and later deleted): a taken name is retried with a fresh one."""
+    config = get_oneprovider_config()
+    root_id = await get_file_id(f"/{space}")
+    for _ in range(PROBE_TRIES):
+        name = f"files-live-{int(time.time())}-{secrets.token_hex(4)}"
+        try:
+            made = await request(
+                config,
+                "POST",
+                f"/data/{quote(root_id, safe='')}/children",
+                params={"name": name, "type": "DIR"},
+            )
+        except OnedataApiError as e:
+            status = (e.response or {}).get("status_code")
+            if e.errno == "eexist" or status == 409:
+                continue  # taken: never adopt it
+            raise
+        return f"/{space}/{name}", made["body"]["fileId"]
+    pytest.fail(f"no free probe directory name in {space} after {PROBE_TRIES} tries")
+
+
 @pytest_asyncio.fixture
 async def probe(space: str):
-    """A fresh probe directory, made through the stable create_file (a file inside it, with its
-    parents); deleted afterwards with everything in it."""
-    path = f"/{space}/files-live-{int(time.time())}-{secrets.token_hex(3)}"
-    await create_file(f"{path}/seed.txt", "seed\n", create_parents=True)
-    yield path
-    with contextlib.suppress(Exception):  # cleanup must not hide the test's result
-        await delete_file(path)
+    """A probe directory this test made exclusively, with `seed.txt` in it. It is deleted
+    afterwards by the id it was made with, never by path, and a failed deletion fails the test's
+    teardown: it is reported, not hidden."""
+    path, probe_id = await _new_probe_directory(space)
+    try:
+        await create_file(f"{path}/seed.txt", "seed\n")
+        yield path
+    finally:
+        await delete_file(probe_id)
 
 
 async def _call(mcp: FastMCP, tool: str, arguments: dict):
@@ -181,11 +210,15 @@ async def test_attribute_errors_as_the_model_reads_them(files_mcp: FastMCP, prob
     missing = f"{probe}/no-such-file.dat"
     result, text = await _call(files_mcp, "get_file_attributes", {"file_id_or_path": missing})
     print(f"missing path answered: {text}")
-    assert result.is_error is True and "not found" in text
+    # TODO(first live run): pin 25.0's status and error id, printed above. Expected: a
+    # structured not-found ('Path "..." not found'); a bare 404 gives the possible causes.
+    assert result.is_error is True and ("not found" in text or "answered 404" in text)
 
     made_up = secrets.token_hex(16)
     result, text = await _call(files_mcp, "get_file_attributes", {"file_id_or_path": made_up})
     print(f"made-up id answered: {text}")
+    # TODO(first live run): pin 25.0's status and error id, printed above (a structured
+    # not-found, badValueIdentifier, or spaceNotSupportedBy for an id it cannot decode).
     assert result.is_error is True
     assert "Give a path, /<space_name>/<path>, or a file id." in text or "space" in text.lower()
 
@@ -195,6 +228,7 @@ async def test_attribute_errors_as_the_model_reads_them(files_mcp: FastMCP, prob
         {"file_id_or_path": f"{probe}/seed.txt", "attributes": ["owner"]},
     )
     print(f"unknown attribute name answered: {text}")
+    # TODO(first live run): pin 25.0's status and error id, printed above.
     assert result.is_error is True and "owner" in text
 
     result, text = await _call(
@@ -210,9 +244,9 @@ async def test_attribute_errors_as_the_model_reads_them(files_mcp: FastMCP, prob
 # =============================================================================================
 
 
-async def _all_pages(mcp: FastMCP, path: str, **arguments) -> tuple[list[str], int]:
-    """Every entry name, page by page with the token; and how many pages it took."""
-    names: list[str] = []
+async def _all_pages(mcp: FastMCP, path: str, **arguments) -> tuple[list[dict], int]:
+    """Every entry, page by page with the token; and how many pages it took."""
+    entries: list[dict] = []
     token = None
     pages = 0
     while True:
@@ -223,11 +257,11 @@ async def _all_pages(mcp: FastMCP, path: str, **arguments) -> tuple[list[str], i
         assert result.is_error is False, text
         page = _payload(result, text)
         pages += 1
-        names += [c["name"] for c in page["children"]]
+        entries += page["children"]
         if page["isLast"]:
-            return names, pages
+            return entries, pages
+        assert page["nextPageToken"] and page["nextPageToken"] != token, page
         token = page["nextPageToken"]
-        assert token, page
         assert pages < 10, "no end to the listing"
 
 
@@ -252,12 +286,20 @@ async def test_a_directory_longer_than_one_page_is_listed_with_the_token(
     print(f"isLast {first['isLast']}, nextPageToken given: {bool(first['nextPageToken'])}")
     assert len(first["children"]) == 10 and first["isLast"] is False
 
-    names, pages = await _all_pages(files_mcp, base)
+    entries, pages = await _all_pages(files_mcp, base)
+    names = [e["name"] for e in entries]
     print(f"all entries in order, {pages} pages: {names}")
     assert sorted(names) == sorted(
         [f"log_202001{d:02d}.dat" for d in range(1, 12)]
         + ["calib_runs", "raw_frames", "spare_slots"]
     )
+    assert names[:10] == [c["name"] for c in first["children"]]  # the token walk starts there
+    # LC expects a model to tell a subdirectory by its type: the three must carry DIR
+    types = {e["name"]: e["type"] for e in entries}
+    assert {d: types[d] for d in ("calib_runs", "raw_frames", "spare_slots")} == dict.fromkeys(
+        ("calib_runs", "raw_frames", "spare_slots"), "DIR"
+    )
+    assert {types[n] for n in names if n.startswith("log_")} == {"REG"}
 
     result, text = await _call(
         files_mcp, "list_files_recursively", {"parent_id_or_path": base, "limit": 100}
@@ -270,7 +312,10 @@ async def test_a_directory_longer_than_one_page_is_listed_with_the_token(
     result, text = await _call(
         files_mcp, "list_children", {"parent_id_or_path": base, "offset": 10, "limit": 10}
     )
-    print(f"offset 10: {[c['name'] for c in _payload(result, text)['children']]}")
+    assert result.is_error is False, text
+    by_offset = [c["name"] for c in _payload(result, text)["children"]]
+    print(f"offset 10: {by_offset}")
+    assert by_offset == names[10:20]  # the same entries as the token walk's second page
 
 
 @pytest.mark.asyncio
@@ -281,14 +326,16 @@ async def test_listing_errors_and_an_empty_directory_as_the_model_reads_them(
         files_mcp, "list_children", {"parent_id_or_path": f"{probe}/seed.txt"}
     )
     print(f"listing a regular file answered: is_error={result.is_error} {text}")
-    if result.is_error:
-        assert "regular file, not a directory" in text or "not found" not in text
+    # TODO(first live run): pin 25.0's status and error id, printed above. Expected: enotdir.
+    assert result.is_error is True, text
+    assert "is not a directory: only a directory has entries to list" in text
 
     result, text = await _call(
         files_mcp, "list_children", {"parent_id_or_path": f"{probe}/no-such-dir"}
     )
     print(f"listing a missing path answered: {text}")
-    assert result.is_error is True and "not found" in text
+    # TODO(first live run): pin 25.0's status and error id, printed above (as for attributes).
+    assert result.is_error is True and ("not found" in text or "answered 404" in text)
 
     result, text = await _call(files_mcp, "create_directory", {"path": f"{probe}/empty"})
     assert result.is_error is False, text
@@ -300,7 +347,11 @@ async def test_listing_errors_and_an_empty_directory_as_the_model_reads_them(
     result, text = await _call(
         files_mcp, "list_children", {"parent_id_or_path": probe, "token": "not-a-token"}
     )
-    print(f"a made-up token answered: {text}")
+    print(f"a made-up token answered: is_error={result.is_error} {text}")
+    # TODO(first live run): pin 25.0's status and error id, printed above. Expected: a 400
+    # about the token, passed on with Onedata's message and no id hint.
+    assert result.is_error is True, text
+    assert "rejected" not in text and "reports nothing" not in text
 
 
 # =============================================================================================
@@ -362,11 +413,16 @@ async def test_nested_paths_and_their_failures(files_mcp: FastMCP, probe: str) -
     )
     print(f"a missing parent with create_parents false answered: {text}")
     assert result.is_error is True
-    assert "parent directory" in text  # the hint keys on enoent; printed above if 25.0 differs
+    # TODO(first live run): pin 25.0's answer, printed above. A structured not-found gives
+    # "The parent directory of ..."; a bare 404 gives the possible causes, "a parent may not
+    # exist" among them.
+    assert "parent" in text
 
     result, text = await _call(files_mcp, "create_directory", {"path": f"{probe}/seed.txt/sub"})
     print(f"a regular file on the path answered: {text}")
+    # TODO(first live run): pin 25.0's answer, printed above. Expected: enotdir.
     assert result.is_error is True
+    assert "above the new directory is not a directory" in text
 
 
 @pytest.mark.asyncio

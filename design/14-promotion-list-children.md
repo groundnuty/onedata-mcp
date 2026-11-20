@@ -1,6 +1,6 @@
 # Promotion record: `list_children`
 
-Status: **in progress** (2026-11-20). Gate 1 is done. Gate 2 is done except for `make conformance`, which has not been run. Gate 3's live test is built but has not been run. Gate 4's scenarios are built and unit-tested on the fake federation, but the run has not happened. The validation federation is on hold, so nothing here touched a live Onedata. The tool stays `experimental` until gates 2–4 are complete. It moves to `STABLE` in the PR that completes this record.
+Status: **in progress** (2026-11-20; external review addressed, see below). Gate 1 is done. Gate 2 is done except for `make conformance`, which has not been run. Gate 3's live test is built but has not been run. Gate 4's scenarios are built and unit-tested on the fake federation, but the run has not happened. The validation federation is on hold, so nothing here touched a live Onedata. The tool stays `experimental` until gates 2–4 are complete. It moves to `STABLE` in the PR that completes this record.
 
 The short commit ids below are **branch commits** on `feat/promote-file-tools`. A squash merge leaves them unreachable from `master`. **The anchor is the surface hash.**
 
@@ -19,11 +19,11 @@ The protocol is [`10-tool-maturity.md`](10-tool-maturity.md). The scenarios are 
 | Selection | Before (master `4047a56`) | Promoted surface (since branch commit `a2f62e8`) |
 |---|---|---|
 | `list_children` alone | `74a4f7eae2d4f2b241c9dc67d1fc9429b148b3aefb3ab9ad93d2e45d15a337af` | `726d5e587763b1e469ccf1932ae62c9be6a871a9c2f40a21113c2f215664aafa` |
-| FILE_TOOLS (6 tools; the LC and CD scenarios run on it) | `43dd847ef84ddcd542278d3705a3b6e2affa3e769601545bc067da09fec6d114` | `3ace77c4063de4e764b36c3b245e06639cb6b8e1d72d0da340009fe1534a7299` (with design/13's and design/15's surfaces) |
+| FILE_TOOLS (6 tools; the LC and CD scenarios run on it) | `43dd847ef84ddcd542278d3705a3b6e2affa3e769601545bc067da09fec6d114` | `c030429d0e04de218f50a1bda935d17e84026c8c24ea1a61fd6d91b0bac31922` (with design/13's and design/15's surfaces; it was `3ace77c4…` before design/15's review change) |
 
 FILE_TOOLS is `create_directory, create_file, download_file, get_file_attributes, list_children, list_files_recursively`.
 
-- `a2f62e8` is the last commit that changes this tool's surface.
+- `a2f62e8` is the last commit that changes this tool's surface. The external review's fixes (`3558556`, `49370ff`, `40bd036`) change errors and input handling only; the hash above is checked unchanged after them.
 - The `tools/list` diff. The name and annotations are unchanged; the input schema gains `maxItems: 64` on `attributes` and `minimum: 0`, `maximum: 500` on `offset`:
   - description: `List children (files and directories) of a given file id or path.` → `List the entries of a directory (its files and subdirectories), given by path or file id.` + `Returns one page: children, the requested attributes of each entry; isLast, true when no entries follow; and nextPageToken. Without attributes, each entry has its path, name, type (REG for a regular file, DIR for a directory, SYMLNK for a symbolic link), size, posixPermissions, atime and mtime. When isLast is false, call again with token set to nextPageToken to get the next page.`
   - `attributes`: `Use the same allowed values as in get_file_attributes.` → the allowed names, listed in full (the text design/13 gives `get_file_attributes`).
@@ -37,7 +37,7 @@ FILE_TOOLS is `create_directory, create_file, download_file, get_file_attributes
 
     ONEDATA_MCP_TOOLS=list_children make -s tools-manifest | sha256sum   # expect 726d5e58...
 
-## Gate 1: implementation (done, branch commit `a2f62e8`)
+## Gate 1: implementation (done, branch commit `a2f62e8`, then `3558556`, `49370ff` and `40bd036` after the external review)
 
 The tests are in `test/unit/api/test_list_children.py`, through the API and through an MCP client.
 
@@ -48,13 +48,17 @@ The tests are in `test/unit/api/test_list_children.py`, through the API and thro
 | `offset` below 0 or above 500 | Sent | Refused by the schema |
 | `?`, `#` or `/` in an id | **Defect:** the path was cut short or became another endpoint | Percent-encoded |
 | An empty id, `.` or `..` | Sent: `/data/../children` is `/children` at the API root | Refused before any request |
-| The parent is a regular file (`enotdir`) | Onedata's message only | `The path '…' is a regular file, not a directory: only a directory has entries to list.` |
-| An id that names nothing, a malformed id, no access | Onedata's message only | The hints of design/13 (`Nothing exists at …`, `Onedata rejected … as a file id`, `Not allowed to list … Calling again will not help.`), then Onedata's message |
+| The parent resolves but is not a directory (`enotdir` on the listing) | Onedata's message only | `The path '…' is not a directory: only a directory has entries to list.` |
+| A component of the path is not a directory (`enotdir` while resolving `/s/file/child`) | Onedata's message only | `A component of path '…' before its last part is not a directory, so this provider cannot resolve the path.` (review, 6) |
+| An id that names nothing (a structured not-found), a malformed id, no access | Onedata's message only | The hints of design/13 (`This provider reports nothing at …`, `This provider rejected … as a file id`, `Not allowed to list … Calling again will not help.`), then Onedata's message |
+| A bare 404 (no structured body) | Onedata's message only | Its possible causes, not one of them (review, 5): `This provider answered 404 for … without saying why: it may not exist, its space may not be supported by this provider, or the token may not see it. Check …` |
 | A path that names nothing | `Path "…" not found` | Unchanged |
 | `attributes` as JSON text | pydantic `list_type` error | Read as that list, as for `get_file_attributes` (the same validator); any other string refused with what to send |
 | More than 64 names | Sent | Refused by the schema |
 | A deprecated name | Refused, after the path lookup | Refused before any request |
-| An unsupported space's id | Space hint | Unchanged |
+| `spaceNotSupportedBy` | **Misleading:** `Space "…" does not exist.` (the shared resolver) | `This provider does not support the space of …, so it cannot list it here; the space may still exist.` and the spaces the token sees (review, 5). An `OnedataApiError` now. The stable tools keep the shared resolver. |
+| A relative path with no MCP session (the panel's API legs) | `RuntimeError: session is not available …` | `Paths must start with '/' …` (review, 7) |
+| `attributes` as JSON text longer than 64 names of 128 characters, or nested too deeply to decode | Decoded unbounded; a `RecursionError` passed the hint | Refused with the same hint (review, 12) |
 | A bad token | Onedata's 400 | Unchanged: passed on, with no id hint |
 | Empty result (an empty directory) | `{"children": [], "isLast": true}` | Unchanged; the description now says what `isLast` means |
 
@@ -71,14 +75,14 @@ The 25.0 error bodies are unverified, as in design/13.
 - **`make conformance`: TODO.**
 - **Reported, not changed:** the curation note `design/03-tool-allowlist-curation.md` says `list_files_recursively` with `max_depth=1` reproduces this tool; that tool has no such parameter (triage). Stable `list_files_recursively`'s `attributes` field still points to `get_file_attributes` (design/13).
 
-## Gate 3: live check (built in branch commit `d94e5c9`, not run)
+## Gate 3: live check (built in branch commits `d94e5c9` and `ab05369`, not run)
 
 [`test/live/test_files_live.py`](../test/live/test_files_live.py), section `list_children`:
 
 1. **LCp's shape:** 11 files and 3 subdirectories (two empty) in one directory. The first page with the default limit holds 10 entries and `isLast` false; every entry is then read page by page with the token, which settles that a token page is accepted. It prints the order of the entries (LCp assumes name order puts the two empty directories on the second page), the recursive file listing of the same directory (it must show no empty directory: that is why LC requires this tool), and a page read with `offset: 10`.
 2. The errors and the empty case as the model reads them, printed: listing a regular file, a missing path, a made-up token; an empty directory (asserted: `children` empty, `isLast` true).
 
-Gated and guarded as design/13 describes; run with `make valfed-files-live` or `make test-files-live`. `make valfed-check` now also builds LCp's fixture (15 entries, waited for at the local provider).
+Gated and guarded as design/13 describes; run with `make valfed-files-live` or `make test-files-live`. Since the external review (findings 4 and 11): the probe directory is made exclusively and deleted by its id; the page read with `offset: 10` must equal the token walk's second page; the three subdirectories must carry `type` `DIR`; listing a regular file, a made-up token and a missing path are asserted against the expected contracts and marked `TODO(first live run)`. `make valfed-check` now also builds LCp's fixture (15 entries, waited for at the local provider).
 
 **Results: TODO.** Record:
 
@@ -140,6 +144,27 @@ Run id, commit and surface hash: TODO. Classify every non-pass before anything c
 - **Classifications:** TODO. An LCp failure that read one page with `isLast: false` in the answer it got is tool-attributable until shown otherwise: the description is what tells a model to page.
 - **Tool-attributable findings:** TODO.
 - **The run passes when:** the control passes all four, or each control failure is a harness bug or an artefact; and no tool-attributable finding is left open.
+
+## External review (2026-11-20)
+
+An external frontier-model review of this package (the three file tools, their scenarios and the harness) reported twelve findings. The tool and live-test findings are fixed on this branch, as new commits after `0b015eb`. The harness findings go to the integration branch, which owns `benchmark/k2val/` and `test/unit/k2val/`; this branch leaves those files alone after the review.
+
+| # | Finding | Status |
+|---|---|---|
+| 1 | LCp can pass without paging: `limit` up to 100 returns all 14 entries in one call, and the 25.0 listing order is not verified | harness: resolved in the integration branch |
+| 2 | CDn's answer label omits the reason: "the directory already exists" passes, though the blocker is a regular file | harness: resolved in the integration branch |
+| 3 | The LC and LCo readers cannot report a name outside the expected set (an invented fourth subdirectory, a file name outside the date pattern) | harness: resolved in the integration branch |
+| 4 | The live test adopted a probe directory it did not create exclusively, deleted it by path, and suppressed cleanup errors | fixed here, `ab05369`: made exclusively (a taken name is retried, never adopted), deleted by its id in a `finally`, a failed deletion fails the teardown |
+| 5 | A bare 404 became "Nothing exists" (and, with `create_parents` false, a missing parent); `spaceNotSupportedBy` became "does not exist" | fixed here, `49370ff`: specific diagnoses need distinguishing evidence (a structured not-found, `enoent`/`notFound`; `spaceNotSupportedBy`, now "this provider does not support the space ... the space may still exist"); a bare 404 gets its possible causes and what to check; Onedata's message is kept |
+| 6 | Any 409 became "already exists"; the description promised the existing entry's type; `enotdir` while resolving `/space/file/child` called the whole path a file | fixed here, `49370ff`: "already exists" only with `eexist` or a 409 whose path then resolves, else a conflict (an `OnedataApiError`, not `FileExistsError`); the description says the type is given "when the provider can tell"; `enotdir` while resolving names "a component ... before its last part" |
+| 7 | With an empty roots list, `create_directory("reports/2020")` reached the API (and could create `/reports/2020`); on the no-session path a relative path raised "session is not available" | fixed here, `40bd036`: a creation path must be absolute after root resolution, and its space component a name (`//x`, `/./x`, `/../x` refused); the three tools answer the no-session case with the same `Paths must start with '/'` hint |
+| 8 | The CD end-state check cannot see changed file contents with the same id, size and mode, or a write outside the trial directory | harness: resolved in the integration branch |
+| 9 | FA inherits the configured K1 set, so a set with a listing tool would not require this tool; LC has no id variant | harness: resolved in the integration branch |
+| 10 | A non-final page that repeats its token keeps the harness's listing running forever | harness: resolved in the integration branch |
+| 11 | The live listing test printed the offset page without checking it, accepted any answer for a listed file or a made-up token, and did not check the subdirectories' type | fixed here, `ab05369`: the offset page must equal the token walk's second page; the three subdirectories must carry `DIR`; the expected 25.0 failure contracts are asserted and marked `TODO(first live run)` |
+| 12 | The JSON-text `attributes` was decoded before any bound, and a `RecursionError` bypassed the hint | fixed here, `3558556`: a text longer than 64 names of 128 characters is refused before decoding; a `RecursionError` gets the same hint |
+
+The review also noted, without a finding: the cap of 64 names permits batching `xattr.<key>` names; `offset` 0 to 500 matches the exposed arguments; with a token no offset is sent. The pinned swagger, the live 25.0 behaviour and conformance were not verified by the reviewer either.
 
 ## Gate 5: record
 

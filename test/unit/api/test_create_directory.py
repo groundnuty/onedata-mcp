@@ -117,6 +117,10 @@ async def test_each_component_is_percent_encoded(
         ("/Alpha/a/..", "has an empty, '.' or '..' component"),
         ("/Alpha/./b", "has an empty, '.' or '..' component"),
         ("/Alpha/a//b", "has an empty, '.' or '..' component"),
+        ("reports/2020", "Paths must start with '/': use /<space_name>/<path_to_directory>"),
+        ("//Alpha/b", "does not start with a space name"),
+        ("/./b", "does not start with a space name"),
+        ("/../b", "does not start with a space name"),
     ],
 )
 async def test_a_path_that_cannot_name_a_new_directory_is_refused_before_any_request(
@@ -144,7 +148,10 @@ async def test_a_path_that_cannot_name_a_new_directory_is_refused_before_any_req
             "REG",
             "'/Alpha/archive' already exists as a regular file, so no directory was created.",
         ),
-        (None, "Something already exists at '/Alpha/archive', so no directory was created."),
+        (
+            None,
+            "Something already exists at '/Alpha/archive' (eexist), so no directory was created.",
+        ),
     ],
 )
 async def test_already_exists_says_what_is_there(
@@ -171,13 +178,69 @@ async def test_already_exists_says_what_is_there(
 
 
 @pytest.mark.asyncio
+async def test_a_409_that_the_lookup_explains_says_what_is_there(httpx_mock: HTTPXMock) -> None:
+    root_lookup(httpx_mock)
+    httpx_mock.add_response(method="PUT", **onedata_error(409, "conflict"))
+    httpx_mock.add_response(method="POST", url=lookup_url("/Alpha/archive"), json={"fileId": "x1"})
+    httpx_mock.add_response(method="GET", url=f"{API}/data/x1", json={"type": "REG"})
+
+    with pytest.raises(FileExistsError, match=r"already exists as a regular file"):
+        await files.create_directory("/Alpha/archive")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "lookup",
+    [onedata_error(400, "posix", "enoent"), onedata_error(500, "internal")],
+    ids=["path-not-found", "lookup-fails"],
+)
+async def test_a_409_that_nothing_explains_is_a_conflict_not_an_existing_entry(
+    httpx_mock: HTTPXMock, lookup: dict
+) -> None:
+    """Without eexist, and with no entry found at the path, nothing establishes that something
+    exists there: the error says conflict, keeps Onedata's message, and is not FileExistsError."""
+    root_lookup(httpx_mock)
+    httpx_mock.add_response(method="PUT", **onedata_error(409, "conflict"))
+    httpx_mock.add_response(method="POST", url=lookup_url("/Alpha/archive"), **lookup)
+
+    with pytest.raises(OnedataApiError) as caught:
+        await files.create_directory("/Alpha/archive")
+
+    text = str(caught.value)
+    assert text.startswith(
+        "This provider refused to create '/Alpha/archive' with a conflict (409) and did not "
+        "say why, so no directory was created."
+    )
+    assert "already exists" not in text and "status=409" in text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("error", "create_parents", "starts"),
     [
         (
             onedata_error(400, "posix", "enotdir"),
             True,
-            "A component of '/Alpha/a.dat/sub' above the new directory is a regular file",
+            "A component of '/Alpha/a.dat/sub' above the new directory is not a directory, so "
+            "nothing was created.",
+        ),
+        (
+            {"status_code": 404, "json": {"error": {}}},
+            False,
+            "This provider answered 404 for '/Alpha/a.dat/sub' without saying why: a parent may "
+            "not exist, its space may not be supported by this provider",
+        ),
+        (
+            onedata_error(400, "posix", "enoent"),
+            True,
+            "This provider reports part of '/Alpha/a.dat/sub' missing although create_parents is "
+            "true",
+        ),
+        (
+            onedata_error(400, "spaceNotSupportedBy"),
+            True,
+            "This provider does not support the space of '/Alpha/a.dat/sub', so nothing was "
+            "created here; the space may still exist.",
         ),
         (
             onedata_error(400, "posix", "enoent"),
@@ -203,7 +266,9 @@ async def test_failures_say_what_to_do(
         await files.create_directory("/Alpha/a.dat/sub", create_parents=create_parents)
 
     assert str(caught.value).startswith(starts)
-    assert "(Onedata's own text)" in str(caught.value)
+    assert "status=" in str(caught.value)  # the underlying error is kept
+    if not starts.startswith("The parent directory"):
+        assert "parent directory of" not in str(caught.value)  # no missing-parent claim
 
 
 @pytest.mark.asyncio
@@ -221,19 +286,90 @@ async def test_other_failures_pass_on_unchanged(httpx_mock: HTTPXMock) -> None:
 @pytest.mark.parametrize(
     "error", [onedata_error(400, "posix", "enoent"), onedata_error(404, "notFound")]
 )
-async def test_a_missing_space_lists_the_spaces(httpx_mock: HTTPXMock, error: dict) -> None:
+async def test_a_space_this_provider_reports_missing_lists_the_spaces(
+    httpx_mock: HTTPXMock, error: dict
+) -> None:
     httpx_mock.add_response(method="POST", url=lookup_url("/Beta"), **error)
 
     with pytest.raises(FileNotFoundError) as caught:
         await files.create_directory("/Beta/archive")
 
     assert str(caught.value) == (
-        "No space named 'Beta' is visible here, so nothing was created. Available spaces: 'Alpha'."
+        "No space named 'Beta' is visible at this provider, so nothing was created. Spaces "
+        'this token sees at this provider: "Alpha".'
     )
     assert puts(httpx_mock) == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "starts"),
+    [
+        (
+            {"status_code": 404, "json": {"error": {}}},
+            "This provider answered 404 for path '/Beta' without saying why",
+        ),
+        (
+            onedata_error(400, "spaceNotSupportedBy"),
+            "This provider does not support the space of path '/Beta', so it cannot create a "
+            "directory in it here; the space may still exist.",
+        ),
+    ],
+)
+async def test_a_space_lookup_without_a_structured_not_found_does_not_call_it_missing(
+    httpx_mock: HTTPXMock, error: dict, starts: str
+) -> None:
+    httpx_mock.add_response(method="POST", url=lookup_url("/Beta"), **error)
+
+    with pytest.raises(OnedataApiError) as caught:
+        await files.create_directory("/Beta/archive")
+
+    assert str(caught.value).startswith(starts)
+    assert "No space named" not in str(caught.value)
+    assert puts(httpx_mock) == []
+
+
 # --- through the MCP client ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_relative_path_with_an_empty_list_of_roots_reaches_no_api(
+    mcp: FastMCP, httpx_mock: HTTPXMock
+) -> None:
+    """With roots=[] the path is left as given; read as /reports/2020 it would make a directory
+    in a space named reports."""
+    async with Client(mcp, roots=[]) as client:
+        result = await client.call_tool(
+            "create_directory", {"path": "reports/2020"}, raise_on_error=False
+        )
+
+    text = "\n".join(c.text for c in result.content if hasattr(c, "text"))
+    assert result.is_error is True
+    assert "Paths must start with '/': use /<space_name>/<path_to_directory>" in text
+    assert [r for r in httpx_mock.get_requests() if r.url.path.find("/spaces") < 0] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool", "arguments", "form"),
+    [
+        ("create_directory", {"path": "reports/2020"}, "/<space_name>/<path_to_directory>"),
+        ("list_children", {"parent_id_or_path": "Alpha/d"}, "/<space_name>/<path_to_directory>"),
+        ("get_file_attributes", {"file_id_or_path": "Alpha/a.nc"}, "/<space_name>/<path_to_file>"),
+    ],
+)
+async def test_a_relative_path_with_no_mcp_session_gets_the_same_hint(
+    mcp: FastMCP, httpx_mock: HTTPXMock, tool: str, arguments: dict, form: str
+) -> None:
+    """The validation panel's API legs call the app with no MCP session; the roots request
+    then raised "session is not available", which said nothing about the path."""
+    with pytest.raises(Exception) as caught:
+        await mcp.call_tool(tool, arguments)
+
+    text = str(caught.value)
+    assert f"Paths must start with '/': use {form}" in text
+    assert "session is not available" not in text
+    assert [r for r in httpx_mock.get_requests() if r.url.path.find("/spaces") < 0] == []
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,7 @@ import pytest
 from pytest_httpx import HTTPXMock
 
 from onedata_mcp.api import files
-from onedata_mcp.utils import OnedataInvalidSpaceError
+from onedata_mcp.utils import OnedataApiError, OnedataInvalidSpaceError
 
 
 def _set_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -287,10 +287,13 @@ async def test_list_children_formats_invalid_space_error_with_hints(
         },
     )
 
-    with pytest.raises(OnedataInvalidSpaceError, match='Space "dsadas" does not exist') as exc:
+    # design/14: list_children says what this provider established, not that the space is gone
+    with pytest.raises(
+        OnedataApiError, match="does not support the space of file id 'dsadas'"
+    ) as exc:
         await files.list_children("dsadas", limit=10, offset=0)
 
-    assert 'Available spaces: "Alpha".' in str(exc.value)
+    assert 'Spaces this token sees at this provider: "Alpha".' in str(exc.value)
 
 
 @pytest.mark.asyncio

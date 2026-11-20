@@ -1,6 +1,6 @@
 # Promotion record: `get_file_attributes`
 
-Status: **in progress** (2026-11-20). Gate 1 is done. Gate 2 is done except for `make conformance`, which has not been run. Gate 3's live test is built but has not been run. Gate 4's scenarios are built and unit-tested on the fake federation, but the run has not happened. The validation federation is on hold, so nothing here touched a live Onedata. The tool stays `experimental` until gates 2–4 are complete. It moves to `STABLE` in the PR that completes this record.
+Status: **in progress** (2026-11-20; external review addressed, see below). Gate 1 is done. Gate 2 is done except for `make conformance`, which has not been run. Gate 3's live test is built but has not been run. Gate 4's scenarios are built and unit-tested on the fake federation, but the run has not happened. The validation federation is on hold, so nothing here touched a live Onedata. The tool stays `experimental` until gates 2–4 are complete. It moves to `STABLE` in the PR that completes this record.
 
 The short commit ids below are **branch commits** on `feat/promote-file-tools`. A squash merge leaves them unreachable from `master`. **The anchor is the surface hash.**
 
@@ -34,7 +34,7 @@ The listing is `scripts/tools_manifest.py`'s output (`make -s tools-manifest`) w
 
     ONEDATA_MCP_TOOLS=get_file_attributes make -s tools-manifest | sha256sum   # expect cfe0051e...
 
-## Gate 1: implementation (done, branch commit `a77989b`)
+## Gate 1: implementation (done, branch commit `a77989b`, then `3558556`, `49370ff` and `40bd036` after the external review; the surface hash is unchanged by them)
 
 Every error path a model can trigger, and what the model now reads. The tests are in `test/unit/api/test_get_file_attributes.py`, through the API and through an MCP client (the text as it arrives), and through `app.call_tool`, the panel's own path.
 
@@ -42,21 +42,26 @@ Every error path a model can trigger, and what the model now reads. The tests ar
 |---|---|---|
 | `attributes` sent as JSON text, `'["size","mtime"]'` (Qwen3-Coder, twice in V1) | pydantic `list_type` error | **Read as that list** (a `mode="before"` validator). The published schema stays a list of strings, checked by a test. |
 | `attributes` as any other string (`"size"`, `"size,mtime"`, `'[1, 2]'`, a JSON object) | `list_type` error | Refused: `attributes must be a list of attribute names, for example ["size", "mtime"]; got the string …` |
+| `attributes` as JSON text longer than 64 names of 128 characters, or nested too deeply to decode | — | Refused with the same hint, before decoding; a `RecursionError` is caught (review, 12) |
 | More than 64 names | Sent | Refused by the schema (`maxItems: 64`) |
 | A deprecated name (`mode`, `owner_id`, …) | Sent; Onedata's deprecated path | Refused before any request with the new name (`mode->posixPermissions`), as the two list tools already did |
 | An unknown name (`owner`) | Onedata's 400 | Unchanged: Onedata's 400 names the value. The live test prints it. It gets no id hint. |
 | `?`, `#` or `/` in an id | **Defect:** `?` and `#` cut the path short, so another file's attributes came back; `/` turned the call into another endpoint (`ab/children`) | The id is percent-encoded |
 | An empty id, `.` or `..` | Sent: `/data/..` is the API root | Refused before any request: `Give a path, /<space_name>/<path>, or a file id.` |
-| An id that names nothing (404, `notFound`, `enoent`) | Onedata's message only | `Nothing exists at file id '…': it may have been deleted, or the value is not a file id. Give a path, /<space_name>/<path>, or a file id.` Onedata's message follows. |
-| A malformed id (400 `badValueIdentifier`, or a bad value with key `id`) | Onedata's message only | `Onedata rejected file id '…' as a file id.` and the same advice |
-| An id of a space this provider does not support (`spaceNotSupportedBy`) | Onedata's message only | `Space "…" does not exist. Available spaces: …`, as the list tools already answered |
+| An id that names nothing, as a structured not-found (`notFound`, `enoent`) | Onedata's message only | `This provider reports nothing at file id '…': it may have been deleted, or the value is not a file id. Give a path, /<space_name>/<path>, or a file id.` Onedata's message follows. |
+| A bare 404 (no structured body), by id or while resolving a path | Onedata's message only | Its possible causes, not one of them (review, 5): `This provider answered 404 for … without saying why: it may not exist, its space may not be supported by this provider, or the token may not see it. Check the path or id, the space and the token's access.` |
+| A malformed id (400 `badValueIdentifier`, or a bad value with key `id`) | Onedata's message only | `This provider rejected file id '…' as a file id.` and the same advice |
+| `spaceNotSupportedBy`, by id or while resolving a path | Onedata's message only | `This provider does not support the space of …, so it cannot read the attributes of it here; the space may still exist.` and the spaces the token sees. Before the review it said `Space "…" does not exist` (review, 5). It is an `OnedataApiError`, which the readiness tools' reads catch. |
+| A component of the path is not a directory (`enotdir` while resolving) | Onedata's message only | `A component of path '…' before its last part is not a directory, so this provider cannot resolve the path.` (review, 6) |
 | A path that names nothing | `Path "…" not found` | Unchanged |
 | No access (403, `forbidden`, `eacces`, `eperm`) | Onedata's message only | `Not allowed to read the attributes of …: the token has no access to it. Calling again will not help.` |
 | A relative path, client without MCP roots | `Paths must start with '/'` hint | Unchanged |
+| A relative path with no MCP session (the panel's API legs) | `RuntimeError: session is not available …` | The same `Paths must start with '/'` hint (review, 7) |
 | 500, transport errors | Unchanged | Unchanged. Nothing for the caller to fix. |
 | Empty result | Not applicable: a file or directory always has attributes | |
 
-- The hints are keyed on the HTTP status, with the error id and errno as a fallback. The real 25.0 bodies are **unverified**: the unit tests use plausible shapes, and the live test prints the real ones.
+- The hints are keyed on the HTTP status, with the error id and errno as a fallback; a specific diagnosis needs distinguishing evidence (review, 5). The real 25.0 bodies are **unverified**: the unit tests use plausible shapes, and the live test prints the real ones.
+- Paths are resolved with the three tools' own lookup. The stable tools keep `get_file_id`, whose shared mapping still reads `spaceNotSupportedBy` as a missing space; changing it would need their own gates.
 - Gate 1 also asks for list caps: `attributes` was the tool's only list, and it had none.
 
 ## Gate 2: surface review (done except `make conformance`, branch commit `a77989b`)
@@ -71,7 +76,7 @@ Checked against the protocol's rules; `test_the_description_follows_the_surface_
 - **Reported, not changed:** two stable tools' texts name this tool: `get_file_metadata`'s description, and `list_files_recursively`'s `attributes` field ("Use the same allowed values as in get_file_attributes"). Under `ONEDATA_MCP_MATURITY=stable` they point to a tool that is not offered; promoting this tool fixes that for the stable tier. Changing their wording would cost them a smoke re-run.
 - **Not stated:** the unit of the times. The swagger says seconds, but its examples have 13 digits. The live test prints a real value before anything is said.
 
-## Gate 3: live check (built in branch commit `b7cd89a`, not run)
+## Gate 3: live check (built in branch commits `b7cd89a` and `ab05369`, not run)
 
 [`test/live/test_files_live.py`](../test/live/test_files_live.py), section `get_file_attributes`, calls the tools through an in-process MCP client, as a model would, in a fresh probe directory under the live space. It covers:
 
@@ -80,7 +85,7 @@ Checked against the protocol's rules; `test_the_description_follows_the_surface_
 3. `attributes` given as JSON text reaches Onedata as a list.
 4. The errors as the model reads them, printed: a missing path; a made-up id (32 hex digits); an unknown attribute name (`owner`; asserted to name it); a deprecated name (asserted to name its replacement).
 
-Like the other live tests, it is skipped unless `ONEDATA_MCP_LIVE_FILES=1`, and then refuses a provider or zone host that is not `127.0.0.1`, `localhost` or `*.datahub.test`. Here it was only collected, and skipped without the flag.
+Like the other live tests, it is skipped unless `ONEDATA_MCP_LIVE_FILES=1`, and then refuses a provider or zone host that is not `127.0.0.1`, `localhost` or `*.datahub.test`. Its probe directory is made exclusively (a taken name is retried, never adopted) and deleted by its id in a `finally`; a failed deletion fails the teardown (review, 4). The expected 25.0 failure contracts are asserted and marked `TODO(first live run)`. Here it was only collected, and skipped without the flag; run from a scratch plugin against the unit tests' fake federation, 9 of its 10 tests pass, the tenth because the fake accepts an unknown attribute name.
 
 **To run:**
 
@@ -156,6 +161,27 @@ Classify every non-pass before anything counts: harness or oracle bug (fix and r
 - **Tool-attributable findings, each fixed and re-run or accepted with a reason:** TODO.
 - **The run passes when:** the control passes all four scenarios, or each control failure is shown to be a harness bug or an artefact; and no tool-attributable finding is left open.
 
+## External review (2026-11-20)
+
+An external frontier-model review of this package (the three file tools, their scenarios and the harness) reported twelve findings. The tool and live-test findings are fixed on this branch, as new commits after `0b015eb`. The harness findings go to the integration branch, which owns `benchmark/k2val/` and `test/unit/k2val/`; this branch leaves those files alone after the review.
+
+| # | Finding | Status |
+|---|---|---|
+| 1 | LCp can pass without paging: `limit` up to 100 returns all 14 entries in one call, and the 25.0 listing order is not verified | harness: resolved in the integration branch |
+| 2 | CDn's answer label omits the reason: "the directory already exists" passes, though the blocker is a regular file | harness: resolved in the integration branch |
+| 3 | The LC and LCo readers cannot report a name outside the expected set (an invented fourth subdirectory, a file name outside the date pattern) | harness: resolved in the integration branch |
+| 4 | The live test adopted a probe directory it did not create exclusively, deleted it by path, and suppressed cleanup errors | fixed here, `ab05369`: made exclusively (a taken name is retried, never adopted), deleted by its id in a `finally`, a failed deletion fails the teardown |
+| 5 | A bare 404 became "Nothing exists" (and, with `create_parents` false, a missing parent); `spaceNotSupportedBy` became "does not exist" | fixed here, `49370ff`: specific diagnoses need distinguishing evidence (a structured not-found, `enoent`/`notFound`; `spaceNotSupportedBy`, now "this provider does not support the space ... the space may still exist"); a bare 404 gets its possible causes and what to check; Onedata's message is kept |
+| 6 | Any 409 became "already exists"; the description promised the existing entry's type; `enotdir` while resolving `/space/file/child` called the whole path a file | fixed here, `49370ff`: "already exists" only with `eexist` or a 409 whose path then resolves, else a conflict (an `OnedataApiError`, not `FileExistsError`); the description says the type is given "when the provider can tell"; `enotdir` while resolving names "a component ... before its last part" |
+| 7 | With an empty roots list, `create_directory("reports/2020")` reached the API (and could create `/reports/2020`); on the no-session path a relative path raised "session is not available" | fixed here, `40bd036`: a creation path must be absolute after root resolution, and its space component a name (`//x`, `/./x`, `/../x` refused); the three tools answer the no-session case with the same `Paths must start with '/'` hint |
+| 8 | The CD end-state check cannot see changed file contents with the same id, size and mode, or a write outside the trial directory | harness: resolved in the integration branch |
+| 9 | FA inherits the configured K1 set, so a set with a listing tool would not require this tool; LC has no id variant | harness: resolved in the integration branch |
+| 10 | A non-final page that repeats its token keeps the harness's listing running forever | harness: resolved in the integration branch |
+| 11 | The live listing test printed the offset page without checking it, accepted any answer for a listed file or a made-up token, and did not check the subdirectories' type | fixed here, `ab05369`: the offset page must equal the token walk's second page; the three subdirectories must carry `DIR`; the expected 25.0 failure contracts are asserted and marked `TODO(first live run)` |
+| 12 | The JSON-text `attributes` was decoded before any bound, and a `RecursionError` bypassed the hint | fixed here, `3558556`: a text longer than 64 names of 128 characters is refused before decoding; a `RecursionError` gets the same hint |
+
+The review also noted, without a finding: the cap of 64 names permits batching `xattr.<key>` names; `offset` 0 to 500 matches the exposed arguments; with a token no offset is sent. The pinned swagger, the live 25.0 behaviour and conformance were not verified by the reviewer either.
+
 ## Gate 5: record
 
 This file. To complete it:
@@ -166,4 +192,4 @@ This file. To complete it:
 ## Decisions for the operator
 
 - **Run order and the K1 hash.** This promotion changes the K1 set's surface (`dc1d10dc…` → `21aef26a…`), which design/11 records as the surface for V3, V3n and V3o. Run design/11's gate 4 before this branch merges, or record its run against the new K1 hash. The parallel package of `schedule_file_replication` uses the K1 set too.
-- **The API legs' direct call path.** For the `openai_compat` and `anthropic` legs the panel calls `app.call_tool` with no MCP session (the Claude SDK and CLI legs go through the loopback HTTP server). A relative path then makes `ctx.list_roots()` raise a `RuntimeError` ("session is not available"), not the `Paths must start with '/'` hint a real client gets, because `_resolve_with_mcp_root` catches only `McpError`. Seen in this branch's unit tests with a short fake id. It affects every path-taking tool on those legs; it is reported, not changed here.
+- **The API legs' direct call path.** For the `openai_compat` and `anthropic` legs the panel calls `app.call_tool` with no MCP session (the Claude SDK and CLI legs go through the loopback HTTP server). A relative path then made `ctx.list_roots()` raise a `RuntimeError` ("session is not available"), not the `Paths must start with '/'` hint a real client gets. **Fixed for the three file tools** (review, 7: they catch it and give the hint). The stable path-taking tools keep `_resolve_with_mcp_root` as it is; fixing them there needs their own gates.
