@@ -58,7 +58,7 @@ The live list is whatever `tools/list` returns; `make tools-manifest` prints it 
 - **stable**: validated with several LLMs against a live Onedata deployment.
 - **experimental**: implemented and unit-tested, but not yet validated that way; it may still change.
 
-The classification lives in [`onedata_mcp/tool_maturity.py`](onedata_mcp/tool_maturity.py).
+The classification lives in [`onedata_mcp/tool_maturity.py`](onedata_mcp/tool_maturity.py). How a tool moves from experimental to stable, and when it moves back, is set out in [`design/10-tool-maturity.md`](design/10-tool-maturity.md).
 
 ### Readiness tools
 
