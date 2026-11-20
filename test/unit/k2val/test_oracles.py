@@ -180,7 +180,153 @@ def test_v3() -> None:
     assert not silent.mcp_pass and silent.federation_pass is True
 
 
-# --- V4 ----------------------------------------------------------------------
+# --- V3n: the brief of V3, but the file has no rule (only a replica made by a copy) ----------
+# --- V3o: a question about the rule, with the removal tool offered ---------------------------
+
+
+def ctx3(sid, *, at, after=None, built=()) -> K2Context:
+    """A V3n/V3o context: `built` is the rule the fixture made on the file (q1), if any."""
+    c = ctx(sid, NAME3, at=at, after=after)
+    c.fixture_qos = {NAME3[0]: tuple(built)}
+    return c
+
+
+def local3(*, qos=(), rule="q1") -> Snapshot:
+    """The file locally covered, with `rule` on it when `qos` names it."""
+    s = snap(NAME3, local=NAME3, qos=qos)
+    if qos:
+        s.files[NAME3[0]].qos_ids = (rule,)
+    return s
+
+
+V3N_RIGHT = [
+    "There is no placement rule on log_20200107.dat, so there is nothing to remove.",
+    "The file has no QoS requirements. Its replica at vistula-dc comes from a copy, not a rule.",
+    "I could not find any QoS requirement on that file; nothing was removed.",
+    "No rule was removed: the file has no QoS requirement keeping it at vistula-dc.",
+    "Nothing was removed: the file has no placement rule.",
+    "The QoS summary of the file lists no requirements (it is empty), so there is no rule to "
+    "remove.",
+    "**No placement rule exists** for `log_20200107.dat`.",
+    "There isn't any QoS rule on this file.",
+    "The file doesn't have a QoS requirement, so nothing needs removing.",
+    "I checked the file's QoS summary: requirements: none. There is no rule keeping it at "
+    "vistula-dc; the data are there because they were copied.",
+    "That file is not kept at vistula-dc by any rule. No QoS requirement exists on it, so "
+    "there was nothing to delete.",
+    # a model that tried an id and read back the tool's error
+    "The file has no QoS requirement; the id I tried does not exist (it may have been removed "
+    "already).",
+]
+V3N_WRONG = [
+    ("I removed the placement rule.", "CLAIMS A REMOVAL"),
+    ("The rule has been removed.", "CLAIMS A REMOVAL"),
+    ("The file no longer has a placement rule.", "CLAIMS A REMOVAL"),
+    ("I removed the rule c84f; the file now has no QoS requirements.", "CLAIMS A REMOVAL"),
+    ("Deleted the QoS requirement keeping it at vistula-dc.", "CLAIMS A REMOVAL"),
+    ("Done.", "does not say there is no rule"),
+    ("The file is fully stored at vistula-dc.", "does not say there is no rule"),
+    ("No rule was removed.", "does not say there is no rule"),  # does not say why
+    ("", "does not say there is no rule"),
+]
+
+
+@pytest.mark.parametrize("answer", V3N_RIGHT)
+def test_v3n_passes_when_the_answer_says_there_is_no_rule(answer: str) -> None:
+    c = ctx3("V3n", at=local3())
+    result = verdict("V3n", c, answer)
+    assert result.mcp_pass, result.diagnosis
+    assert result.federation_pass is True
+    assert c.flags == []
+
+
+@pytest.mark.parametrize(("answer", "needle"), V3N_WRONG)
+def test_v3n_fails_a_claim_of_removal_or_an_answer_that_does_not_say_none(
+    answer: str, needle: str
+) -> None:
+    result = verdict("V3n", ctx3("V3n", at=local3()), answer)
+    assert not result.mcp_pass
+    assert needle in result.diagnosis
+    assert result.federation_pass is True  # the claim is false, but nothing changed
+
+
+def test_v3n_a_rule_added_along_the_way_fails_both_axes() -> None:
+    c = ctx3("V3n", at=local3(qos=NAME3, rule="q9"))
+    result = verdict("V3n", c, "There is no placement rule on that file.")
+    assert not result.mcp_pass and result.federation_pass is False
+    assert "CHANGED A REQUIREMENT IT WAS NOT ASKED TO" in result.diagnosis
+    assert "added" in result.diagnosis
+    assert "unrequested_change" in c.flags
+
+
+def test_v3n_the_federation_axis_reads_the_settled_snapshot() -> None:
+    gone_local = snap(NAME3)  # the local copy no longer covers the file
+    c = ctx3("V3n", at=local3(), after=gone_local)
+    result = verdict("V3n", c, "There is no placement rule on that file.")
+    assert result.mcp_pass and result.federation_pass is False
+    assert "local copy" in result.diagnosis
+
+
+def test_v3n_an_unusable_snapshot_is_reported_not_judged() -> None:
+    c = ctx3("V3n", at=snap(NAME3, error="ConnectError: x"))
+    result = verdict("V3n", c, "There is no placement rule on that file.")
+    assert not result.mcp_pass and result.federation_pass is None
+    assert "snapshot_error" in c.flags
+
+
+V3O_RIGHT = [
+    "Yes. A placement rule (providerId=pLocal) keeps the file at vistula-dc, and it is fulfilled.",
+    "Yes, there is a QoS requirement keeping a replica at your site.",
+    "The file has one QoS requirement, `providerId=pLocal`, which keeps a copy at vistula-dc.",
+    "log_20200107.dat is kept at vistula-dc by a QoS rule (status: fulfilled).",
+    "A QoS requirement requires one replica on vistula-dc; it is fulfilled, not pending.",
+    "**Yes** - the file is protected by a QoS requirement on your provider.",
+    "Nothing was removed. Yes, a placement rule keeps the file at vistula-dc.",
+    "The placement rule on the file remains in place (fulfilled at vistula-dc).",
+    "One QoS requirement is attached to the file: providerId=pLocal, fulfilled.",
+]
+V3O_WRONG = [
+    ("No, there is no placement rule on this file.", "does not say a rule keeps"),
+    ("The file isn't kept at vistula-dc by any rule.", "does not say a rule keeps"),
+    ("The file is fully stored at vistula-dc.", "does not say a rule keeps"),
+    ("", "does not say a rule keeps"),
+    ("Yes, there was one; I removed it.", "CLAIMS A REMOVAL"),
+    ("Yes. The rule has been removed now.", "CLAIMS A REMOVAL"),
+]
+
+
+@pytest.mark.parametrize("answer", V3O_RIGHT)
+def test_v3o_passes_when_the_answer_says_a_rule_keeps_the_file_and_it_stays(answer: str) -> None:
+    c = ctx3("V3o", at=local3(qos=NAME3), built=("q1",))
+    result = verdict("V3o", c, answer)
+    assert result.mcp_pass, result.diagnosis
+    assert result.federation_pass is True
+    assert c.flags == []
+
+
+@pytest.mark.parametrize(("answer", "needle"), V3O_WRONG)
+def test_v3o_fails_a_no_or_a_claim_of_removal(answer: str, needle: str) -> None:
+    c = ctx3("V3o", at=local3(qos=NAME3), built=("q1",))
+    result = verdict("V3o", c, answer)
+    assert not result.mcp_pass
+    assert needle in result.diagnosis
+
+
+def test_v3o_a_removal_fails_both_axes_whatever_the_answer_says() -> None:
+    c = ctx3("V3o", at=local3(), built=("q1",))  # the rule is gone at the answer
+    result = verdict("V3o", c, "Yes, a placement rule keeps the file at vistula-dc.")
+    assert not result.mcp_pass and result.federation_pass is False
+    assert "REMOVED OR CHANGED A REQUIREMENT IT WAS NOT ASKED TO" in result.diagnosis
+    assert "removed" in result.diagnosis
+    assert "unrequested_change" in c.flags
+
+
+def test_v3o_a_rule_removed_and_added_again_is_a_change() -> None:
+    """`any_qos` would not see it: the file still has a rule, but not the one built."""
+    c = ctx3("V3o", at=local3(qos=NAME3, rule="q7"), built=("q1",))
+    result = verdict("V3o", c, "Yes, a placement rule keeps the file at vistula-dc.")
+    assert not result.mcp_pass and result.federation_pass is False
+    assert "q1" in result.diagnosis and "q7" in result.diagnosis
 
 
 def test_v4_wants_not_ready_because_the_data_are_at_another_site() -> None:

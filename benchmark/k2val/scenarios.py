@@ -1,8 +1,13 @@
-"""The seven scenarios of the validation panel (design/08).
+"""The scenarios of the validation panel (design/08): V1..V7, plus V3n and V3o.
 
 A scenario is a brief, a fixture and a tool set; the oracle lives in `oracles.py`. Briefs name
 the directory and the dates and never a tool. The domain is "instrument logs", on purpose far
 from the agent study's own prompts.
+
+V3n and V3o complete the scenario coverage design/10 asks of `remove_qos_requirement`, with V3 as
+the task that needs it: V3n is the "no, because" state (V3's brief, but the file has no rule),
+V3o a question the QoS state answers with the tool offered but not needed. They are outside the
+`V1..V7` range, so name them: `V3,V3n,V3o`.
 """
 
 from __future__ import annotations
@@ -31,6 +36,8 @@ BRIEF_ENSURE = (
     "Make the log files in `{dir}` for 1–5 January 2020 complete and readable at your "
     "site, and tell me when they are."
 )
+# V3 and V3n share it word for word: only the state differs (a rule, or none).
+BRIEF_REMOVE = "A placement rule keeps `{dir}/log_20200107.dat` at {local}. Remove that rule."
 
 # What the federation axis waits for after the final answer, within the settle window.
 Settle = Literal["none", "local_covered", "qos_gone", "complete"]
@@ -90,9 +97,26 @@ SCENARIOS: dict[str, Scenario] = {
             "V3",
             "remove rule",
             "K1",
-            "A placement rule keeps `{dir}/log_20200107.dat` at {local}. Remove that rule.",
+            BRIEF_REMOVE,
             FixtureSpec((FileSpec("20200107", "s0_qos"),)),
             settle="qos_gone",
+        ),
+        Scenario(
+            "V3n",
+            "remove rule, none there",
+            "K1",
+            # The brief's premise is half true: the file IS at the local site, but because it was
+            # copied there, not because a rule keeps it. The right answer: there is no rule.
+            BRIEF_REMOVE,
+            FixtureSpec((FileSpec("20200107", "s0_local"),)),
+        ),
+        Scenario(
+            "V3o",
+            "ask about rule",
+            "K1",
+            # Read the QoS state to answer; the removal tool is offered but not needed.
+            "Does a placement rule keep `{dir}/log_20200107.dat` at your site {local}?",
+            FixtureSpec((FileSpec("20200107", "s0_qos"),)),
         ),
         Scenario("V4", "check, remote", "K2", BRIEF_CHECK, _five()),
         Scenario(

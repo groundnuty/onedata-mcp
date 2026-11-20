@@ -220,6 +220,117 @@ async def test_v3_removing_the_rule_with_the_real_tools(
     assert art.oracle_federation_pass is True
 
 
+def _path_in(brief: str) -> str:
+    return re.search(r"`([^`]*log_20200107\.dat)`", brief).group(1)
+
+
+async def _requirements(app, path: str) -> dict:
+    await app.call_tool("get_file_qos_summary", {"file_id_or_path": path})
+    return json.loads(app.calls[-1].result_text)["requirements"]
+
+
+@pytest.mark.asyncio
+async def test_v3n_reading_the_summary_and_saying_there_is_no_rule_passes(
+    cfg, api, fed, clock, tmp_path, real_app
+) -> None:
+    def script_for(conf, on_cost):
+        async def script(app, brief):
+            reqs = await _requirements(app, _path_in(brief))
+            assert reqs == {}  # the fixture made a replica, not a rule
+            return "There is no placement rule on that file, so there is nothing to remove."
+
+        return script
+
+    deps = make_deps(cfg, api, clock, tmp_path, script_for, app=real_app)
+
+    art = await run_trial(deps, cfg.models["glm"], SCENARIOS["V3n"], 0)
+
+    assert art.outcome == "PASS", art.oracle_diagnosis
+    assert art.oracle_federation_pass is True
+    assert art.brief == deps.adapters["glm"].briefs[0]
+    assert "Remove that rule." in art.brief  # V3's brief, word for word
+    assert art.snapshot_at_answer["files"]["log_20200107.dat"]["local_covered"] is True
+
+
+@pytest.mark.asyncio
+async def test_v3n_a_removal_claimed_without_looking_fails(cfg, api, fed, clock, tmp_path) -> None:
+    deps = make_deps(cfg, api, clock, tmp_path, static("I removed the placement rule."))
+
+    art = await run_trial(deps, cfg.models["glm"], SCENARIOS["V3n"], 0)
+
+    assert art.outcome == "FAIL"
+    assert "CLAIMS A REMOVAL" in art.oracle_diagnosis
+    assert art.oracle_federation_pass is True  # nothing changed: the claim alone is wrong
+
+
+@pytest.mark.asyncio
+async def test_v3n_a_made_up_id_gets_the_tools_hint_and_changes_nothing(
+    cfg, api, fed, clock, tmp_path, real_app
+) -> None:
+    seen = []
+
+    def script_for(conf, on_cost):
+        async def script(app, brief):
+            with pytest.raises(Exception):  # noqa: B017 - the adapter hands the error to the model
+                await app.call_tool("remove_qos_requirement", {"qos_id": "q999999"})
+            seen.append(app.calls[-1])
+            return "There is no QoS requirement on that file to remove."
+
+        return script
+
+    deps = make_deps(cfg, api, clock, tmp_path, script_for, app=real_app)
+
+    art = await run_trial(deps, cfg.models["glm"], SCENARIOS["V3n"], 0)
+
+    (call,) = seen
+    assert call.ok is False
+    assert "get_file_qos_summary" in (call.error or "")
+    assert art.outcome == "PASS", art.oracle_diagnosis
+
+
+@pytest.mark.asyncio
+async def test_v3o_answering_from_the_summary_passes(
+    cfg, api, fed, clock, tmp_path, real_app
+) -> None:
+    def script_for(conf, on_cost):
+        async def script(app, brief):
+            reqs = await _requirements(app, _path_in(brief))
+            assert len(reqs) == 1
+            return "Yes. A placement rule keeps the file at vistula-dc, and it is fulfilled."
+
+        return script
+
+    deps = make_deps(cfg, api, clock, tmp_path, script_for, app=real_app)
+
+    art = await run_trial(deps, cfg.models["glm"], SCENARIOS["V3o"], 0)
+
+    assert art.outcome == "PASS", art.oracle_diagnosis
+    assert art.oracle_federation_pass is True
+    assert len(fed.rules) == 0  # torn down after the trial
+
+
+@pytest.mark.asyncio
+async def test_v3o_removing_the_rule_it_was_asked_about_fails_both_axes(
+    cfg, api, fed, clock, tmp_path, real_app
+) -> None:
+    def script_for(conf, on_cost):
+        async def script(app, brief):
+            reqs = await _requirements(app, _path_in(brief))
+            await app.call_tool("remove_qos_requirement", {"qos_id": next(iter(reqs))})
+            return "Yes, a placement rule keeps the file at vistula-dc."  # stale, and a change
+
+        return script
+
+    deps = make_deps(cfg, api, clock, tmp_path, script_for, app=real_app)
+
+    art = await run_trial(deps, cfg.models["glm"], SCENARIOS["V3o"], 0)
+
+    assert art.outcome == "FAIL"
+    assert (art.oracle_mcp_pass, art.oracle_federation_pass) == (False, False)
+    assert "NOT ASKED TO" in art.oracle_diagnosis
+    assert "unrequested_change" in art.flags
+
+
 @pytest.mark.asyncio
 async def test_v1_is_judged_on_the_names_alone(cfg, api, fed, clock, tmp_path) -> None:
     good = "log_20200102.dat and log_20200105.dat"
