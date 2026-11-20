@@ -3,10 +3,13 @@
 Mocked HTTP against shapes pinned to Onedata 25.0 swagger.
 """
 
+import json
+
 import pytest
 from pytest_httpx import HTTPXMock
 
 from onedata_mcp.api import transfers
+from onedata_mcp.utils import OnedataApiError
 
 
 def _set_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -146,8 +149,6 @@ async def test_schedule_file_replication_surfaces_api_error(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
     """Target provider not supporting the space -> structured OnedataApiError."""
-    from onedata_mcp.utils import OnedataApiError
-
     _set_env(monkeypatch)
     httpx_mock.add_response(
         method="POST",
@@ -158,3 +159,370 @@ async def test_schedule_file_replication_surfaces_api_error(
 
     with pytest.raises(OnedataApiError):
         await transfers.schedule_file_replication("file-id-x", "p2")
+
+
+# ---------------------------------------------------------------------------
+# schedule_file_replication: the error paths a model can trigger (design/12, gate 1).
+#
+# The swagger (paths/transfers.yaml, POST) lists 201, 400, 403, 404 and 500, each failure with
+# the generic Error body. The 25.0 error ids and details below are PLAUSIBLE SHAPES, NOT
+# RECORDED ONES: the live test (test/live/test_transfer_live.py) prints the real answers.
+# ---------------------------------------------------------------------------
+
+BASE = "https://oneprovider.example/api/v3/oneprovider"
+TRANSFERS_URL = f"{BASE}/transfers"
+SPACE_ID = "9JO5__9nL1b01YEvwnft1r20gwgwlkIp19ND_n8hgxs"
+PROVIDERS = {
+    "spaceId": SPACE_ID,
+    "name": "k2val-x",
+    "providers": [
+        {"providerId": "pLocal0123456789abcdef", "providerName": "vistula-dc"},
+        {"providerId": "pOwner0123456789abcdef", "providerName": "nordic-marine-dc"},
+    ],
+}
+
+
+def _guid(space_id: str = SPACE_ID, uuid: str = "t_w-ghd1c7eDoMvTmo-gW_3aszvpHkGzy6Xw4") -> str:
+    """A file id of the 25.0 shape: an object-id header, then `guid#<uuid>#<space id>` in hex."""
+    return "00000000005CF470" + f"guid#{uuid}#{space_id}".encode().hex().upper()
+
+
+FILE_ID = _guid()
+
+
+def _post_error(httpx_mock: HTTPXMock, status: int, body: dict) -> None:
+    httpx_mock.add_response(method="POST", url=TRANSFERS_URL, status_code=status, json=body)
+
+
+async def _failure(file_arg: str, target: str) -> str:
+    with pytest.raises(OnedataApiError) as excinfo:
+        await transfers.schedule_file_replication(file_arg, target)
+    return str(excinfo.value)
+
+
+def test_the_space_id_is_read_from_a_file_id_of_the_25_shape() -> None:
+    # the swagger's own example (definitions/transfer/transfer_file_create_request.yaml)
+    example = (
+        "00000000005CF4706775696423745F772D67686431633765446F4D76546D6F2D67575F3361737A7670486B"
+        "477A7936587734507265584A7723394A4F355F5F396E4C31623031594576776E667431723230677767776C"
+        "6B497031394E445F6E3868677873"
+    )
+    assert transfers._space_id_of_file_id(example) == SPACE_ID
+    assert transfers._space_id_of_file_id(FILE_ID) == SPACE_ID
+    for other in ("file-id-x", "", "abcd", "00" * 20, "/space/file.dat"):
+        assert transfers._space_id_of_file_id(other) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("file_arg", "needle"),
+    [
+        ("k2val-x/logs/log_20200105.dat", "Paths must start with '/'"),
+        ("logs/log_20200105.dat", "Paths must start with '/'"),
+        ("", "is empty"),
+        ("   ", "is empty"),
+        (".", "is not a file id or a path"),
+        ("..", "is not a file id or a path"),
+    ],
+)
+async def test_a_wrong_form_of_file_is_refused_before_any_request(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, file_arg: str, needle: str
+) -> None:
+    _set_env(monkeypatch)
+
+    with pytest.raises(ValueError) as excinfo:
+        await transfers.schedule_file_replication(file_arg, "pLocal0123456789abcdef")
+
+    text = str(excinfo.value)
+    assert needle in text
+    assert "/<space_name>/<path_to_file>" in text  # says what form works
+    assert httpx_mock.get_requests() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("target", "needle"),
+    [
+        ("", "is empty"),
+        ("  ", "is empty"),
+        ("/k2val-x/vistula-dc", "is not a provider id"),
+        ("..", "is not a provider id"),
+    ],
+)
+async def test_a_wrong_form_of_target_is_refused_before_any_request(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, target: str, needle: str
+) -> None:
+    _set_env(monkeypatch)
+
+    with pytest.raises(ValueError) as excinfo:
+        await transfers.schedule_file_replication(FILE_ID, target)
+
+    assert needle in str(excinfo.value)
+    assert "supports the file's space" in str(excinfo.value)
+    assert httpx_mock.get_requests() == []
+
+
+@pytest.mark.asyncio
+async def test_a_path_is_percent_encoded_whole_into_the_lookup_and_nothing_into_the_post_path(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """URL-encoding of every value put into a path: the lookup takes the whole path encoded,
+    and the POST carries the file and provider ids in its body, never in its URL."""
+    _set_env(monkeypatch)
+    path = "/k2val x/logs/a?b#c.dat"
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{BASE}/lookup-file-id/%2Fk2val%20x%2Flogs%2Fa%3Fb%23c.dat",
+        json={"fileId": FILE_ID},
+    )
+    httpx_mock.add_response(method="POST", url=TRANSFERS_URL, json={"transferId": "t1"})
+
+    assert await transfers.schedule_file_replication(path, "p?x#y") == {"transferId": "t1"}
+
+    lookup, post = httpx_mock.get_requests()
+    assert lookup.url.raw_path.decode() == (
+        "/api/v3/oneprovider/lookup-file-id/%2Fk2val%20x%2Flogs%2Fa%3Fb%23c.dat"
+    )
+    assert post.url.raw_path.decode() == "/api/v3/oneprovider/transfers" and not post.url.query
+    assert json.loads(post.content) == {
+        "type": "replication",
+        "dataSourceType": "file",
+        "fileId": FILE_ID,
+        "replicatingProviderId": "p?x#y",  # in the body, as given
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_id_with_url_characters_goes_into_the_body_only(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    httpx_mock.add_response(method="POST", url=TRANSFERS_URL, json={"transferId": "t1"})
+
+    await transfers.schedule_file_replication("abc?x=1#frag", "pLocal")
+
+    (post,) = httpx_mock.get_requests()
+    assert post.url.raw_path.decode() == "/api/v3/oneprovider/transfers" and not post.url.query
+    assert json.loads(post.content)["fileId"] == "abc?x=1#frag"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_path_is_a_not_found_error_without_a_transfer(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{BASE}/lookup-file-id/%2Fk2val-x%2Flogs%2Fnope.dat",
+        status_code=400,
+        json={"error": {"id": "posix", "details": {"errno": "enoent"}, "description": "enoent"}},
+    )
+
+    with pytest.raises(FileNotFoundError, match='Path "/k2val-x/logs/nope.dat" not found'):
+        await transfers.schedule_file_replication("/k2val-x/logs/nope.dat", "pLocal")
+
+    (only,) = httpx_mock.get_requests()  # the lookup; no transfer was posted
+    assert only.url.raw_path.decode().endswith("/lookup-file-id/%2Fk2val-x%2Flogs%2Fnope.dat")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (404, {"error": {"id": "notFound", "description": "The resource could not be found."}}),
+        (404, {"error": {"id": "posix", "details": {"errno": "enoent"}, "description": "enoent"}}),
+        (400, {"error": {"id": "badValueIdentifier", "details": {"key": "fileId"}}}),
+    ],
+)
+async def test_an_unknown_file_id_says_what_forms_work(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, status: int, body: dict
+) -> None:
+    """A file name, or an id that names no file."""
+    _set_env(monkeypatch)
+    _post_error(httpx_mock, status, body)
+
+    text = await _failure("log_20200105.dat", "pLocal0123456789abcdef")
+
+    assert text.startswith("No file is known by 'log_20200105.dat'")
+    assert "a path starting with '/'" in text and "A file name alone is neither" in text
+    assert f"(status={status})" in text  # Onedata's own message follows
+
+
+@pytest.mark.asyncio
+async def test_a_target_that_does_not_support_the_space_lists_the_providers_that_do(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """By id: the id of a provider outside the space, or of no provider at all."""
+    _set_env(monkeypatch)
+    _post_error(
+        httpx_mock,
+        400,
+        {
+            "error": {
+                "id": "spaceNotSupportedBy",
+                "details": {"spaceId": SPACE_ID, "providerId": "pOder"},
+                "description": "Space is not supported by provider pOder.",
+            }
+        },
+    )
+    httpx_mock.add_response(method="GET", url=f"{BASE}/spaces/{SPACE_ID}", json=PROVIDERS)
+
+    text = await _failure(FILE_ID, "pOder")
+
+    assert text.startswith("Cannot replicate to 'pOder': it is not a provider that supports")
+    assert "vistula-dc (id 'pLocal0123456789abcdef')" in text
+    assert "nordic-marine-dc (id 'pOwner0123456789abcdef')" in text
+    assert "is a provider's name" not in text
+    assert "Space is not supported by provider pOder." in text  # Onedata's message follows
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"error": {"id": "spaceNotSupportedBy", "details": {"spaceId": SPACE_ID}}},
+        {"error": {"id": "badValueIdentifier", "details": {"key": "replicatingProviderId"}}},
+        {"error": {"id": "badValue", "description": "bad value"}},  # a bare 400
+    ],
+)
+async def test_a_provider_name_given_as_the_id_is_answered_with_its_id(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, body: dict
+) -> None:
+    """By name: a brief names the site, and the tool takes its id."""
+    _set_env(monkeypatch)
+    _post_error(httpx_mock, 400, body)
+    httpx_mock.add_response(method="GET", url=f"{BASE}/spaces/{SPACE_ID}", json=PROVIDERS)
+
+    text = await _failure(FILE_ID, "vistula-dc")
+
+    assert "'vistula-dc' is a provider's name; its id is 'pLocal0123456789abcdef'" in text
+
+
+@pytest.mark.asyncio
+async def test_a_bare_400_does_not_blame_one_argument(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    _post_error(httpx_mock, 400, {"error": {"id": "badValue", "description": "bad value"}})
+    httpx_mock.add_response(method="GET", url=f"{BASE}/spaces/{SPACE_ID}", json=PROVIDERS)
+
+    text = await _failure(FILE_ID, "pLocal0123456789abcdef")
+
+    assert "Check both arguments" in text
+    assert "the target is a provider id" in text and "a path starting with '/'" in text
+    assert "vistula-dc (id 'pLocal0123456789abcdef')" in text
+
+
+@pytest.mark.asyncio
+async def test_without_a_space_to_list_the_hint_falls_back_to_plain_words(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """A file id of another shape and no space in the details: no extra request."""
+    _set_env(monkeypatch)
+    _post_error(httpx_mock, 400, {"error": {"id": "spaceNotSupportedBy"}})
+
+    text = await _failure("file-id-x", "vistula-dc")
+
+    assert "Give the id (not the name) of a provider that supports the file's space." in text
+    assert len(httpx_mock.get_requests()) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_listing_does_not_hide_the_original_error(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    _post_error(
+        httpx_mock, 400, {"error": {"id": "spaceNotSupportedBy", "details": {"spaceId": SPACE_ID}}}
+    )
+    httpx_mock.add_response(
+        method="GET", url=f"{BASE}/spaces/{SPACE_ID}", status_code=500, json={"error": {}}
+    )
+
+    text = await _failure(FILE_ID, "pOder")
+
+    assert text.startswith("Cannot replicate to 'pOder'")
+    assert "Give the id (not the name)" in text
+    assert "spaceNotSupportedBy" in text  # Onedata's own answer is still there
+
+
+@pytest.mark.asyncio
+async def test_a_space_id_in_the_details_that_is_not_an_id_is_not_put_into_a_url(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """The details come from the server: an odd value falls back to the file id's space."""
+    _set_env(monkeypatch)
+    _post_error(
+        httpx_mock, 400, {"error": {"id": "spaceNotSupportedBy", "details": {"spaceId": "../x?y"}}}
+    )
+    httpx_mock.add_response(method="GET", url=f"{BASE}/spaces/{SPACE_ID}", json=PROVIDERS)
+
+    await _failure(FILE_ID, "pOder")
+
+    paths = [r.url.raw_path.decode() for r in httpx_mock.get_requests()]
+    assert paths == ["/api/v3/oneprovider/transfers", f"/api/v3/oneprovider/spaces/{SPACE_ID}"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (403, {"error": {"id": "forbidden", "description": "You are not authorized."}}),
+        (400, {"error": {"id": "posix", "details": {"errno": "eacces"}, "description": "eacces"}}),
+        (403, {"error": {"id": "posix", "details": {"errno": "eperm"}, "description": "eperm"}}),
+    ],
+)
+async def test_a_permission_error_says_a_retry_will_not_help(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, status: int, body: dict
+) -> None:
+    _set_env(monkeypatch)
+    _post_error(httpx_mock, status, body)
+
+    text = await _failure(FILE_ID, "pLocal0123456789abcdef")
+
+    assert text.startswith("Not allowed to schedule a replication of ")
+    assert "space_schedule_replication" in text and "will not help" in text
+    assert "providers that support" not in text  # not mistaken for a provider problem
+
+
+@pytest.mark.asyncio
+async def test_a_server_error_is_passed_on_unchanged(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """Nothing the caller can fix: no hint, Onedata's message as it is."""
+    _set_env(monkeypatch)
+    _post_error(httpx_mock, 500, {"error": {"id": "internalServerError", "description": "boom"}})
+
+    text = await _failure(FILE_ID, "pLocal0123456789abcdef")
+
+    assert text.startswith("Onedata API request failed: POST /transfers (status=500)")
+    assert "Not allowed" not in text and "No file is known" not in text
+
+
+@pytest.mark.asyncio
+async def test_a_second_replication_of_the_same_file_is_sent_as_is(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """Onedata does not refuse a replication of a file that is already being copied (the
+    swagger lists no such status): the tool keeps no state of its own and adds no check."""
+    _set_env(monkeypatch)
+    httpx_mock.add_response(method="POST", url=TRANSFERS_URL, json={"transferId": "t1"})
+    httpx_mock.add_response(method="POST", url=TRANSFERS_URL, json={"transferId": "t2"})
+
+    first = await transfers.schedule_file_replication(FILE_ID, "pLocal0123456789abcdef")
+    second = await transfers.schedule_file_replication(FILE_ID, "pLocal0123456789abcdef")
+
+    assert (first, second) == ({"transferId": "t1"}, {"transferId": "t2"})
+
+
+@pytest.mark.asyncio
+async def test_a_long_value_is_echoed_cut_short(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    _post_error(httpx_mock, 404, {"error": {"id": "notFound"}})
+
+    text = await _failure("a" * 300, "pLocal0123456789abcdef")
+
+    hint = text.split(" [", 1)[0]
+    assert "a" * 81 not in hint and "..." in hint
