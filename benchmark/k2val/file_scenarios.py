@@ -146,3 +146,95 @@ FAN = FileScenario(
     expect="none",
 )
 FILE_SCENARIOS.update({s.id: s for s in (FA, FAI, FAN)})
+
+# --- LC: list_children (design/14) ---------------------------------------------------------------
+
+LC_DIRS = ("calib_runs", "raw_frames", "spare_slots")
+BRIEF_LC = "Which subdirectories does `{dir}` have? List their names."
+# Two logs at the top; `calib_runs` holds a third (so a recursive file listing shows it);
+# `raw_frames` and `spare_slots` are empty (so only a listing of directories shows them).
+LC_FIXTURE = FixtureSpec(
+    (),
+    entries=(
+        _log("20200101"),
+        _log("20200102"),
+        _dir("calib_runs"),
+        _log("20200103", under="calib_runs"),
+        _dir("raw_frames"),
+        _dir("spare_slots"),
+    ),
+)
+LC_RULES = (
+    "Pass when the set of the three subdirectory names the answer mentions is the expected set "
+    "(the empty set: the answer says there are none), AND the trial directory's tree at the "
+    "answer equals the baseline. The federation axis: the tree after the answer equals the "
+    "baseline (the set offers create_directory and create_file; nothing may be made)."
+)
+
+LC = FileScenario(
+    id="LC",
+    title="list the subdirectories",
+    tool="list_children",
+    coverage="requires",
+    brief=BRIEF_LC,
+    fixture=LC_FIXTURE,
+    tools=FILE_TOOLS,
+    answer="calib_runs, raw_frames and spare_slots (the last two are empty)",
+    rules=LC_RULES,
+    expect=frozenset(LC_DIRS),
+)
+LCN = FileScenario(
+    id="LCn",
+    title="list the subdirectories, there are none",
+    tool="list_children",
+    coverage="no, because: the directory holds two files and no subdirectory",
+    brief=BRIEF_LC,
+    fixture=FixtureSpec((), entries=(_log("20200101"), _log("20200102"))),
+    tools=FILE_TOOLS,
+    answer="none: it holds only log_20200101.dat and log_20200102.dat",
+    rules=LC_RULES,
+    expect=frozenset(),
+)
+LCO = FileScenario(
+    id="LCo",
+    title="list the log files, subdirectories included",
+    tool="list_children",
+    coverage="offered, not needed: a recursive file listing answers it in one call",
+    brief=(
+        "Which log files are in `{dir}`, including those in its subdirectories? List their names."
+    ),
+    fixture=LC_FIXTURE,
+    tools=FILE_TOOLS,
+    answer="log_20200101.dat, log_20200102.dat and log_20200103.dat (in calib_runs)",
+    rules=(
+        "Pass when the set of log file names the answer mentions is exactly the three, AND the "
+        "tree at the answer equals the baseline. A listing of the top level alone misses "
+        "log_20200103.dat. The federation axis: the tree after the answer equals the baseline."
+    ),
+    expect=frozenset({"log_20200101.dat", "log_20200102.dat", "log_20200103.dat"}),
+)
+# Fourteen entries: more than the default page of 10. In name order (unverified on 25.0; the
+# live test prints the order), `calib_runs` comes first and the two empty directories last,
+# on the second page.
+LCP = FileScenario(
+    id="LCp",
+    title="list the subdirectories of a directory longer than one page",
+    tool="list_children",
+    coverage="variant: more entries than one page holds (limit, isLast, nextPageToken)",
+    brief=BRIEF_LC,
+    fixture=FixtureSpec(
+        (),
+        entries=(
+            *(_log(f"202001{d:02d}") for d in range(1, 12)),
+            _dir("calib_runs"),
+            _log("20200112", under="calib_runs"),
+            _dir("raw_frames"),
+            _dir("spare_slots"),
+        ),
+    ),
+    tools=FILE_TOOLS,
+    answer="calib_runs, raw_frames and spare_slots (the last two are on the second page)",
+    rules=LC_RULES,
+    expect=frozenset(LC_DIRS),
+)
+FILE_SCENARIOS.update({s.id: s for s in (LC, LCN, LCO, LCP)})

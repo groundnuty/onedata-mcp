@@ -630,6 +630,7 @@ async def _fixture_check() -> None:
         "s2": FixtureSpec((FileSpec("20200104", "s2"),), writer_finish_s=30.0),
         # the file-tool scenarios (design/13-15)
         "FA": SCENARIOS["FA"].fixture,  # modes set at the owner, seen at the local provider
+        "LCp": SCENARIOS["LCp"].fixture,  # more than a page of entries, two empty directories
     }
     problems: list[str] = []
     try:
