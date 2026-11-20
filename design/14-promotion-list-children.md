@@ -154,7 +154,7 @@ Run id, commit and surface hash: TODO. Classify every non-pass before anything c
 
 - **Classifications:** TODO. An LCp failure that read one page with `isLast: false` in the answer it got is tool-attributable until shown otherwise: the description is what tells a model to page.
 - **Tool-attributable findings:** TODO.
-- **The run passes when:** the control passes all four, or each control failure is a harness bug or an artefact; and no tool-attributable finding is left open.
+- **The run passes when** (design/10, gate 4): every control trial passes, with control trials lost to a harness bug or deployment artefact re-run after the fix, so each scenario ends with K passing control trials; and no tool-attributable finding is open (fixed and re-run, or accepted only with its cause outside the tool and the operator's sign-off).
 
 ## External review (2026-11-20)
 

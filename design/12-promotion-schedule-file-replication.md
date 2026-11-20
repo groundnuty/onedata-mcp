@@ -192,13 +192,11 @@ Run id, commit and surface hash: TODO.
 Classify every non-pass before anything counts. The classes are harness or oracle bug (fix and rescore), deployment artefact, tool-attributable, or model capability.
 
 - **Classifications:** TODO. The flags help: `premature_claim` (SR1), `placement_rule` (SR1), `unrequested_change` (SR1n, SR1o), `required_call_missing` (SR1, SR1i), and NEEDS_REVIEW's `readers_disagree` / `judge_error` (classified first).
-- **Tool-attributable findings, each fixed and re-run or accepted with a reason:** TODO. Watch for three things:
+- **Tool-attributable findings, each fixed and re-run (or accepted only with the operator's sign-off):** TODO. Watch for three things:
   - a "done" read off a transfer status (the description warns against it);
   - a provider name passed as the id that the hint did not resolve;
   - a placement rule chosen over the copy.
-- **The run passes when:**
-  - the control passes all three scenarios, or each control failure is shown to be a harness bug or an artefact;
-  - no tool-attributable finding is left open.
+- **The run passes when** (design/10, gate 4): every control trial passes, with control trials lost to a harness bug or deployment artefact re-run after the fix, so each scenario ends with K passing control trials; and no tool-attributable finding is open (fixed and re-run, or accepted only with its cause outside the tool and the operator's sign-off).
 
 ## Gate 5: record
 

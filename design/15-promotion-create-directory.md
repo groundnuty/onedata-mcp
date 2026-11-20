@@ -156,7 +156,7 @@ Run id, commit and surface hash: TODO. Classify every non-pass before anything c
 
 - **Classifications:** TODO. In CDn, an answer that reports "the directory already exists" (rather than a file) is tool-attributable only if the error the model got said so; the new error says which.
 - **Tool-attributable findings:** TODO.
-- **The run passes when:** the control passes all four, or each control failure is a harness bug or an artefact; and no tool-attributable finding is left open.
+- **The run passes when** (design/10, gate 4): every control trial passes, with control trials lost to a harness bug or deployment artefact re-run after the fix, so each scenario ends with K passing control trials; and no tool-attributable finding is open (fixed and re-run, or accepted only with its cause outside the tool and the operator's sign-off).
 
 ## External review (2026-11-20)
 
