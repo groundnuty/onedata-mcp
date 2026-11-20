@@ -7,6 +7,7 @@
     make valfed-check             no-model check of the panel's federation layer, in omcp-smoke
     make valfed-readiness-live    the gated live readiness test, in omcp-live
     make valfed-qos-live          the gated live test of remove_qos_requirement, in omcp-live
+    make valfed-transfer-live     the gated live test of schedule_file_replication, in omcp-live
 
 One Onezone and two Oneproviders of Onedata 25.0 in Docker Compose, published on 127.0.0.1 only,
 as `layout.toml` beside this file declares them. The work is done by the Compose federation tool
@@ -564,12 +565,18 @@ LIVE_TESTS = {
         "ONEDATA_MCP_LIVE_READINESS_SPACE",
     ),
     "qos": ("test/live/test_qos_live.py", "ONEDATA_MCP_LIVE_QOS", "ONEDATA_MCP_LIVE_QOS_SPACE"),
+    "transfer": (
+        "test/live/test_transfer_live.py",
+        "ONEDATA_MCP_LIVE_TRANSFER",
+        "ONEDATA_MCP_LIVE_TRANSFER_SPACE",
+    ),
 }
 
 
-def live_test(home: Home, name: str) -> None:
+def live_test(home: Home, name: str, extra: dict[str, str] | None = None) -> None:
     """A gated live test against omcp-live, TLS verified, the MCP server's token from its file
-    (passed in the environment, never on a command line)."""
+    (passed in the environment, never on a command line). `extra`: more variables, also only
+    in the environment."""
     test, enable, space = LIVE_TESTS[name]
     found = facts(home)
     tools = home.token_file("tools").read_text().strip()
@@ -583,6 +590,7 @@ def live_test(home: Home, name: str) -> None:
         ONEDATA_ONEPROVIDER_HOST=found["providers"]["local"]["url"],
         ONEDATA_ONEPROVIDER_TOKEN=tools,
         **{enable: "1", space: LIVE_SPACE},
+        **(extra or {}),
     )
     rc = subprocess.run([sys.executable, "-m", "pytest", test, "-v", "-s"], cwd=REPO, env=env)
     if rc.returncode:
@@ -599,6 +607,21 @@ def qos_live(home: Home) -> None:
     live_test(home, "qos")
 
 
+def transfer_live(home: Home) -> None:
+    """test/live/test_transfer_live.py (schedule_file_replication) against omcp-live. Its probe
+    files are written through `owner` with the writer token, so that a replication to `local`
+    has data to copy; the owner's URL and that token go in the environment only."""
+    found = facts(home)
+    live_test(
+        home,
+        "transfer",
+        {
+            "ONEDATA_MCP_LIVE_TRANSFER_SOURCE_HOST": found["providers"]["owner"]["url"],
+            "ONEDATA_MCP_LIVE_TRANSFER_SOURCE_TOKEN": home.token_file("writer").read_text().strip(),
+        },
+    )
+
+
 async def _fixture_check() -> None:
     from benchmark.k2val.clock import REAL_CLOCK
     from benchmark.k2val.config import load_config, read_federation_secrets
@@ -610,12 +633,14 @@ async def _fixture_check() -> None:
     fed = FedApi.from_conf(cfg.federation, read_federation_secrets(cfg.federation))
     builder = FixtureBuilder(fed, SMOKE_SPACE, REAL_CLOCK)
     stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
-    # V4's fixture, then the kinds it lacks: a transfer (V1), a QoS rule (V3), a file being written.
+    # V4's fixture, then the kinds it lacks: a transfer (V1), a QoS rule (V3), a file being written,
+    # a large file (SR1).
     cases = {
         "V4": SCENARIOS["V4"].fixture,
         "V1": SCENARIOS["V1"].fixture,
         "V3": SCENARIOS["V3"].fixture,
         "s2": FixtureSpec((FileSpec("20200104", "s2"),), writer_finish_s=30.0),
+        "SR1": SCENARIOS["SR1"].fixture,  # the large file, written in parts (design/12)
     }
     problems: list[str] = []
     try:
@@ -661,6 +686,7 @@ COMMANDS = {
     "check": check,
     "readiness-live": readiness_live,
     "qos-live": qos_live,
+    "transfer-live": transfer_live,
 }
 
 

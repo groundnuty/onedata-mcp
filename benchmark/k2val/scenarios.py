@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from benchmark.k2val.fixtures import FileSpec, FixtureSpec
+from benchmark.k2val.fixtures import LARGE_FILE_SIZE, FileSpec, FixtureSpec
 
 SYSTEM_PROMPT_TEMPLATE = (
     "You are an assistant with access to tools of a federated data management system "
@@ -40,7 +40,9 @@ BRIEF_ENSURE = (
 BRIEF_REMOVE = "A placement rule keeps `{dir}/log_20200107.dat` at {local}. Remove that rule."
 
 # What the federation axis waits for after the final answer, within the settle window.
-Settle = Literal["none", "local_covered", "qos_gone", "complete"]
+# "quiet": nothing should change, so the whole window is waited out, and a transfer or rule
+# started just before the answer has time to show on the federation axis.
+Settle = Literal["none", "local_covered", "qos_gone", "complete", "quiet"]
 
 
 @dataclass(frozen=True)
@@ -137,6 +139,66 @@ SCENARIOS: dict[str, Scenario] = {
         ),
     )
 }
+
+
+# ---------------------------------------------------------------------------------------------
+# schedule_file_replication's scenarios (design/12-promotion-schedule-file-replication.md, gate 4)
+#
+# One file, `log_20200110.dat`, written at the owner only (kind s0), in every SR scenario, so
+# neither the directory (opaque) nor the file tells a model which scenario it is in. The full K1
+# set is offered in each. The oracles are in `sr_oracles.py`; each one's docstring gives the
+# brief's gist, the right answer and the pass and fail rules.
+#
+# SR1   needs it. "Copy it to your site, set up no placement rule, tell me when it is there."
+#       No other K1 tool makes a copy without a placement rule (add_file_qos_requirement makes
+#       one; adding a rule and removing it later is still setting one up), so SR1 REQUIRES the
+#       tool. A large file, so that a "done" said before the blocks arrive is seen.
+# SR1n  "no, because": SR1's brief with a site that does not support the space (`oder-dc` is
+#       not in the federation at all). Right: it cannot be done, and why; nothing is copied.
+# SR1o  offered, not needed: "has it been copied to your site?" Right: no. Nothing is copied.
+#
+# Not built: a variant giving the target by id. The tool takes only an id, so the name form
+# (SR1, SR1n) is the one with something to resolve; every successful call passes an id. See
+# design/12 for the reasoning and for the variants the protocol asks about.
+# ---------------------------------------------------------------------------------------------
+
+SR_DAY = "20200110"
+SR_FILE = "log_20200110.dat"
+SR_ELSEWHERE = "oder-dc"  # a site name that no provider of the federation has
+_BRIEF_COPY = (
+    "Make a copy of `{dir}/log_20200110.dat` at {where}, without setting up any placement rule "
+    "for it, and tell me when its data are fully there."
+)
+SR_SCENARIOS: dict[str, Scenario] = {
+    s.id: s
+    for s in (
+        Scenario(
+            "SR1",
+            "copy without a rule",
+            "K1",
+            _BRIEF_COPY.replace("{where}", "your site {local}"),
+            FixtureSpec((FileSpec(SR_DAY, "s0", LARGE_FILE_SIZE),)),
+            settle="local_covered",
+        ),
+        Scenario(
+            "SR1n",
+            "copy to a site outside the space",
+            "K1",
+            _BRIEF_COPY.replace("{where}", f"the site {SR_ELSEWHERE}"),
+            FixtureSpec((FileSpec(SR_DAY, "s0"),)),
+            settle="quiet",
+        ),
+        Scenario(
+            "SR1o",
+            "ask whether copied",
+            "K1",
+            "Has `{dir}/log_20200110.dat` been copied to your site {local}?",
+            FixtureSpec((FileSpec(SR_DAY, "s0"),)),
+            settle="quiet",
+        ),
+    )
+}
+SCENARIOS.update(SR_SCENARIOS)
 
 
 def parse_scenarios(text: str) -> list[str]:

@@ -73,10 +73,21 @@ async def _file_state(fed: FedApi, name: str, file_id: str, owner_id: str, local
         via_owner, via_local, qos = await asyncio.gather(
             fed.distribution("owner", file_id),
             fed.distribution("local", file_id),
-            fed.qos_ids("local", file_id),
+            fed.qos_ids("local", file_id, missing_ok=False),
         )
     except Exception as e:  # noqa: BLE001 - a snapshot records the problem, it does not raise
         state.error = f"{type(e).__name__}: {e}"
+        return state
+    # Each provider's own blocks must be readable: an answer without a size, or with the
+    # provider's own entry failed, is an unusable reading, never "0 bytes".
+    unreadable = []
+    for role, view, pid in (("owner", via_owner, owner_id), ("local", via_local, local_id)):
+        if not view.size_known:
+            unreadable.append(f"the {role} provider's distribution has no size")
+        if pid in view.failed:
+            unreadable.append(f"the {role} provider's distribution failed for its own entry")
+    if unreadable:
+        state.error = "; ".join(unreadable)
         return state
     state.size = max(via_owner.size, via_local.size)
     state.size_field = via_local.size_field or via_owner.size_field
