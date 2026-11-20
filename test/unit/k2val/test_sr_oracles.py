@@ -13,7 +13,7 @@ from benchmark._runtime_types import AgentTrace, RunContext
 from benchmark.k2val.oracles import ORACLES, K2Context, settled
 from benchmark.k2val.recording import CallRecord
 from benchmark.k2val.scenarios import SR_FILE
-from benchmark.k2val.snapshot import FileState, Snapshot
+from benchmark.k2val.snapshot import FileState, Snapshot, UnusableSnapshot
 from benchmark.k2val.sr_oracles import read_copied_question, read_copy_answer, read_refusal
 
 LOCAL = "vistula-dc"
@@ -276,17 +276,16 @@ def test_sr1_the_federation_axis_needs_the_whole_file_after_the_settle() -> None
 
 
 @pytest.mark.parametrize("sid", ["SR1", "SR1n", "SR1o"])
-def test_an_unusable_snapshot_is_reported_not_judged(sid: str) -> None:
+def test_an_unusable_snapshot_is_not_judged(sid: str) -> None:
     c = ctx(sid, at=state(local=BIG), after=state(error="OnedataApiError: 404 summary"))
-    result = verdict(sid, c, WHOLE)
-    assert result.mcp_pass is False and result.federation_pass is None
-    assert "snapshot_error" in c.flags and "404 summary" in result.diagnosis
+    with pytest.raises(UnusableSnapshot, match="404 summary"):  # the runner: ORACLE_ERROR
+        verdict(sid, c, WHOLE)
 
 
 def test_a_snapshot_without_the_file_is_unusable() -> None:
     c = ctx("SR1", at=Snapshot(taken_at=1.0), after=Snapshot(taken_at=2.0))
-    result = verdict("SR1", c, WHOLE)
-    assert result.federation_pass is None and "missing from the snapshot" in result.diagnosis
+    with pytest.raises(UnusableSnapshot, match="missing from the snapshot"):
+        verdict("SR1", c, WHOLE)
 
 
 # --- SR1n --------------------------------------------------------------------------------------

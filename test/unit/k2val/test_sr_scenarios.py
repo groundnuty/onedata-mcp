@@ -127,7 +127,7 @@ async def test_a_large_file_is_written_at_the_owner_in_parts_at_explicit_offsets
     assert all(p["provider"] == OWNER_ID for p in puts)
     node = fed.nodes[bf.file_id]
     assert node.size == TEST_LARGE and fed.covered(node.blocks[OWNER_ID], TEST_LARGE) == TEST_LARGE
-    assert built.files_baseline[SR_FILE] == {
+    assert built.baseline()["files"][SR_FILE] == {
         "kind": "s0",
         "size": TEST_LARGE,
         "size_known": True,
@@ -199,7 +199,7 @@ async def test_sr1_a_copy_said_whole_once_it_is_passes(cfg, api, fed, clock, tmp
     assert art.oracle_federation_pass is True
     assert [c["tool"] for c in art.calls] == ["schedule_file_replication", "get_file_distribution"]
     assert re.fullmatch(r"/k2val-glm/logs-[a-p]{12}", art.directory)  # opaque
-    assert art.files_baseline[SR_FILE]["local_bytes"] == 0
+    assert art.fixture_baseline["files"][SR_FILE]["local_bytes"] == 0
 
 
 @pytest.mark.asyncio

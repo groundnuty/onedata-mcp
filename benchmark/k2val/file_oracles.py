@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 from benchmark._runtime_types import AgentTrace, OracleResult
 from benchmark.k2val import file_scenarios
+from benchmark.k2val.snapshot import UnusableSnapshot  # the one rule (snapshot.py); re-exported
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -29,11 +30,6 @@ if TYPE_CHECKING:
     from benchmark.k2val.file_scenarios import FileScenario
     from benchmark.k2val.oracles import K2Context
     from benchmark.k2val.snapshot import Snapshot
-
-
-class UnusableSnapshot(RuntimeError):
-    """The tree could not be read (at the answer, after it, or as the baseline): a harness or
-    deployment problem, never a model's failure."""
 
 
 # --- shared: reading answers, the end state, the result ------------------------------------

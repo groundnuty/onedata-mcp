@@ -170,7 +170,7 @@ async def test_creating_it_passes_both_axes(
     art = await trial(cfg, api, clock, tmp_path, tools_app, sid, model)
 
     assert (art.outcome, art.oracle_federation_pass) == ("PASS", True), art.oracle_diagnosis
-    added = set(art.snapshot_at_answer["tree"]) - set(art.fixture_baseline)
+    added = set(art.snapshot_at_answer["tree"]) - set(art.fixture_baseline["tree"])
     assert added == set(FILE_SCENARIOS[sid].added)
 
 
@@ -272,4 +272,4 @@ async def test_an_unreadable_tree_at_the_answer_is_an_oracle_error_not_a_fail(
     art = await trial(cfg, api, clock, tmp_path, tools_app, "CD", model)
 
     assert art.outcome == "ORACLE_ERROR"
-    assert "could not be read" in art.error
+    assert "unusable federation reading" in art.error and "tree:" in art.error

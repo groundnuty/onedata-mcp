@@ -146,7 +146,8 @@ async def test_fa_reading_the_modes_passes(cfg, api, fed, clock, tmp_path, tools
 
     assert art.outcome == "PASS", art.oracle_diagnosis
     assert art.oracle_federation_pass is None
-    assert set(art.fixture_baseline) == set(FA_NAMES)
+    assert set(art.fixture_baseline["tree"]) == set(FA_NAMES)
+    assert art.fixture_baseline["files"] == {}
     assert all(c["ok"] for c in art.calls)  # the JSON-text list was read as a list
 
 

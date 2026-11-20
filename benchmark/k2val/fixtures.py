@@ -246,6 +246,12 @@ class BuiltFixture:
         """File ids by relative path, for a brief that gives an id (`{ids[log_20200102.dat]}`)."""
         return dict(self.entries)
 
+    def baseline(self) -> dict:
+        """The start state the agent got, as the LOCAL provider reported it before the first
+        turn: each log file (`files`, `_wait_files_baseline`) and the trial directory's tree
+        (`tree`, the file-tool scenarios, else None). The artefact's `fixture_baseline`."""
+        return {"files": dict(self.files_baseline), "tree": self.baseline_tree}
+
 
 def _baseline_holds(kind: str, reading: dict, want_qos: tuple[str, ...], size: int) -> bool:
     """The state a kind of file starts a trial in (see the module docstring)."""

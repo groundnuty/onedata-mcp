@@ -17,7 +17,7 @@ from benchmark.k2val.oracles import (
     settled,
 )
 from benchmark.k2val.recording import CallRecord
-from benchmark.k2val.snapshot import FileState, Snapshot
+from benchmark.k2val.snapshot import FileState, Snapshot, UnusableSnapshot
 from test.unit.k2val.real_answers import V1_REAL, V4_REAL, V5_REAL
 
 FIVE = [f"log_2020010{d}.dat" for d in range(1, 6)]
@@ -155,11 +155,10 @@ def test_v2_no_claim_is_a_fail_without_being_premature() -> None:
     assert c.flags == []
 
 
-def test_v2_an_unusable_snapshot_is_reported_not_judged() -> None:
+def test_v2_an_unusable_snapshot_is_not_judged() -> None:
     c = ctx("V2", NAME2, at=snap(NAME2, error="boom"))
-    result = verdict("V2", c, "Done.")
-    assert not result.mcp_pass and result.federation_pass is None
-    assert "snapshot_error" in c.flags
+    with pytest.raises(UnusableSnapshot, match="boom"):  # the runner records ORACLE_ERROR
+        verdict("V2", c, "Done.")
 
 
 # --- V3 ---------------------------------------------------------------------
@@ -273,11 +272,10 @@ def test_v3n_the_federation_axis_reads_the_settled_snapshot() -> None:
     assert "local copy" in result.diagnosis
 
 
-def test_v3n_an_unusable_snapshot_is_reported_not_judged() -> None:
+def test_v3n_an_unusable_snapshot_is_not_judged() -> None:
     c = ctx3("V3n", at=snap(NAME3, error="ConnectError: x"))
-    result = verdict("V3n", c, "There is no placement rule on that file.")
-    assert not result.mcp_pass and result.federation_pass is None
-    assert "snapshot_error" in c.flags
+    with pytest.raises(UnusableSnapshot, match="ConnectError"):
+        verdict("V3n", c, "There is no placement rule on that file.")
 
 
 V3O_RIGHT = [

@@ -95,7 +95,9 @@ class DistView:
     size_field: str = ""
 
     def covers(self, provider_id: str) -> bool:
-        return self.size >= 0 and self.covered.get(provider_id, 0) >= self.size and self.size_known
+        """The provider's blocks cover the whole file. A size of 0 covers nothing: every file
+        the panel judges has data, and "0 of 0 bytes" is a reading to distrust, not a copy."""
+        return self.size > 0 and self.covered.get(provider_id, 0) >= self.size and self.size_known
 
     @property
     def size_known(self) -> bool:
@@ -123,11 +125,24 @@ def parse_dist(body: Any) -> DistView:
                 if value >= size:
                     size, size_field = value, key
                 break
-        blocks: list[Any] = []
+        # A provider whose storage map is missing, or one of whose storages failed or answered
+        # blocks that are not a list, is a failed reading: its bytes are unknown, not 0.
         storages = entry.get("distributionPerStorageBackend")
-        for storage in storages.values() if isinstance(storages, dict) else ():
-            if isinstance(storage, dict) and storage.get("success") is not False:
-                blocks.extend(storage.get("blocks") or [])
+        if not isinstance(storages, dict):
+            failed.add(pid)
+            continue
+        blocks: list[Any] = []
+        for storage in storages.values():
+            raw = storage.get("blocks") if isinstance(storage, dict) else None
+            if not isinstance(storage, dict) or storage.get("success") is False:
+                failed.add(pid)
+                break
+            if not isinstance(raw, list):
+                failed.add(pid)
+                break
+            blocks.extend(raw)
+        if pid in failed:
+            continue
         blocks_of[pid] = blocks
     covered = {pid: covered_bytes(blocks, size) for pid, blocks in blocks_of.items()}
     return DistView(size, covered, frozenset(failed), size_field)

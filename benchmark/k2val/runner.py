@@ -33,7 +33,7 @@ from benchmark.k2val.oracles import ORACLES, K2Context, k2_violations, settled
 from benchmark.k2val.recording import CallRecord, RecordingApp
 from benchmark.k2val.scenarios import SYSTEM_PROMPT_TEMPLATE, Scenario
 from benchmark.k2val.secrets import redact, say
-from benchmark.k2val.snapshot import Snapshot, take_snapshot
+from benchmark.k2val.snapshot import Snapshot, UnusableSnapshot, require_usable, take_snapshot
 from benchmark.k2val.spend import SpendTracker
 
 TOOL_RESULT_CAP = 8 * 1024
@@ -269,13 +269,12 @@ async def run_trial(
             if dispatch
             else (),
             "snapshot_at_answer": at_answer.to_json(),
-            "fixture_baseline": fixture.baseline_tree,
+            "fixture_baseline": fixture.baseline(),
             "calls": tuple(r.to_json() for r in records),
             "directory": directory,
         }
         writer_record = fixture.writer.record() if fixture.writer else None
         common["writer"] = writer_record
-        common["files_baseline"] = fixture.files_baseline
         flags: list[str] = []
         if writer_record and writer_record.get("error"):
             flags.append("writer_error")
@@ -318,10 +317,25 @@ async def run_trial(
                 for name in fixture.files
             },
             baseline_tree=fixture.baseline_tree,
+            baseline_files=dict(fixture.files_baseline),
         )
+        common["snapshot_after_settle"] = after_settle.to_json()
         trace = AgentTrace(final_answer=final_answer, tool_calls=common["tool_calls"])
         try:
+            # One usability rule for every scenario (snapshot.py): nothing is judged on a reading
+            # that failed, whatever the oracle would make of it.
+            require_usable(at_answer, "at the answer")
+            require_usable(after_settle, "after the settle")
             result = ORACLES[scenario.id](ctx, trace)
+        except UnusableSnapshot as e:
+            return persist(
+                artefact(
+                    "ORACLE_ERROR",
+                    error=f"unusable federation reading: {e}",
+                    flags=tuple(dict.fromkeys([*flags, "snapshot_error"])),
+                    **common,
+                )
+            )
         except Exception as e:  # noqa: BLE001 - recorded, so the sweep goes on
             return persist(
                 artefact(
@@ -331,7 +345,6 @@ async def run_trial(
                     **common,
                 )
             )
-        common["snapshot_after_settle"] = after_settle.to_json()
         common["writer"] = writer_record
         return persist(
             artefact(

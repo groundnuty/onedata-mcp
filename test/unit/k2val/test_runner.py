@@ -147,8 +147,9 @@ async def test_a_full_trial_v2_passes_end_to_end(cfg, api, fed, clock, tmp_path,
     assert art.directory == f"/k2val-glm/{trial_dir_name(make_trial_id(RUN_ID, 'glm', 'V2', 0))}"
     assert re.fullmatch(r"/k2val-glm/logs-[a-p]{12}", art.directory)  # opaque: no scenario id
     # the start state, as the local provider reported it before the agent began
-    assert art.files_baseline["log_20200105.dat"]["local_bytes"] == 0
-    assert art.files_baseline["log_20200105.dat"]["qos_ids"] == []
+    assert art.fixture_baseline["files"]["log_20200105.dat"]["local_bytes"] == 0
+    assert art.fixture_baseline["files"]["log_20200105.dat"]["qos_ids"] == []
+    assert art.fixture_baseline["tree"] is None
     # the brief names the directory and the file, never a tool
     brief = deps.adapters["glm"].briefs[0]
     assert art.directory in brief and "log_20200105.dat" in brief

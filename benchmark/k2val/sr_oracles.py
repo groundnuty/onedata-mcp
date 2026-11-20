@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Literal
 
 from benchmark._runtime_types import AgentTrace, OracleResult
 from benchmark.k2val.scenarios import SR_ELSEWHERE, SR_FILE
+from benchmark.k2val.snapshot import UnusableSnapshot, require_usable
 
 if TYPE_CHECKING:
     from benchmark.k2val.oracles import K2Context
@@ -212,20 +213,13 @@ def _result(mcp: bool, fed: bool | None, parts: list[str]) -> OracleResult:
     return OracleResult(mcp_pass=mcp, federation_pass=fed, diagnosis="; ".join(parts))
 
 
-def _unusable(ctx: K2Context) -> list[str] | None:
-    """Both snapshots must be readable and must hold the scenario's file."""
-    errors: list[str] = []
+def _unusable(ctx: K2Context) -> None:
+    """Both snapshots must be usable and hold the scenario's file, else UnusableSnapshot (the
+    runner records ORACLE_ERROR; snapshot.py's one rule)."""
     for label, snap in (("at the answer", ctx.at_answer), ("after the settle", ctx.after_settle)):
-        if snap is None:
-            errors.append(f"no snapshot {label}")
-        elif SR_FILE not in snap.files:
-            errors.append(f"{SR_FILE} missing from the snapshot {label}")
-        else:
-            errors.extend(f"{label}: {e}" for e in snap.errors())
-    if not errors:
-        return None
-    ctx.flags.append("snapshot_error")
-    return ["no usable snapshot: " + "; ".join(dict.fromkeys(errors))]
+        require_usable(snap, label)
+        if SR_FILE not in snap.files:
+            raise UnusableSnapshot(f"{SR_FILE} missing from the snapshot {label}")
 
 
 def _state(snap: Snapshot | None) -> FileState:
@@ -262,8 +256,7 @@ def verify_sr1(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     federation passes when, after the settle, the local block map covers the file and the file
     has no QoS requirement.
     """
-    if problem := _unusable(ctx):
-        return _result(False, None, problem)
+    _unusable(ctx)
     label = read_copy_answer(trace.final_answer)
     at, after = _state(ctx.at_answer), _state(ctx.after_settle)
     rules = _succeeded(ctx, ADD_RULE)
@@ -350,8 +343,7 @@ def verify_sr1n(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     federation passes when, after waiting out the whole settle window ("quiet"), the local copy
     still holds 0 bytes, the file has no requirement and the owner still covers it.
     """
-    if problem := _unusable(ctx):
-        return _result(False, None, problem)
+    _unusable(ctx)
     label = read_refusal(trace.final_answer)
     return _nothing_should_change(
         ctx,
@@ -374,8 +366,7 @@ def verify_sr1o(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     SR1n: no successful schedule or rule, 0 local bytes, no requirement). "No, so I copied it"
     fails. federation passes as in SR1n.
     """
-    if problem := _unusable(ctx):
-        return _result(False, None, problem)
+    _unusable(ctx)
     label = read_copied_question(trace.final_answer, ctx.local_name)
     return _nothing_should_change(
         ctx,

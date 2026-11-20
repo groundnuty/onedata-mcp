@@ -91,6 +91,73 @@ async def test_an_unreadable_block_map_is_a_snapshot_error_not_zero_bytes(
     assert state.local_bytes == 0 and not state.local_covered  # never judged on these
 
 
+def _entry(size: int, storages: object) -> dict:
+    return {"success": True, "virtualSize": size, "distributionPerStorageBackend": storages}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("local_storages", "what"),
+    [
+        ({"st": {"success": False, "error": {}}}, "failed for its own entry"),  # a storage failed
+        (None, "failed for its own entry"),  # no storage map
+        ({"st": {"success": True}}, "failed for its own entry"),  # blocks not a list
+    ],
+)
+async def test_a_failed_storage_of_a_provider_is_a_snapshot_error_not_zero_bytes(
+    api: FedApi,
+    fed: FakeFed,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+    local_storages: object,
+    what: str,
+) -> None:
+    built = await builder(api, clock).build(SCENARIOS["V2"].fixture, "logs-s")
+    body = {
+        "distributionPerProvider": {
+            OWNER_ID: _entry(FILE_SIZE, {"so": {"success": True, "blocks": [[0, FILE_SIZE]]}}),
+            LOCAL_ID: _entry(FILE_SIZE, local_storages),
+        }
+    }
+    monkeypatch.setattr(fed, "_distribution", lambda provider, fid: httpx.Response(200, json=body))
+
+    snap = await take_snapshot(api, built, clock)
+
+    (state,) = snap.files.values()
+    assert state.error and what in state.error and "local" in state.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [0, FILE_SIZE - 1])
+async def test_a_size_other_than_the_one_written_is_a_snapshot_error(
+    api: FedApi, fed: FakeFed, clock: FakeClock, monkeypatch: pytest.MonkeyPatch, size: int
+) -> None:
+    """A provider that answers size 0 with no blocks must not read as "covered" (0 >= 0)."""
+    built = await builder(api, clock).build(SCENARIOS["V2"].fixture, "logs-z")
+    body = {
+        "distributionPerProvider": {
+            OWNER_ID: _entry(size, {"so": {"success": True, "blocks": []}}),
+            LOCAL_ID: _entry(size, {"sl": {"success": True, "blocks": []}}),
+        }
+    }
+    monkeypatch.setattr(fed, "_distribution", lambda provider, fid: httpx.Response(200, json=body))
+
+    snap = await take_snapshot(api, built, clock)
+
+    (state,) = snap.files.values()
+    assert state.error and f"size {size}, not the {FILE_SIZE} written" in state.error
+    assert not state.local_covered
+
+
+def test_a_zero_size_covers_nothing() -> None:
+    from benchmark.k2val.federation import parse_dist
+
+    view = parse_dist(
+        {"distributionPerProvider": {LOCAL_ID: _entry(0, {"s": {"success": True, "blocks": []}})}}
+    )
+    assert view.size_known and not view.covers(LOCAL_ID)
+
+
 # --- the baseline ------------------------------------------------------------------------------
 
 
@@ -110,7 +177,7 @@ async def test_the_start_state_of_each_file_is_waited_for_and_recorded(
 ) -> None:
     built = await builder(api, clock).build(SCENARIOS[scenario].fixture, "logs-d")
 
-    ((name, baseline),) = built.files_baseline.items()
+    ((name, baseline),) = built.baseline()["files"].items()
     assert baseline["kind"] == kind
     assert baseline["size"] == FILE_SIZE and baseline["size_known"] is True
     assert baseline["local_bytes"] == local_bytes
@@ -147,7 +214,7 @@ async def test_a_summary_that_is_not_readable_yet_is_waited_out(
 
     built = await builder(api, clock).build(SCENARIOS["V2"].fixture, "logs-f")
 
-    assert built.files_baseline["log_20200105.dat"]["qos_ids"] == []
+    assert built.baseline()["files"]["log_20200105.dat"]["qos_ids"] == []
     assert misses == [0]
 
 

@@ -52,14 +52,13 @@ class K2TrialArtefact(TrialArtefact):
     k2_violations: tuple[dict, ...] = ()
     snapshot_at_answer: dict | None = None
     snapshot_after_settle: dict | None = None
-    # The file-tool scenarios: the trial directory's tree before the agent started.
+    # The start state, as the local provider reported it before the agent started:
+    # {"files": {name: reading}, "tree": the trial directory's tree or None} (BuiltFixture.baseline)
     fixture_baseline: dict | None = None
     writer: dict | None = None
     calls: tuple[dict, ...] = ()
     fixture_error: str | None = None
     teardown_problems: tuple[str, ...] = ()
-    # Each file as the local provider reported it before the agent started (blocks, size, QoS).
-    files_baseline: dict | None = None
     # Filled in by hand after the run: harness bug / deployment artefact / model failure.
     classification: str = ""
 

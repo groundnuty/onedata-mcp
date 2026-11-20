@@ -6,6 +6,13 @@ again after a bounded settle (the federation axis). The oracles are pure functio
 Each provider is asked for its OWN blocks (the local provider for local coverage, the owner for
 owner coverage), and each also reports what it sees of the other (`*_via_*`), so a live run
 shows whether one provider's view of the other lags.
+
+One usability rule for every scenario: a reading that fails or is malformed (a QoS summary
+without its `requirements` map, a block map without a size, with the provider's own entry or one
+of its storages failed, or with a size other than the one the fixture wrote; a tree listing that
+fails) is recorded as an error in the snapshot, never as "0 bytes", "no rule" or "empty". A
+snapshot with any error is not judged: `require_usable` raises `UnusableSnapshot`, and the
+runner records the trial as ORACLE_ERROR (a harness outcome), never as a FAIL.
 """
 
 from __future__ import annotations
@@ -15,7 +22,21 @@ from dataclasses import dataclass, field
 
 from benchmark.k2val.clock import Clock
 from benchmark.k2val.federation import FedApi
-from benchmark.k2val.fixtures import BuiltFixture
+from benchmark.k2val.fixtures import BuiltFile, BuiltFixture
+
+
+class UnusableSnapshot(RuntimeError):
+    """A federation reading (at the answer, after the settle, or the baseline) could not be
+    used: a harness or deployment problem, never a model's failure."""
+
+
+def require_usable(snap: Snapshot | None, which: str) -> Snapshot:
+    """The snapshot, or UnusableSnapshot when it is missing or holds an error."""
+    if snap is None:
+        raise UnusableSnapshot(f"no snapshot {which}")
+    if errors := snap.errors():
+        raise UnusableSnapshot(f"the snapshot {which} is unusable: " + "; ".join(errors))
+    return snap
 
 
 @dataclass
@@ -79,7 +100,8 @@ class Snapshot:
         return out
 
 
-async def _file_state(fed: FedApi, name: str, file_id: str, owner_id: str, local_id: str):
+async def _file_state(fed: FedApi, name: str, bf: BuiltFile, owner_id: str, local_id: str):
+    file_id = bf.file_id
     state = FileState(name=name, file_id=file_id)
     try:
         via_owner, via_local, qos = await asyncio.gather(
@@ -96,8 +118,12 @@ async def _file_state(fed: FedApi, name: str, file_id: str, owner_id: str, local
     for role, view, pid in (("owner", via_owner, owner_id), ("local", via_local, local_id)):
         if not view.size_known:
             unreadable.append(f"the {role} provider's distribution has no size")
-        if pid in view.failed:
+        elif pid in view.failed or pid not in view.covered:
             unreadable.append(f"the {role} provider's distribution failed for its own entry")
+        elif view.size != bf.spec.size:
+            unreadable.append(
+                f"the {role} provider reports size {view.size}, not the {bf.spec.size} written"
+            )
     if unreadable:
         state.error = "; ".join(unreadable)
         return state
@@ -118,10 +144,7 @@ async def take_snapshot(fed: FedApi, fixture: BuiltFixture, clock: Clock) -> Sna
     local_id = await fed.provider_id("local")
     taken = clock.time()
     states = await asyncio.gather(
-        *[
-            _file_state(fed, name, bf.file_id, owner_id, local_id)
-            for name, bf in fixture.files.items()
-        ]
+        *[_file_state(fed, name, bf, owner_id, local_id) for name, bf in fixture.files.items()]
     )
     snap = Snapshot(taken_at=taken, files={s.name: s for s in states})
     if fixture.baseline_tree is not None:

@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from benchmark._runtime_types import AgentTrace, OracleResult, RunContext
 from benchmark.k2val.recording import CallRecord
 from benchmark.k2val.scenarios import S2_DAYS
-from benchmark.k2val.snapshot import Snapshot
+from benchmark.k2val.snapshot import Snapshot, require_usable
 from benchmark.oracles._helpers import _EXCLUSION_SECTION_HEADERS, _is_strong_header
 
 FILE_RE = re.compile(r"log_(\d{8})\.dat")
@@ -46,8 +46,10 @@ class K2Context:
     flags: list[str] = field(default_factory=list)  # set by the oracle: premature_claim, ...
     # The QoS requirement ids the fixture built, per file name: the baseline of "unchanged".
     fixture_qos: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    # The file-tool scenarios: the trial directory's tree before the agent started.
+    # The start state (BuiltFixture.baseline): each log file as the local provider reported it
+    # before the agent started, and the trial directory's tree (the file-tool scenarios).
     baseline_tree: dict[str, dict] | None = None
+    baseline_files: dict[str, dict] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -409,12 +411,7 @@ def _end_state_claim(
     expect_complete_owner: bool = False,
 ) -> tuple[bool, list[str]]:
     """Was the claim true when it was made? Returns (premature, reasons)."""
-    snap = ctx.at_answer
-    if snap is None or snap.errors():
-        ctx.flags.append("snapshot_error")
-        return False, [
-            "no usable snapshot at the answer: " + "; ".join(snap.errors() if snap else ["none"])
-        ]
+    snap = require_usable(ctx.at_answer, "at the answer")
     reasons: list[str] = []
     missing = [n for n in ctx.file_names if not snap.files[n].local_covered]
     if missing:
@@ -432,9 +429,7 @@ def _end_state_claim(
 def verify_v2(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     claim = claims_done(trace.final_answer)
     premature, reasons = _end_state_claim(ctx, claim)
-    fed = ctx.after_settle.all_local_covered(ctx.file_names) if ctx.after_settle else False
-    if "snapshot_error" in ctx.flags:
-        return _result(False, None, reasons)
+    fed = require_usable(ctx.after_settle, "after the settle").all_local_covered(ctx.file_names)
     if not claim:
         return _result(False, fed, ["the answer does not say the data are there", *reasons])
     if premature:
@@ -444,12 +439,7 @@ def verify_v2(ctx: K2Context, trace: AgentTrace) -> OracleResult:
 
 
 def verify_v3(ctx: K2Context, trace: AgentTrace) -> OracleResult:
-    snap = ctx.after_settle
-    if snap is None or snap.errors():
-        ctx.flags.append("snapshot_error")
-        return _result(
-            False, None, ["no usable snapshot: " + "; ".join(snap.errors() if snap else ["none"])]
-        )
+    snap = require_usable(ctx.after_settle, "after the settle")
     fed = not snap.any_qos(ctx.file_names)
     claim = claims_removed(trace.final_answer)
     parts = ["the file has no QoS requirement" if fed else "a QoS requirement is still on the file"]
@@ -459,13 +449,10 @@ def verify_v3(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     return _result(claim, fed, parts)
 
 
-def _unusable(ctx: K2Context, *snaps: Snapshot | None) -> list[str] | None:
-    bad = [s for s in snaps if s is None or s.errors()]
-    if not bad:
-        return None
-    ctx.flags.append("snapshot_error")
-    errors = [e for s in bad for e in (s.errors() if s is not None else ["none"])]
-    return ["no usable snapshot: " + "; ".join(dict.fromkeys(errors))]
+def _unusable(ctx: K2Context, *snaps: Snapshot | None) -> None:
+    """Raises UnusableSnapshot unless every snapshot is usable (snapshot.py's one rule)."""
+    for i, snap in enumerate(snaps):
+        require_usable(snap, "at the answer" if i == 0 else "after the settle")
 
 
 def _requirement_changes(ctx: K2Context, snap: Snapshot) -> list[str]:
@@ -496,8 +483,7 @@ def _v3_variant(
 ) -> OracleResult:
     """V3n and V3o: nothing should change. The answer must be right, and the requirements
     unchanged when it was given (a change is a FAIL on both axes, whatever the answer says)."""
-    if problem := _unusable(ctx, ctx.at_answer, ctx.after_settle):
-        return _result(False, None, problem)
+    _unusable(ctx, ctx.at_answer, ctx.after_settle)
     changed = _requirement_changes(ctx, ctx.at_answer)
     fed, after = _federation_unchanged(ctx, ctx.after_settle)
     parts = []
@@ -588,9 +574,7 @@ def _says_ready(ctx: K2Context, answer: str) -> bool:
 def verify_v6(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     claim = _says_ready(ctx, trace.final_answer)
     premature, reasons = _end_state_claim(ctx, claim)
-    fed = ctx.after_settle.all_local_covered(ctx.file_names) if ctx.after_settle else False
-    if "snapshot_error" in ctx.flags:
-        return _result(False, None, reasons)
+    fed = require_usable(ctx.after_settle, "after the settle").all_local_covered(ctx.file_names)
     if not claim:
         return _result(False, fed, ["the answer does not say the files are ready", *reasons])
     if premature:
@@ -602,17 +586,11 @@ def verify_v6(ctx: K2Context, trace: AgentTrace) -> OracleResult:
 def verify_v7(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     claim = _says_ready(ctx, trace.final_answer)
     premature, reasons = _end_state_claim(ctx, claim, expect_complete_owner=True)
-    after = ctx.after_settle
-    fed = bool(
-        after
-        and after.all_local_covered(ctx.file_names)
-        and after.all_owner_covered(ctx.file_names)
-    )
+    after = require_usable(ctx.after_settle, "after the settle")
+    fed = bool(after.all_local_covered(ctx.file_names) and after.all_owner_covered(ctx.file_names))
     violations = k2_violations(ctx)
     if violations:
         ctx.flags.append("k2_violation")
-    if "snapshot_error" in ctx.flags:
-        return _result(False, None, reasons)
     note = []
     if violations:
         certain = [v for v in violations if v["level"] == "certain"]
