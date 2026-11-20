@@ -95,9 +95,25 @@ def serve(argv: list[str]) -> int:
     from onedata_mcp.main import main as server_main
     from onedata_mcp.main import mcp
 
+    # The surface the model will see must be the scenario's set exactly: a server that would
+    # expose another tool (or miss one) refuses to start, and the trial is a harness error.
+    wanted = {t for t in a.tools.split(",") if t}
+    exposed = {t.name for t in asyncio.run(mcp.list_tools())}
+    if problem := surface_mismatch(wanted, exposed):
+        print(f"mcp_http: {problem}", file=sys.stderr)
+        return 3
     mcp.add_middleware(make_recording_middleware(Path(a.record)))
     server_main()
     return 0
+
+
+def surface_mismatch(wanted: set[str], exposed: set[str]) -> str | None:
+    problems = []
+    if missing := sorted(wanted - exposed):
+        problems.append(f"the server does not expose {missing}")
+    if extra := sorted(exposed - wanted):
+        problems.append(f"the server would also expose {extra}")
+    return "; ".join(problems) or None
 
 
 class McpHttpError(RuntimeError):

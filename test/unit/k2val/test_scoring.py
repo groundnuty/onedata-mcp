@@ -411,3 +411,25 @@ def test_an_old_artefact_without_a_context_cannot_be_rescored() -> None:
     assert context_from_artefact({"scenario_id": "V2", "snapshot_at_answer": {}}) is None
     assert rescore_stored({"scenario_id": "V2"}) is None
     assert snapshot_from_json(None) is None
+
+
+# --- the constants scoring and the fixtures rely on, pinned against tools/list -------------------
+
+
+@pytest.mark.asyncio
+async def test_the_harness_constants_match_the_tool_surface(tools_app) -> None:
+    from benchmark.k2val.fixtures import PAGE_LIMIT_MAX
+    from benchmark.k2val.scoring import WRITE_TARGET_ARGS
+    from onedata_mcp.token_policy import WRITE_TOOL_NAMES
+
+    tools = {t.name: t.parameters for t in await tools_app.list_tools()}
+    limit = tools["list_children"]["properties"]["limit"]
+    assert limit["maximum"] == PAGE_LIMIT_MAX  # LCp's names lie beyond the largest page
+    assert set(WRITE_TARGET_ARGS) <= WRITE_TOOL_NAMES
+    for tool, args in WRITE_TARGET_ARGS.items():
+        assert set(args) <= set(tools[tool]["properties"]), tool
+    # every write tool with a path or file argument is checked for writes outside the trial
+    for tool in WRITE_TOOL_NAMES & set(tools):
+        names = set(tools[tool]["properties"])
+        if names & {"path", "file_id_or_path", "src_path", "dst_path"}:
+            assert tool in WRITE_TARGET_ARGS, tool

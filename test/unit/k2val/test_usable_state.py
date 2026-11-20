@@ -282,3 +282,46 @@ def test_the_trial_directory_does_not_name_the_scenario(sid: str) -> None:
 def test_variants_of_one_trial_get_different_directories() -> None:
     names = {trial_dir_name(make_trial_id("r1", "glm", sid, 0)) for sid in ("V3", "V3n", "V3o")}
     assert len(names) == 3
+
+
+# --- V3n starts from a confirmed summary with no rule at all (the review's fourth blocker) -----
+
+
+@pytest.mark.asyncio
+async def test_v3n_with_an_inherited_rule_never_dispatches_and_the_rule_survives(
+    cfg, api: FedApi, fed: FakeFed, clock: FakeClock, tmp_path
+) -> None:
+    from benchmark.k2val.runner import run_trial
+    from test.unit.k2val.test_runner import make_deps
+
+    inherited = root_rule(fed)
+    dispatched = []
+
+    def script_for(conf, on_cost):
+        async def script(app, brief):
+            dispatched.append(brief)
+            return "There is no placement rule."
+
+        return script
+
+    deps = make_deps(cfg, api, clock, tmp_path, script_for)
+    assert cfg.models["glm"].space == SPACE  # the space whose root carries the rule
+    art = await run_trial(deps, cfg.models["glm"], SCENARIOS["V3n"], 0)
+
+    assert art.outcome == "RESET_FAIL" and "QoS requirements []" in art.error
+    assert dispatched == []  # the model never saw a V3n with a rule on it
+    assert inherited in fed.rules  # neither the build nor its cleanup touched it
+
+
+def test_v3n_waits_for_an_empty_effective_summary() -> None:
+    from benchmark.k2val.fixtures import _baseline_holds
+
+    reading = {
+        "size_known": True,
+        "size": FILE_SIZE,
+        "local_bytes": FILE_SIZE,
+        "local_covered": True,
+        "qos_ids": ["q-inherited"],
+    }
+    assert not _baseline_holds("s0_local", reading, (), FILE_SIZE)
+    assert _baseline_holds("s0_local", {**reading, "qos_ids": []}, (), FILE_SIZE)

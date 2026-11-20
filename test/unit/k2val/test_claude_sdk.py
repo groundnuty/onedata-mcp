@@ -581,7 +581,7 @@ async def test_the_query_waits_until_the_server_is_connected_with_every_tool(cfg
         [mcp_server("pending")],
         [mcp_server("pending")],
         [mcp_server("connected", tools={"check_readiness"})],  # not all of them yet
-        [mcp_server("connected", tools=TOOLS | {"another_tool"})],
+        [mcp_server("connected", tools=TOOLS)],
     ]
     FakeClient.script = script_of(sdk_init(), assistant(TextBlock("x")), result())
 
@@ -591,7 +591,7 @@ async def test_the_query_waits_until_the_server_is_connected_with_every_tool(cfg
     assert client.status_calls == 4 and client.prompt == "BRIEF"
     assert out.error is None
     assert out.raw_trace["mcp_server"]["status"] == "connected"
-    assert out.raw_trace["extra_mcp_tools_exposed"] == ["another_tool"]  # noted, and denied
+    assert out.raw_trace["extra_mcp_tools_exposed"] == []  # an extra tool is fatal (below)
 
 
 @pytest.mark.asyncio
@@ -629,6 +629,36 @@ async def test_a_server_that_never_gets_ready_is_an_adapter_error(
     assert FakeClient.instances[0].prompt is None
     assert out.finish_reason == "adapter_error" and "not ready after" in out.error
     assert needle in out.error
+
+
+@pytest.mark.asyncio
+async def test_a_server_exposing_a_tool_beyond_the_scenarios_is_a_harness_fault(
+    cfg, fake_sdk
+) -> None:
+    """The scenario's surface exactly: an extra tool (one that could answer the task without
+    the tool under promotion) stops the trial before the model starts."""
+    cfg, conf = sdk_cfg(cfg)
+
+    class Extra(FakeClient):
+        async def get_mcp_status(self) -> dict:
+            self.status_calls += 1
+            return {"mcpServers": [mcp_server("connected", {*self.offered(), "list_children"})]}
+
+    claude_sdk.ClaudeSDKClient = Extra  # undone by the fixture's monkeypatch
+    FakeClient.script = script_of(sdk_init(), result())
+
+    out, _ = await dispatch(cfg, conf)
+
+    assert out.finish_reason == "adapter_error"
+    assert "exposes ['list_children'] beyond the scenario's tools" in out.error
+
+
+def test_the_http_server_refuses_a_surface_that_is_not_the_scenarios() -> None:
+    from benchmark.k2val.mcp_http import surface_mismatch
+
+    assert surface_mismatch({"a", "b"}, {"a", "b"}) is None
+    assert "also expose ['c']" in surface_mismatch({"a"}, {"a", "c"})
+    assert "does not expose ['b']" in surface_mismatch({"a", "b"}, {"a"})
 
 
 @pytest.mark.asyncio

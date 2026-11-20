@@ -310,7 +310,7 @@ def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | N
     problems = [
         r
         for r in rows
-        if r["outcome"] in ("RESET_FAIL", "ADAPTER_ERROR", "ORACLE_ERROR")
+        if r["outcome"] in ("RESET_FAIL", "ADAPTER_ERROR", "ORACLE_ERROR", "HARNESS_ERROR")
         or r.get("teardown_problems")
         or "writer_error" in (r.get("flags") or [])
     ]

@@ -33,6 +33,13 @@ concurrency_per_model = 2            # at most 2 trials at once per model (2 is 
 artefact_root = "artefacts/k2val"    # gitignored
 research_dir = "research"            # where research/k2val-<run_id>.md is written
 
+[judge]                              # the second reader of every final answer (design/08):
+model = "claude-sonnet-5-5"          # Claude Code on the subscription (claude-agent-sdk), no
+effort = "medium"                    # tools, no MCP server; a disagreement is NEEDS_REVIEW
+# binary = "claude"                  # default: `claude` on PATH, else the SDK's own copy
+# timeout_s = 180
+# concurrency = 2                    # judge calls at once, across every config of a run
+
 [spend]                              # applies to the "anthropic" backend (an API key, billed per
 cap_usd = 50.0                       # token) only. The Claude configs below use "claude_sdk"
 reserve_usd = 0.50                   # (the subscription), so nothing here is spent by them

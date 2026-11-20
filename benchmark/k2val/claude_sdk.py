@@ -356,6 +356,13 @@ class _Session:
                     )
                     return
                 missing = sorted(allowed_tools - names)
+                extra = sorted(names - allowed_tools)
+                if state == "connected" and extra:
+                    self.fatal = (
+                        f"the {MCP_SERVER_NAME!r} MCP server exposes {extra} beyond the "
+                        "scenario's tools: the model would see a surface it must not"
+                    )
+                    return
                 if state == "connected" and not missing:
                     return
                 seen = f"status {state!r}" + (f", tools missing {missing}" if missing else "")
