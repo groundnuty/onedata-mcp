@@ -88,7 +88,7 @@ ONEDATA_MCP_MATURITY=stable uv run onedata-mcp
   - `set_file_xattrs`: merge extended attributes (hidden under a read-only token);
   - `get_file_id`: resolve a path to a file id (not needed: every tool that takes a path resolves it itself);
   - `grep_file_content`: return the lines of a file that contain a literal, case-sensitive substring (not a regex);
-  - `list_marketplace_spaces`: list spaces advertised in the marketplace, including spaces the user does not belong to, which no other tool can act on;
+  - `list_marketplace_spaces`: list spaces advertised in the marketplace (it finds spaces no other tool can act on);
   - `list_user_harvesters`: list the user's harvesters and their indices;
   - `get_harvester_index_schema`: read a harvester index and its schema;
   - `query_harvester_index`: query a harvester index, with the query given as an object or as a JSON string (the three harvester tools need a harvester, which the test federation does not have);
