@@ -51,21 +51,30 @@ DEFAULT_ATTRIBUTES_DOC = (
 )
 
 
+# The longest JSON text read as a list of names: 64 names of 128 characters, quoted and
+# separated. Anything longer is refused before it is decoded.
+MAX_ATTRIBUTES_TEXT = MAX_ATTRIBUTES * 132
+
+
 def _attribute_list(value: Any) -> Any:
     """Read a list sent as its JSON text (`'["size", "mtime"]'`, seen from Qwen3-Coder) as that
-    list. Any other string is refused, with what to send instead. Everything else goes on to
-    pydantic's own list check, so the published schema stays a list of strings."""
+    list. Any other string is refused, with what to send instead: one longer than
+    MAX_ATTRIBUTES_TEXT before it is decoded, and one nested too deeply to decode. Everything
+    else goes on to pydantic's own list check, so the published schema stays a list of
+    strings."""
     if not isinstance(value, str):
         return value
-    try:
-        parsed = json.loads(value)
-    except ValueError:
-        parsed = None
+    parsed = None
+    if len(value) <= MAX_ATTRIBUTES_TEXT:
+        try:
+            parsed = json.loads(value)
+        except (ValueError, RecursionError):
+            parsed = None
     if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
         return parsed
     raise ValueError(
         'attributes must be a list of attribute names, for example ["size", "mtime"]; '
-        f"got the string {value[:80]!r}"
+        f"got the string {value[:80]!r}" + ("..." if len(value) > 80 else "")
     )
 
 

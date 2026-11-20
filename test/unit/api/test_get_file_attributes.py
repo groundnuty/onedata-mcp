@@ -333,6 +333,40 @@ async def test_a_string_that_is_not_a_json_list_of_names_is_refused_with_what_to
 
 
 @pytest.mark.asyncio
+async def test_a_long_text_is_refused_before_it_is_decoded(
+    mcp: FastMCP, httpx_mock: HTTPXMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_decoding(text):
+        raise AssertionError("decoded a text longer than the bound")
+
+    monkeypatch.setattr(files_module.json, "loads", no_decoding)
+    text = "[" * (files_module.MAX_ATTRIBUTES_TEXT + 1)
+
+    is_error, answer = await call(mcp, {"file_id_or_path": FID, "attributes": text})
+
+    assert is_error is True and "attributes must be a list of attribute names" in answer
+    assert attrs_requests(httpx_mock) == []
+
+
+@pytest.mark.asyncio
+async def test_a_text_nested_too_deeply_to_decode_gets_the_same_hint(
+    mcp: FastMCP, httpx_mock: HTTPXMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bound keeps the nesting below the decoder's limit here; another interpreter's limit
+    may be lower, so a RecursionError is read as a bad value too."""
+
+    def too_deep(text):
+        raise RecursionError("maximum recursion depth exceeded while decoding a JSON array")
+
+    monkeypatch.setattr(files_module.json, "loads", too_deep)
+
+    is_error, answer = await call(mcp, {"file_id_or_path": FID, "attributes": "[[[[]]]]"})
+
+    assert is_error is True and "attributes must be a list of attribute names" in answer
+    assert "RecursionError" not in answer and attrs_requests(httpx_mock) == []
+
+
+@pytest.mark.asyncio
 async def test_more_than_64_names_are_refused(mcp: FastMCP, httpx_mock: HTTPXMock) -> None:
     names = [f"xattr.k{i}" for i in range(65)]
 
