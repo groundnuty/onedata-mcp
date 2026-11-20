@@ -79,6 +79,14 @@ GET_FILE_ATTRIBUTES_DOC = (
     "Returns an object that maps each requested attribute name to its value. Without "
     f"`attributes`, it returns {DEFAULT_ATTRIBUTES_DOC}."
 )
+LIST_CHILDREN_DOC = (
+    "List the entries of a directory (its files and subdirectories), given by path or file "
+    "id.\n\n"
+    "Returns one page: `children`, the requested attributes of each entry; `isLast`, true "
+    "when no entries follow; and `nextPageToken`. Without `attributes`, each entry has its "
+    f"{DEFAULT_ATTRIBUTES_DOC}. When `isLast` is false, call again with `token` set to "
+    "`nextPageToken` to get the next page."
+)
 
 
 def _is_probable_file_id(value: str) -> bool:
@@ -188,39 +196,38 @@ def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
         file_id_or_path = await _resolve_with_mcp_root(file_id_or_path, ctx)
         return await get_file_attributes(file_id_or_path, attributes=attributes)
 
-    @mcp.tool(name="list_children", annotations=ToolAnnotations(readOnlyHint=True))
+    @mcp.tool(
+        name="list_children",
+        description=LIST_CHILDREN_DOC,
+        annotations=ToolAnnotations(readOnlyHint=True),
+    )
     async def mcp_list_children(
         parent_id_or_path: str = Field(
-            description="File id or path to the parent file in format /<space_name>/<path_to_file>"
+            description=("Path of the directory, /<space_name>/<path_to_directory>, or its file id")
         ),
         *,
-        attributes: Optional[list[str]] = Field(
-            default=None,
-            description="""
-            (Optional) List of attribute names to request from Oneprovider. 
-            Use the same allowed values as in get_file_attributes.
-            """,
-        ),
+        attributes: AttributeNames = Field(default=None, description=ATTRIBUTE_NAMES_DOC),
         limit: int = Field(
             default=10,
             ge=1,
             le=100,
-            description="Maximum number of children",
+            description="Maximum number of entries in this page (1 to 100)",
         ),
         offset: int = Field(
             default=0,
-            description="Starting offset of the children",
+            ge=0,
+            le=500,
+            description=(
+                "Number of entries to skip from the start of the directory (0 to 500). Not "
+                "used with `token`."
+            ),
         ),
         token: Optional[str] = Field(
             default=None,
-            description="Token to continue listing from the next page of results",
+            description="The `nextPageToken` of the previous page, to get the next page",
         ),
         ctx: Optional[Context] = None,
     ) -> dict[str, Any]:
-        """
-        List children (files and directories) of a given file id or path.
-
-        """
         parent_id_or_path = await _resolve_with_mcp_root(parent_id_or_path, ctx)
         return await list_children(
             parent_id_or_path, attributes=attributes, limit=limit, offset=offset, token=token

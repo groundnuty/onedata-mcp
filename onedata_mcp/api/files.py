@@ -266,26 +266,47 @@ async def list_children(
     offset: int,
     token: str | None = None,
 ) -> dict[str, Any]:
+    """One page of a directory's entries, given by path or id.
+
+    `token` (a previous page's `nextPageToken`) and `offset` are exclusive: the swagger says
+    `offset` "cannot be provided alongside the `token` parameter", so with a token no offset is
+    sent, and a non-zero offset with a token is refused. A failure the caller can act on (not a
+    directory, nothing at the id or path, a rejected id, no access) is raised with what to do
+    about it, followed by Onedata's own message."""
     config = get_oneprovider_config()
-    parent_id = await _normalize_path_to_file_id(parent_id_or_path)
     requested_attributes = tuple[str, ...](attributes or DEFAULT_FILE_ATTRIBUTE_KEYS)
     _reject_deprecated_attributes(requested_attributes)
-    request_body: dict[str, Any] = {"limit": limit, "offset": offset}
+    if token is not None and offset:
+        raise ValueError(
+            "Pass token or offset, not both: token continues after the page it came with, "
+            "offset counts entries from the start of the directory."
+        )
+    request_body: dict[str, Any] = {"limit": limit, "attributes": list(requested_attributes)}
     if token is not None:
         request_body["token"] = token
-    if requested_attributes:
-        request_body["attributes"] = list(requested_attributes)
+    else:
+        request_body["offset"] = offset
 
     try:
+        parent_id = await _normalize_path_to_file_id(parent_id_or_path)
         response = await request(
             config,
             "GET",
-            f"/data/{parent_id}/children",
+            f"/data/{_id_in_path(parent_id, parent_id_or_path)}/children",
             json_body=request_body,
         )
     except OnedataApiError as e:
         await _raise_invalid_space_error_if_needed(e, parent_id_or_path)
-        raise
+        if e.errno == "enotdir":
+            hint = (
+                f"The {_target(parent_id_or_path)} is a regular file, not a directory: only a "
+                "directory has entries to list."
+            )
+        else:
+            hint = _file_error_hint(e, parent_id_or_path, "list")
+        if hint is None:
+            raise
+        raise _with_hint(hint, e) from e
     return _strip_deprecated_fields_in_list(response["body"], "children")
 
 
