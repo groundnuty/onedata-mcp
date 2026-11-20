@@ -392,11 +392,11 @@ async def test_with_a_node_list_a_url_and_a_pair_are_masked(
 
 
 @pytest.mark.asyncio
-async def test_without_a_node_list_a_url_is_masked_and_a_pair_and_an_unlisted_node_pass_untouched(
+async def test_without_a_node_list_a_url_and_a_host_name_are_masked_and_a_port_and_an_ip_pass(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
-    """No list: only a URL and a configured host are rewritten. A `host=` pair and a node name
-    that nothing declares reach the caller as Onedata wrote them."""
+    """No list: a URL and a bare host name are masked, a configured host is replaced. A `port=`
+    pair and an IP address, which name no host by themselves, reach the caller as written."""
     _set_env(monkeypatch)
     text = (
         f"Contacted https://{NODE_FQDN}:{NODE_PORT}/qos, host='{NODE_FQDN}', port={NODE_PORT}, "
@@ -407,13 +407,13 @@ async def test_without_a_node_list_a_url_is_masked_and_a_pair_and_an_unlisted_no
 
     assert answer == _expected_message(
         _qos_error(
-            f"Contacted <address>, host='{NODE_FQDN}', port={NODE_PORT}, hostname=other.example, "
-            f"<address> and the node {NODE_FQDN}:{NODE_PORT} at {NODE_IP}"
+            f"Contacted <address>, host='<address>', port={NODE_PORT}, hostname=<address>, "
+            f"<address> and the node <address> at {NODE_IP}"
         )
     )
-    for part in (NODE_FQDN, NODE_PORT, NODE_IP, "host='", "hostname=other.example"):
-        assert part in answer
-    assert "http://" not in answer and "https://" not in answer
+    for part in (NODE_FQDN, "other.example", "unlisted.example", "http://", "https://"):
+        assert part not in answer
+    assert f"port={NODE_PORT}" in answer and NODE_IP in answer
 
 
 @pytest.mark.asyncio
@@ -422,7 +422,8 @@ async def test_a_configured_host_never_reaches_the_caller_with_or_without_a_node
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, node_names: bool
 ) -> None:
     """The Onezone and the Oneprovider this server is configured with read as their declared
-    service names in every mode, whichever service the call was for; whole names only."""
+    service names in every mode, whichever service the call was for; whole names only. A longer
+    name that merely contains one is another host name, so it is masked, not renamed."""
     _set_env(monkeypatch)
     text = (
         "Provider provider.example:8443 and PROVIDER.EXAMPLE, zone onezone.example; not "
@@ -433,7 +434,7 @@ async def test_a_configured_host_never_reaches_the_caller_with_or_without_a_node
     assert answer == _expected_message(
         _qos_error(
             "Provider oneprovider and oneprovider, zone onezone; not "
-            "provider.example.other.test, myprovider.example or provider.examples"
+            "<address>, <address> or provider.examples"
         )
     )
 
@@ -530,22 +531,23 @@ async def test_an_unset_empty_or_blank_node_list_is_the_no_list_mode(
     text = f"see https://{NODE_FQDN}:{NODE_PORT}/x host={NODE_FQDN} port={NODE_PORT} {NODE_IP}"
     error = await _post_qos_error(httpx_mock, _qos_error(text))
 
-    # the URL is masked; a pair and an unlisted name pass
+    # the URL and the host name are masked; a port pair and an IP address pass
     assert str(error) == _expected_message(
-        _qos_error(f"see <address> host={NODE_FQDN} port={NODE_PORT} {NODE_IP}")
+        _qos_error(f"see <address> host=<address> port={NODE_PORT} {NODE_IP}")
     )
 
 
 @pytest.mark.asyncio
-async def test_a_dotted_file_name_and_unlisted_names_pass_untouched(
+async def test_a_dotted_file_name_a_version_and_an_ip_pass_untouched(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
     _set_env(monkeypatch)
     _set_node_names(monkeypatch)
     text = (
-        "No such file /space/notes.txt or data.v2.csv (e.g. a.b), at 12:30:45 on "
-        "2026-11-16T12:30:45Z, v1.2.3-beta, std::string, other-node.site.example and 192.0.2.7, "
-        f"{NODE_FQDN}0 and x{NODE_FQDN} and {NODE_IP}9 are not the listed nodes"
+        "No such file /space/notes.txt or data.v2.csv (e.g. a.b), archive.tar.gz, script.py, "
+        "README.md, /space/sub.dom.pl/x, at 12:30:45 on 2026-11-16T12:30:45Z, v1.2.3-beta, "
+        "std::string, 192.0.2.7, "
+        f"{NODE_FQDN}0 and {NODE_IP}9 are not host names"
     )
     error = await _post_qos_error(httpx_mock, _qos_error(text))
 
@@ -553,15 +555,34 @@ async def test_a_dotted_file_name_and_unlisted_names_pass_untouched(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("node_names", [False, True], ids=["unset", "listed"])
+async def test_an_unlisted_bare_host_name_is_masked_wherever_it_stands(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, node_names: bool
+) -> None:
+    text = (
+        "Cannot reach other-node.site.example, x" + NODE_FQDN + ":" + NODE_PORT + " or "
+        "peer.plgrid.pl. Mail ops@peer.example.com; at krakow.example.com."
+    )
+    _set_env(monkeypatch)
+    answer = await _redacted_answer(monkeypatch, httpx_mock, text, node_names=node_names)
+
+    assert answer == _expected_message(
+        _qos_error(
+            "Cannot reach <address>, <address> or <address>. Mail ops@<address>; at <address>."
+        )
+    )
+
+
+@pytest.mark.asyncio
 async def test_without_a_node_list_a_body_is_onedatas_text_byte_for_byte(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
-    """Compose: no list, and no URL or configured host in the text, so Onedata's own text is
-    byte-identical, unlisted names and addresses and `host=` words included."""
+    """Compose: no list, and no URL, host name or configured host in the text, so Onedata's own
+    text is byte-identical, addresses and `host=` words included."""
     _set_env(monkeypatch)
     plain = _qos_error(
-        f"Invalid near '==' for {NODE_FQDN}:{NODE_PORT} {NODE_IP} {NODE_IPV6} lab.data notes.txt "
-        f"hostname 'x.example' doesn't match 'y.example'; Host: h.example"
+        f"Invalid near '==' for {NODE_IP} {NODE_IPV6} lab.data notes.txt "
+        "hostname 'x' doesn't match 'y'; Host: h"
     )
     error = await _post_qos_error(httpx_mock, plain)
 
@@ -618,19 +639,19 @@ def test_a_pair_mask_stops_before_sentence_punctuation_and_closing_brackets() ->
     )
 
 
-def test_redact_endpoints_without_a_node_list_masks_only_a_url_and_a_configured_host(
+def test_redact_endpoints_without_a_node_list_masks_urls_and_host_names_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _set_env(monkeypatch)
     config = get_oneprovider_config_for("https://provider.example")
-    plain = f"host={NODE_FQDN} port={NODE_PORT} {NODE_IP} lab.data notes.txt"
-    text = f"https://{NODE_FQDN}:{NODE_PORT}/x {plain} and provider.example:8443"
+    plain = f"port={NODE_PORT} {NODE_IP} lab.data notes.txt"
+    text = f"https://{NODE_FQDN}:{NODE_PORT}/x {plain} and provider.example:8443 at {NODE_FQDN}"
 
     assert redact_endpoints(plain, config) == plain
-    assert redact_endpoints(text, config) == f"<address> {plain} and oneprovider"
+    assert redact_endpoints(text, config) == f"<address> {plain} and oneprovider at <address>"
     as_json = json.dumps({"d": text, "n": [plain]})
     assert redact_json_text(as_json, config) == json.dumps(
-        {"d": f"<address> {plain} and oneprovider", "n": [plain]}
+        {"d": f"<address> {plain} and oneprovider at <address>", "n": [plain]}
     )
     # a string that nothing touches stays byte for byte
     assert redact_json_text(json.dumps({"n": [plain]}), config) == json.dumps({"n": [plain]})
@@ -1102,3 +1123,182 @@ async def test_move_status_error_names_the_path_not_the_url(
     assert message == (
         "CDMI move failed: PUT /cdmi/myspace/new.txt (status=500) - http_500 (service: oneprovider)"
     )
+
+
+# ---------------------------------------------------------------------------
+# A peer's domain: the 25.0 error carries `ctx.serviceDomain`, the domain of the service that
+# answered, which is not necessarily a host this server is configured with.
+# ---------------------------------------------------------------------------
+
+PEER_DOMAIN = "dev-oneprovider-krakow.default.svc.cluster.local"
+PEER_SITE = "peer-lisbon.onedata.example.com"
+
+
+def _peer_error() -> dict:
+    """A 25.0 error body (swagger `Error`) from a peer provider, with the domain in its ctx,
+    another in `details`, and a bare host name in the description."""
+    return {
+        "error": {
+            "id": "posix",
+            "description": f"Operation failed with POSIX error: enoent (see {PEER_SITE}:8443).",
+            "details": {"errno": "enoent", "domain": PEER_SITE, "nested": {"Hostname": "n7"}},
+            "ctx": {
+                "timestamp": 1750762637248,
+                "serviceReleaseVersion": "25.0",
+                "serviceId": "a7ee2722915b8bf7fb064eb65087cc61ch9357",
+                "serviceDomain": PEER_DOMAIN,
+                "serviceBuildVersion": "231-g8d26f953c3",
+                "service": "opw",
+                "onedataErrorsRevision": "ca3af8cb",
+                "module": "metadata_req",
+                "line": 45,
+            },
+        }
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("node_names", [False, True], ids=["unset", "listed"])
+async def test_a_peer_providers_domain_in_an_error_never_reaches_the_caller(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, node_names: bool
+) -> None:
+    _set_env(monkeypatch)
+    if node_names:
+        _set_node_names(monkeypatch)
+    error = await _post_qos_error(httpx_mock, _peer_error())
+
+    text = str(error)
+    for leak in (PEER_DOMAIN, PEER_SITE, "cluster.local", "onedata.example.com", "n7"):
+        assert leak not in text, leak
+    # only the domain-bearing values changed: the rest of the error reads as Onedata wrote it
+    expected = _peer_error()
+    expected["error"]["ctx"]["serviceDomain"] = "a provider"
+    expected["error"]["details"]["domain"] = "a provider"
+    expected["error"]["details"]["nested"]["Hostname"] = "a provider"
+    expected["error"]["description"] = "Operation failed with POSIX error: enoent (see <address>)."
+    assert text == _expected_message(expected)
+    assert error.errno == "enoent" and error.error_id == "posix"
+    # the response kept on the error is the raw body: it is not what a model reads
+    assert error.response["body"]["error"]["ctx"]["serviceDomain"] == PEER_DOMAIN
+
+
+@pytest.mark.parametrize(
+    "key", ["serviceDomain", "domain", "domainName", "subdomain", "host", "hostname", "fqdn"]
+)
+@pytest.mark.parametrize("spelling", [str, str.lower, str.upper])
+def test_a_domain_bearing_field_reads_a_provider_whatever_it_holds(key: str, spelling) -> None:
+    config = get_oneprovider_config_for("https://provider.example")
+    body = {"error": {"id": "x", "ctx": {spelling(key): "anything at all"}, "keep": "provider2"}}
+
+    shown = redact_json_text(json.dumps(body, indent=2), config)
+
+    assert json.loads(shown) == {
+        "error": {"id": "x", "ctx": {spelling(key): "a provider"}, "keep": "provider2"}
+    }
+
+
+def test_a_domain_bearing_field_that_holds_no_string_and_a_value_named_like_one_are_kept() -> None:
+    config = get_oneprovider_config_for("https://provider.example")
+    body = {"domain": None, "host": 7, "k": "host", "list": ["domain", "host"], "d": 'a "host": b'}
+
+    assert redact_json_text(json.dumps(body), config) == json.dumps(body)
+
+
+# QoS expressions and attribute names are not host names and survive in every mode
+QOS_TEXTS = [
+    "providerId=abc & anyStorage",
+    "geo=PL",
+    "country=FR & type=ssd",
+    "geo=EU \\ providerId=p123",
+    "storage.type=ssd | cloud.region=eu",
+    "Invalid QoS expression near '==': use '=' instead (storageId=s1 | geo=PL & anyStorage).",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("node_names", [False, True], ids=["unset", "listed"])
+@pytest.mark.parametrize("expression", QOS_TEXTS)
+async def test_a_qos_expression_survives_the_redaction(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, node_names: bool, expression: str
+) -> None:
+    _set_env(monkeypatch)
+    body = _qos_error(f"Bad expression {expression}")
+    if node_names:
+        _set_node_names(monkeypatch)
+    error = await _post_qos_error(httpx_mock, body)
+
+    assert str(error) == _expected_message(body)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # a host name: generic, private-network and country TLDs; with a port; in an address
+        ("peer.example.com", "<address>"),
+        ("peer.example.com:8443.", "<address>."),
+        ("krakow.plgrid.pl", "<address>"),
+        ("a.b.c.internal", "<address>"),
+        ("peer.test and peer.example and peer.local", "<address> and <address> and <address>"),
+        ("user@peer.example.com", "user@<address>"),
+        ("(peer.example.com)", "(<address>)"),
+        ("Peer-1.Site.EXAMPLE", "<address>"),
+        # a file name, a version, a path component, an attribute name: not a host name
+        (
+            "notes.txt data.v2.csv archive.tar.gz report.pdf",
+            "notes.txt data.v2.csv archive.tar.gz report.pdf",
+        ),
+        ("script.py README.md run.sh data.in", "script.py README.md run.sh data.in"),
+        ("/space/dir.v2.pl/file.example.com", "/space/dir.v2.pl/file.example.com"),
+        (
+            "v1.2.3 25.0 1.2.3.4 10.0.0.1:8443 192.0.2.7",
+            "v1.2.3 25.0 1.2.3.4 10.0.0.1:8443 192.0.2.7",
+        ),
+        ("storage.type region.geo e.g. i.e.", "storage.type region.geo e.g. i.e."),
+        ("peer.example.com0 xpeer.examples", "peer.example.com0 xpeer.examples"),
+        # two labels ending in an ambiguous code stay; three or more are a host name
+        ("data.pl", "data.pl"),
+        ("krakow.data.pl", "<address>"),
+    ],
+)
+def test_a_bare_host_name_is_masked_and_a_file_name_a_version_or_an_attribute_is_not(
+    text: str, expected: str
+) -> None:
+    config = get_oneprovider_config_for("https://provider.example")
+
+    assert redact_endpoints(text, config) == expected
+    assert redact_endpoints(text, config) == redact_endpoints(
+        redact_endpoints(text, config), config
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_peer_providers_domain_does_not_reach_the_invalid_space_error(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """files.py echoes `details.spaceId` through the same redaction: a host-like id is masked."""
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/spaces",
+        json=[],
+        is_reusable=True,
+        is_optional=True,
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/data/dsadas/children",
+        status_code=400,
+        json={
+            "error": {
+                "id": "spaceNotSupportedBy",
+                "details": {"spaceId": PEER_SITE, "providerId": "p1"},
+                "ctx": {"serviceDomain": PEER_DOMAIN},
+            }
+        },
+    )
+
+    with pytest.raises(OnedataInvalidSpaceError) as excinfo:
+        await files.list_children("dsadas", limit=10, offset=0)
+
+    assert str(excinfo.value).startswith('Space "<address>" does not exist.')
+    assert PEER_SITE not in str(excinfo.value) and PEER_DOMAIN not in str(excinfo.value)

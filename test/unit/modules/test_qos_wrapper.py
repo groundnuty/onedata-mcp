@@ -20,6 +20,7 @@ from onedata_mcp.utils import MAX_ERROR_CHARS
 HOST = "provider.example"
 QOS_URL = f"https://{HOST}/api/v3/oneprovider/qos_requirements"
 QID = "c84f669f9522c46976fee490d80651f0"
+PEER_DOMAIN = "dev-oneprovider-krakow.default.svc.cluster.local"  # a peer, not a configured host
 # Where an id is found, without naming a tool (which may not be offered alongside).
 WHERE = "QoS requirement ids are the keys of `requirements` in its QoS summary"
 
@@ -183,10 +184,10 @@ async def test_the_complete_message_holds_no_host_or_url_and_no_long_id_in_full(
             "error": {
                 "id": "notFound",
                 "description": (
-                    f"No such requirement at {HOST}:8443; see https://{HOST}/api/v3/x or "
-                    "http://other.example/y. " + "z" * 5000
+                    f"No such requirement at {HOST}:8443 or peer-krakow.plgrid.pl; see "
+                    f"https://{HOST}/api/v3/x or http://other.example/y. " + "z" * 5000
                 ),
-                "ctx": {"serviceDomain": HOST},
+                "ctx": {"serviceDomain": PEER_DOMAIN},
             }
         },
     )
@@ -196,6 +197,7 @@ async def test_the_complete_message_holds_no_host_or_url_and_no_long_id_in_full(
     assert result.is_error is True
     assert text.startswith("Error calling tool 'remove_qos_requirement': No QoS requirement")
     assert HOST not in text and "other.example" not in text and "://" not in text
+    assert PEER_DOMAIN not in text and "plgrid.pl" not in text
     assert long_id not in text and "d" * 129 not in text
     assert len(text) <= MAX_ERROR_CHARS + len("Error calling tool 'remove_qos_requirement': ")
 

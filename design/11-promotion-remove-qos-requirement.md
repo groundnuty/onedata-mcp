@@ -63,7 +63,14 @@ A *structured* Onedata error is a JSON body whose `error.id` is `notFound` or wh
 | Success (2xx; 204 is documented) | Empty answer | Empty answer; the description says so (gate 2) |
 
 - Which statuses and error ids a 25.0 provider really answers is **unverified**: the swagger lists 400, 403, 404 and 500 with the generic body only. The unit tests use plausible shapes. The live test asserts that an unknown id fails with a 400 or 404 and that the hint fits the body, and prints the real answers.
-- **Host-free, bounded errors** (the change is in `onedata_mcp/utils.py`, so it applies to every tool). With or without `ONEDATA_MCP_NODE_NAMES`, no error text a model reads names a configured host or carries a URL: the Onezone and Oneprovider hosts are replaced by `onezone` and `oneprovider` (a node-list entry for the same host wins), and a URL is masked. `host=` and `port=` pairs are still masked only with a node list. The message is bounded to 2000 characters, cut after the redaction, and a path segment (an id) is echoed at no more than 128 characters. This fixes a leak; it does not change what a tool means (design/10). The tests that pinned "no list, so byte for byte" were rewritten to the new rule.
+- **Host-free, bounded errors** (the change is in `onedata_mcp/utils.py`, so it applies to every tool). With or without `ONEDATA_MCP_NODE_NAMES`, no error text a model reads names a host or carries a URL:
+  - the Onezone and Oneprovider hosts this server is configured with are replaced by `onezone` and `oneprovider` (a node-list entry for the same host wins);
+  - a URL is masked;
+  - the value of a domain-bearing field of the error (`serviceDomain`, which every 25.0 error carries in its `ctx` and which names the service that answered, a peer provider included; also `domain`, `domainName`, `subdomain`, `host`, `hostname`, `fqdn`) reads `a provider`, whatever it holds;
+  - a bare host name in a description (a dotted name whose last label is a top-level domain, as in `peer.site.example.com:8443`) is masked. File names, versions, IP addresses, QoS expressions and attribute names are not: `providerId=abc & anyStorage` and `geo=PL` pass untouched. Two labels ending in a country code that is also a file extension (`script.py`, `README.md`) pass; three or more labels are a host name.
+  - `host=` and `port=` pairs are still masked only with a node list. An IP address that no field names as a host passes.
+  - The message is bounded to 2000 characters, cut after the redaction, and a path segment (an id) is echoed at no more than 128 characters.
+  - This fixes a leak; it does not change what a tool means (design/10). The tests that pinned "no list, so byte for byte" were rewritten to the new rule.
 - The protocol's "empty result" path has no separate case for a removal. Removing an id that names nothing is the unknown-id path above.
 - `get_qos_requirement`, a stable tool, shares the id guard. See [its own section](#get_qos_requirement-a-stable-tool-changed-on-this-branch).
 

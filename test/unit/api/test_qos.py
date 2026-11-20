@@ -544,6 +544,7 @@ async def test_remove_qos_requirement_any_2xx_is_a_success(
 
 
 HOSTS = ("oneprovider.example", "onezone.example")
+PEER_DOMAIN = "dev-oneprovider-krakow.default.svc.cluster.local"
 LONG_ID = "a" * 300
 
 
@@ -551,14 +552,14 @@ def _hostname_bearing(status_error_id: str, errno: str | None = None) -> dict:
     error: dict = {
         "id": status_error_id,
         "description": (
-            "Failed at oneprovider.example:443 (zone onezone.example), see "
-            "https://oneprovider.example/api/v3/oneprovider/qos_requirements/x and "
+            "Failed at oneprovider.example:443 (zone onezone.example, peer peer-krakow.plgrid.pl), "
+            "see https://oneprovider.example/api/v3/oneprovider/qos_requirements/x and "
             "http://other.example/y"
         ),
-        "ctx": {"serviceDomain": "oneprovider.example", "line": 45},
+        # the domain of the service that answered: a peer provider, which is not configured
+        "ctx": {"serviceDomain": PEER_DOMAIN, "line": 45},
     }
-    if errno:
-        error["details"] = {"errno": errno}
+    error["details"] = {"errno": errno, "domain": PEER_DOMAIN} if errno else {"host": PEER_DOMAIN}
     return {"error": error}
 
 
@@ -578,9 +579,9 @@ def _hostname_bearing(status_error_id: str, errno: str | None = None) -> dict:
 async def test_remove_qos_requirement_the_complete_message_holds_no_host_url_or_long_id(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, status: int, body: dict
 ) -> None:
-    """With no node list: every kind of hint, with a body that names both hosts and URLs and an
-    id of 300 characters. The whole message is host-free and bounded, and the id is not
-    repeated in full in the appended request path."""
+    """With no node list: every kind of hint, with a body that names both hosts, URLs and a peer
+    provider's domain, and an id of 300 characters. The whole message is host-free and bounded,
+    and the id is not repeated in full in the appended request path."""
     _set_env(monkeypatch)
     httpx_mock.add_response(
         method="DELETE", url=f"{QOS_URL}/{LONG_ID}", status_code=status, json=body
@@ -593,6 +594,9 @@ async def test_remove_qos_requirement_the_complete_message_holds_no_host_url_or_
     for host in HOSTS:
         assert host not in text
     assert "other.example" not in text and "://" not in text
+    # a peer's domain, as a field value and as a bare name in the description
+    assert PEER_DOMAIN not in text and "cluster.local" not in text
+    assert "peer-krakow" not in text and "plgrid.pl" not in text
     assert len(text) <= MAX_ERROR_CHARS
     assert LONG_ID not in text and "a" * 129 not in text
     assert text.count("a" * 80) <= 2  # the hint's echo and the path's: each cut short
