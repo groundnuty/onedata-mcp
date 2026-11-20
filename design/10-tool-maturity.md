@@ -94,7 +94,7 @@ The federation is declared in [`benchmark/valfed/layout.toml`](../benchmark/valf
 - **Commands.** `make valfed-up`, `valfed-reset` (empties every space) and `valfed-down` manage it. `valfed-status` shows the containers, their caps, peak memory and the host's load.
 - **Host limits.** The driver caps each container's CPUs with `docker update` and re-applies the caps after every start. It refuses to start above a 5-minute load of 20, and stops a start if the load passes 20.
 - **Tokens and panel config.** The driver mints the tokens and writes the panel's config, `benchmark/k2val/k2val.valfed.toml` (gitignored). TLS is verified against the federation's own CA.
-- **Checks.** `make valfed-readiness-live`, `make valfed-qos-live` and `make valfed-transfer-live` run the gated live tests (the readiness tools; `remove_qos_requirement`; `schedule_file_replication`) in `omcp-live`. `make valfed-check` builds and tears down the panel's fixtures without calling any model.
+- **Checks.** `make valfed-readiness-live`, `make valfed-qos-live`, `make valfed-transfer-live` and `make valfed-files-live` run the gated live tests (the readiness tools; `remove_qos_requirement`; `schedule_file_replication`; `get_file_attributes`, `list_children` and `create_directory`) in `omcp-live`. `make valfed-check` builds and tears down the panel's fixtures without calling any model.
 - **Location.** Everything lives under `$VALFED_HOME`. The federation's CA is valid for 30 days; to renew it, run `valfed-down` and remove `$VALFED_HOME/ca`.
 
 ## Leaving the default surface

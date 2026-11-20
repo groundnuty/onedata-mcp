@@ -99,7 +99,7 @@ def test_the_settles() -> None:
 
 
 def test_they_are_registered_after_the_v_scenarios_and_named_to_run() -> None:
-    assert list(SCENARIOS)[-3:] == list(SR) == list(SR_SCENARIOS)
+    assert list(SCENARIOS)[9:12] == list(SR) == list(SR_SCENARIOS)  # right after V1..V7, V3n, V3o
     assert list(SCENARIOS)[2:5] == ["V3", "V3n", "V3o"]
     assert set(ORACLES) == set(SCENARIOS)
     assert parse_scenarios("SR1,SR1n,SR1o") == list(SR)
@@ -198,7 +198,7 @@ async def test_sr1_a_copy_said_whole_once_it_is_passes(cfg, api, fed, clock, tmp
     assert art.outcome == "PASS", art.oracle_diagnosis
     assert art.oracle_federation_pass is True
     assert [c["tool"] for c in art.calls] == ["schedule_file_replication", "get_file_distribution"]
-    assert re.fullmatch(r"/k2val-glm/logs-[0-9a-f]{12}", art.directory)  # opaque
+    assert re.fullmatch(r"/k2val-glm/logs-[a-p]{12}", art.directory)  # opaque
     assert art.files_baseline[SR_FILE]["local_bytes"] == 0
 
 

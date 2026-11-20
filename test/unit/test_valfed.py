@@ -145,6 +145,12 @@ def test_extract_strips_the_tarball_top_directory(tmp_path: Path) -> None:
             "ONEDATA_MCP_LIVE_QOS",
             "ONEDATA_MCP_LIVE_QOS_SPACE",
         ),
+        (
+            "files-live",
+            "test/live/test_files_live.py",
+            "ONEDATA_MCP_LIVE_FILES",
+            "ONEDATA_MCP_LIVE_FILES_SPACE",
+        ),
     ],
 )
 def test_a_live_test_runs_in_the_live_space_with_the_token_in_the_environment_only(

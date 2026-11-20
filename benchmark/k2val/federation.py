@@ -17,12 +17,16 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import quote
 
+import httpx
+
 from benchmark.k2val.clock import REAL_CLOCK, Clock
 from benchmark.k2val.config import FederationConf, FederationSecrets
 from onedata_mcp.utils import OnedataApiError, request
 
 Role = Literal["owner", "local"]
 POLL_S = 2.0
+# what `FedApi.tree` asks of each entry (the file-tool scenarios, design/13-15)
+TREE_ATTRIBUTES = ("fileId", "name", "type", "size", "posixPermissions")
 
 
 class FixtureError(RuntimeError):
@@ -228,6 +232,72 @@ class FedApi:
             token = r["body"].get("nextPageToken")
             if r["body"].get("isLast", True) or not token:
                 return out
+
+    # --- the file-tool scenarios (design/13-15) --------------------------
+
+    async def set_mode(self, role: Role, file_id: str, mode: str) -> None:
+        """`PUT /data/{id}` with `posixPermissions` (swagger `set_attr`), in octal (`"600"`)."""
+        await request(
+            self._cfg[role], "PUT", f"/data/{file_id}", json_body={"posixPermissions": mode}
+        )
+
+    async def content(self, role: Role, file_id: str) -> bytes:
+        """`GET /data/{id}/content`: a small file's bytes (CDo's end-state check)."""
+        cfg = self._cfg[role]
+        headers = {**cfg.auth_headers, "Accept": "*/*"}
+        headers.pop("Content-Type", None)
+        async with httpx.AsyncClient(
+            base_url=cfg.base_url, headers=headers, verify=cfg.verify_ssl
+        ) as client:
+            response = await client.get(f"/data/{file_id}/content")
+        if response.is_error:
+            raise OnedataApiError(
+                f"GET /data/<id>/content failed (status={response.status_code})",
+                response={"status_code": response.status_code, "body": None},
+            )
+        return response.content
+
+    async def _listing(self, role: Role, dir_id: str) -> list[dict[str, Any]]:
+        """Every entry of a directory, page by page. Strict: an answer without a `children`
+        list raises, so an unreadable listing is never taken for an empty directory."""
+        out: list[dict[str, Any]] = []
+        token: str | None = None
+        while True:
+            body: dict[str, Any] = {"attributes": list(TREE_ATTRIBUTES), "limit": 1000}
+            if token:
+                body["token"] = token
+            r = await request(self._cfg[role], "GET", f"/data/{dir_id}/children", json_body=body)
+            page = r["body"]
+            if not isinstance(page, dict) or not isinstance(page.get("children"), list):
+                raise OnedataApiError(f"listing of {dir_id} has no 'children' list", response=r)
+            out.extend(page["children"])
+            token = page.get("nextPageToken")
+            if page.get("isLast") is True:
+                return out
+            if not token:
+                raise OnedataApiError(f"listing of {dir_id}: not last, but no token", response=r)
+
+    async def tree(self, role: Role, dir_id: str, *, max_depth: int = 4) -> dict[str, dict]:
+        """A directory's tree as `role` shows it: relative path -> {fileId, type, size, mode},
+        down to `max_depth` levels. Raises if any listing fails (never an empty tree)."""
+        out: dict[str, dict] = {}
+        stack: list[tuple[str, str, int]] = [("", dir_id, 1)]
+        while stack:
+            prefix, current, depth = stack.pop()
+            for entry in await self._listing(role, current):
+                name = entry.get("name")
+                if not isinstance(name, str) or not name:
+                    raise OnedataApiError(f"listing of {current}: an entry has no name")
+                path = f"{prefix}{name}"
+                out[path] = {
+                    "fileId": entry.get("fileId"),
+                    "type": entry.get("type"),
+                    "size": entry.get("size"),
+                    "mode": entry.get("posixPermissions"),
+                }
+                if entry.get("type") == "DIR" and depth < max_depth:
+                    stack.append((f"{path}/", entry.get("fileId"), depth + 1))
+        return out
 
     async def attrs(self, role: Role, file_id: str, attributes: list[str]) -> dict[str, Any] | None:
         try:

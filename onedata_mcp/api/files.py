@@ -127,21 +127,126 @@ async def get_file_id(path: str) -> str:
     return response["body"]["fileId"]
 
 
+# --- A file id in a request path, and errors a caller can act on --------------------------------
+#
+# Used by get_file_attributes, list_children and create_directory (design/13-15). The stable
+# tools that share `_normalize_path_to_file_id` keep their own handling: changing them needs
+# their own gates.
+
+_SHOWN_MAX = 80
+_HOW_TO_NAME_A_FILE = "Give a path, /<space_name>/<path>, or a file id."
+
+
+def _shown(value: str) -> str:
+    """The value as echoed in an error: quoted, and cut short if it is long."""
+    if len(value) <= _SHOWN_MAX:
+        return repr(value)
+    return repr(value[:_SHOWN_MAX]) + "..."
+
+
+def _target(file_id_or_path: str) -> str:
+    kind = "path" if file_id_or_path.startswith("/") else "file id"
+    return f"{kind} {_shown(file_id_or_path)}"
+
+
+def _id_in_path(file_id: str, file_id_or_path: str) -> str:
+    """The file id as one percent-encoded path segment.
+
+    Unencoded, a `?` or `#` in an id cuts the request path short, and a `/` adds segments. An
+    empty id, `.` or `..` is refused before any request: the HTTP client resolves dot segments
+    to another URL (`/data/..` is the API root)."""
+    if not file_id.strip():
+        raise ValueError(f"The file id or path is empty. {_HOW_TO_NAME_A_FILE}")
+    if file_id.strip() in {".", ".."}:
+        raise ValueError(
+            f"{_shown(file_id_or_path)} is not a file id or path. {_HOW_TO_NAME_A_FILE}"
+        )
+    return quote(file_id, safe="")
+
+
+def _status(error: OnedataApiError) -> int | None:
+    response = error.response if isinstance(error.response, dict) else {}
+    status = response.get("status_code")
+    return status if isinstance(status, int) else None
+
+
+def _is_forbidden(error: OnedataApiError) -> bool:
+    return (
+        _status(error) == 403 or error.error_id == "forbidden" or error.errno in {"eacces", "eperm"}
+    )
+
+
+def _is_absent(error: OnedataApiError) -> bool:
+    return _status(error) == 404 or error.error_id == "notFound" or error.errno == "enoent"
+
+
+def _rejects_the_id(error: OnedataApiError) -> bool:
+    """A 400 about the id itself (`badValueIdentifier`, or a bad value whose key is `id`), not
+    about another input such as an unknown attribute name, which passes on unchanged."""
+    if _status(error) != 400:
+        return False
+    body_error = error.body.get("error")
+    details = body_error.get("details") if isinstance(body_error, dict) else None
+    key = details.get("key") if isinstance(details, dict) else None
+    return error.error_id == "badValueIdentifier" or (
+        (error.error_id or "").startswith("badValue") and key == "id"
+    )
+
+
+def _file_error_hint(error: OnedataApiError, file_id_or_path: str, action: str) -> str | None:
+    """What the caller can do about a failed call on a file or directory, or None to pass the
+    error on unchanged. Keyed on the HTTP status the swagger lists (400, 403, 404), with the
+    error id and errno as a fallback: the exact 25.0 bodies are not pinned here."""
+    target = _target(file_id_or_path)
+    if _is_forbidden(error):
+        return (
+            f"Not allowed to {action} {target}: the token has no access to it. Calling again "
+            "will not help."
+        )
+    if _is_absent(error):
+        return (
+            f"Nothing exists at {target}: it may have been deleted, or the value is not a file "
+            f"id. {_HOW_TO_NAME_A_FILE}"
+        )
+    if _rejects_the_id(error):
+        return f"Onedata rejected {target} as a file id. {_HOW_TO_NAME_A_FILE}"
+    return None
+
+
+def _with_hint(hint: str, error: OnedataApiError) -> OnedataApiError:
+    """The hint first, then Onedata's own message."""
+    return OnedataApiError(f"{hint} [{error}]", response=error.response)
+
+
 async def get_file_attributes(
     file_id_or_path: str,
     *,
     attributes: Iterable[str] | None = DEFAULT_FILE_ATTRIBUTE_KEYS,
 ) -> dict[str, Any]:
+    """The attributes of a file or directory, given by path or id.
+
+    Without `attributes` (or with an empty list), the default set is asked for. A deprecated
+    attribute name is refused with its new name; a failure the caller can act on (nothing at
+    the id or path, a rejected id, no access) is raised with what to do about it, followed by
+    Onedata's own message."""
     config = get_oneprovider_config()
     requested_attributes = tuple[str, ...](attributes or DEFAULT_FILE_ATTRIBUTE_KEYS)
+    _reject_deprecated_attributes(requested_attributes)
 
-    file_id = await _normalize_path_to_file_id(file_id_or_path)
-    response = await request(
-        config,
-        "GET",
-        f"/data/{file_id}",
-        json_body=({"attributes": list(requested_attributes)} if requested_attributes else None),
-    )
+    try:
+        file_id = await _normalize_path_to_file_id(file_id_or_path)
+        response = await request(
+            config,
+            "GET",
+            f"/data/{_id_in_path(file_id, file_id_or_path)}",
+            json_body={"attributes": list(requested_attributes)},
+        )
+    except OnedataApiError as e:
+        await _raise_invalid_space_error_if_needed(e, file_id_or_path)
+        hint = _file_error_hint(e, file_id_or_path, "read the attributes of")
+        if hint is None:
+            raise
+        raise _with_hint(hint, e) from e
     logger.debug(f"Fetched file attributes for file {file_id_or_path}: {response['body']}")
     return response["body"]
 
@@ -161,26 +266,47 @@ async def list_children(
     offset: int,
     token: str | None = None,
 ) -> dict[str, Any]:
+    """One page of a directory's entries, given by path or id.
+
+    `token` (a previous page's `nextPageToken`) and `offset` are exclusive: the swagger says
+    `offset` "cannot be provided alongside the `token` parameter", so with a token no offset is
+    sent, and a non-zero offset with a token is refused. A failure the caller can act on (not a
+    directory, nothing at the id or path, a rejected id, no access) is raised with what to do
+    about it, followed by Onedata's own message."""
     config = get_oneprovider_config()
-    parent_id = await _normalize_path_to_file_id(parent_id_or_path)
     requested_attributes = tuple[str, ...](attributes or DEFAULT_FILE_ATTRIBUTE_KEYS)
     _reject_deprecated_attributes(requested_attributes)
-    request_body: dict[str, Any] = {"limit": limit, "offset": offset}
+    if token is not None and offset:
+        raise ValueError(
+            "Pass token or offset, not both: token continues after the page it came with, "
+            "offset counts entries from the start of the directory."
+        )
+    request_body: dict[str, Any] = {"limit": limit, "attributes": list(requested_attributes)}
     if token is not None:
         request_body["token"] = token
-    if requested_attributes:
-        request_body["attributes"] = list(requested_attributes)
+    else:
+        request_body["offset"] = offset
 
     try:
+        parent_id = await _normalize_path_to_file_id(parent_id_or_path)
         response = await request(
             config,
             "GET",
-            f"/data/{parent_id}/children",
+            f"/data/{_id_in_path(parent_id, parent_id_or_path)}/children",
             json_body=request_body,
         )
     except OnedataApiError as e:
         await _raise_invalid_space_error_if_needed(e, parent_id_or_path)
-        raise
+        if e.errno == "enotdir":
+            hint = (
+                f"The {_target(parent_id_or_path)} is a regular file, not a directory: only a "
+                "directory has entries to list."
+            )
+        else:
+            hint = _file_error_hint(e, parent_id_or_path, "list")
+        if hint is None:
+            raise
+        raise _with_hint(hint, e) from e
     return _strip_deprecated_fields_in_list(response["body"], "children")
 
 
@@ -335,46 +461,119 @@ async def create_file(path: str, content: str, *, create_parents: bool = False) 
         raise e
 
 
-async def create_directory(path: str, *, create_parents: bool = True) -> dict[str, Any]:
-    """Create a directory at the given /<space>/<path> location.
+_HOW_TO_NAME_A_DIRECTORY = "Give the new directory's full path, /<space_name>/<path_to_directory>."
 
-    Wraps ``PUT /data/{space_id}/path/{relative}?type=DIR&create_parents=...``
-    (Oneprovider 25.0 — see oneprovider-swagger paths/data/id/path.yaml,
-    operationId ``create_file_at_path``). Returns ``{fileId, path}``.
 
-    Raises ``FileExistsError`` if the path already exists. Raises
-    ``ValueError`` if ``path`` does not include a relative path under a
-    space root (i.e. the form must be ``/<space>/<dir...>``).
-
-    See research/empirical-mcp-server-findings.md M-11.
-    """
-    config = get_oneprovider_config()
+def _directory_path(path: str) -> tuple[str, str]:
+    """(the space's name, the new directory's path under its root), or a ValueError saying what
+    to give. An empty, `.` or `..` component is refused: in the request path the HTTP client
+    resolves `a/../b` to `b`, which would make the directory somewhere else."""
     normalized = path.strip("/")
+    if not normalized:
+        raise ValueError(f"The path is empty. {_HOW_TO_NAME_A_DIRECTORY}")
     if "/" not in normalized:
         raise ValueError(
-            "path must be /<space_name>/<path_to_directory>; got: "
-            f"{path!r}. To target the space root, use the existing "
-            f"namespace tools instead — the root always exists."
+            f"{_shown(path)} is the root directory of a space, which always exists. "
+            f"{_HOW_TO_NAME_A_DIRECTORY}"
         )
-    space_name, relative_path = normalized.split("/", 1)
-    if not relative_path:
-        raise ValueError("path must include a directory path under the space")
-    root_id = await get_file_id(f"/{space_name}")
-    encoded_path = quote(relative_path, safe="/")
+    space_name, relative = normalized.split("/", 1)
+    if any(part in ("", ".", "..") for part in relative.split("/")):
+        raise ValueError(
+            f"{_shown(path)} has an empty, '.' or '..' component. {_HOW_TO_NAME_A_DIRECTORY}"
+        )
+    return space_name, relative
+
+
+async def _no_such_space(space_name: str) -> str:
+    try:
+        names = sorted(
+            {s["name"] for s in await list_user_spaces() if isinstance(s.get("name"), str)}
+        )
+    except Exception:  # noqa: BLE001 - the hint is best effort
+        names = []
+    listed = f" Available spaces: {', '.join(repr(n) for n in names)}." if names else ""
+    return f"No space named {_shown(space_name)} is visible here, so nothing was created.{listed}"
+
+
+async def _type_at(path: str) -> str | None:
+    """What is at `path` (REG, DIR or SYMLNK), for the "already exists" error; None if unknown."""
+    try:
+        found = await get_file_attributes(path, attributes=["type"])
+    except Exception:  # noqa: BLE001 - the error says less, but still says it exists
+        return None
+    kind = found.get("type") if isinstance(found, dict) else None
+    return kind if isinstance(kind, str) else None
+
+
+_EXISTING = {
+    "DIR": "a directory, so nothing was created",
+    "REG": "a regular file, so no directory was created",
+    "SYMLNK": "a symbolic link, so no directory was created",
+}
+
+
+async def _create_directory_error(
+    error: OnedataApiError, path: str, create_parents: bool
+) -> Exception:
+    """What a failed creation tells the caller: what is in the way, and what to do."""
+    shown = _shown(path)
+    if error.errno == "eexist" or _status(error) == 409:
+        kind = await _type_at(path)
+        if kind in _EXISTING:
+            return FileExistsError(f"{shown} already exists as {_EXISTING[kind]}.")
+        return FileExistsError(f"Something already exists at {shown}, so no directory was created.")
+    if error.errno == "enotdir":
+        hint = (
+            f"A component of {shown} above the new directory is a regular file, not a "
+            "directory, so nothing was created."
+        )
+    elif _is_forbidden(error):
+        hint = (
+            f"Not allowed to create {shown}: the token may be read-only or have no write "
+            "access in this space. Calling again will not help."
+        )
+    elif not create_parents and _is_absent(error):
+        hint = (
+            f"The parent directory of {shown} does not exist, so nothing was created. Create "
+            "it first, or call again with create_parents set to true."
+        )
+    else:
+        return error
+    return _with_hint(hint, error)
+
+
+async def create_directory(path: str, *, create_parents: bool = True) -> dict[str, Any]:
+    """Create a directory at `/<space>/<path>`; returns `{fileId, path}`.
+
+    `PUT /data/{space root id}/path/{relative}?type=DIR&create_parents=..` (swagger
+    `create_file_at_path`). Every component of the relative path is percent-encoded, so a `?`
+    or `#` in a name is a character of the name. A path that cannot name a new directory is
+    refused before any request; a failure says what is in the way (an existing directory or
+    file, a file on the way, a missing parent, a missing space, no access)."""
+    space_name, relative = _directory_path(path)
+    config = get_oneprovider_config()
+    try:
+        root_id = await get_file_id(f"/{space_name}")
+    except FileNotFoundError:
+        raise FileNotFoundError(await _no_such_space(space_name)) from None
+    except OnedataApiError as e:
+        if not _is_absent(e):
+            raise
+        raise FileNotFoundError(await _no_such_space(space_name)) from e
     try:
         response = await request(
             config,
             "PUT",
-            f"/data/{root_id}/path/{encoded_path}",
+            f"/data/{quote(root_id, safe='')}/path/{quote(relative, safe='/')}",
             params={"type": "DIR", "create_parents": create_parents},
         )
     except OnedataApiError as e:
-        if e.errno == "eexist":
-            raise FileExistsError(f"Directory {path} already exists") from e
-        logger.error(f"Error creating directory {path}: {e}")
-        raise
-    file_id = response["body"]["fileId"]
-    return {"fileId": file_id, "path": path}
+        logger.debug(f"Error creating directory {path}: {e}")
+        replacement = await _create_directory_error(e, path, create_parents)
+        if replacement is e:
+            raise
+        raise replacement from e
+    return {"fileId": response["body"]["fileId"], "path": path}
 
 
 def _looks_like_directory_intent(path: str, content: str) -> bool:

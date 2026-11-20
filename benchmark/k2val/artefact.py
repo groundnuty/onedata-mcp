@@ -52,6 +52,8 @@ class K2TrialArtefact(TrialArtefact):
     k2_violations: tuple[dict, ...] = ()
     snapshot_at_answer: dict | None = None
     snapshot_after_settle: dict | None = None
+    # The file-tool scenarios: the trial directory's tree before the agent started.
+    fixture_baseline: dict | None = None
     writer: dict | None = None
     calls: tuple[dict, ...] = ()
     fixture_error: str | None = None

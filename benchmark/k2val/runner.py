@@ -48,17 +48,22 @@ CAP_REASONS = {
 SETTLE_POLL_S = 5.0
 
 
-def trial_dir_name(trial_id: str) -> str:
-    """The trial's directory, as the brief shows it: opaque. The trial id starts with the
-    scenario id, and `logs-v3` beside `logs-v3n` would tell a model which variant it is in."""
-    return "logs-" + hashlib.sha1(f"dir/{trial_id}".encode()).hexdigest()[:12]
-
-
 def make_trial_id(run_id: str, model: str, scenario_id: str, ix: int) -> str:
     """Short, no 8-digit run (a file name's date is the first run of exactly 8 digits), unique
     per (run, config, scenario, trial): `v5-glm-k0-3fa91c`."""
     tag = hashlib.sha1(f"{run_id}/{model}/{scenario_id}/{ix}".encode()).hexdigest()[:6]
     return f"{scenario_id.lower()}-{model}-k{ix}-{tag}"
+
+
+_DIGITS_TO_LETTERS = str.maketrans("0123456789", "ghijklmnop")
+
+
+def trial_dir_name(trial_id: str) -> str:
+    """The trial's directory, `logs-<12 letters>`: opaque, so a path never tells a model which
+    scenario or variant it is in (`logs-v3n-...` did); `logs-` for the sweep at run start;
+    letters only, so no run of 8 digits in a path reads as a date."""
+    tag = hashlib.sha1(trial_id.encode()).hexdigest()[:12].translate(_DIGITS_TO_LETTERS)
+    return f"logs-{tag}"
 
 
 @dataclass
@@ -78,6 +83,8 @@ class RunDeps:
 
 
 def _tools_for(deps: RunDeps, scenario: Scenario) -> frozenset[str]:
+    if scenario.tools is not None:  # a scenario's own set (the file-tool scenarios)
+        return frozenset(scenario.tools)
     return frozenset(deps.cfg.tools_k2 if scenario.tier == "K2" else deps.cfg.tools_k1)
 
 
@@ -186,6 +193,9 @@ async def run_trial(
                 )
             )
 
+        if fixture.entries:  # a brief may give an entry's file id, known only now
+            brief = scenario.render_brief(directory=directory, local=local_name, ids=fixture.ids())
+
         tools = _tools_for(deps, scenario)
         rec_app = RecordingApp(
             deps.app, allowed=tools, call_cap_s=cfg.limits.tool_call_cap_s, clock=deps.clock.time
@@ -259,6 +269,7 @@ async def run_trial(
             if dispatch
             else (),
             "snapshot_at_answer": at_answer.to_json(),
+            "fixture_baseline": fixture.baseline_tree,
             "calls": tuple(r.to_json() for r in records),
             "directory": directory,
         }
@@ -306,6 +317,7 @@ async def run_trial(
                 name: (fixture.qos_rules[name],) if name in fixture.qos_rules else ()
                 for name in fixture.files
             },
+            baseline_tree=fixture.baseline_tree,
         )
         trace = AgentTrace(final_answer=final_answer, tool_calls=common["tool_calls"])
         try:
@@ -456,4 +468,4 @@ def _blank_artefact(
     return art
 
 
-__all__ = ["RunDeps", "make_trial_id", "run_sweep", "run_trial", "time"]
+__all__ = ["RunDeps", "make_trial_id", "run_sweep", "run_trial", "time", "trial_dir_name"]

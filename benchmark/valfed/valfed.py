@@ -8,6 +8,7 @@
     make valfed-readiness-live    the gated live readiness test, in omcp-live
     make valfed-qos-live          the gated live test of remove_qos_requirement, in omcp-live
     make valfed-transfer-live     the gated live test of schedule_file_replication, in omcp-live
+    make valfed-files-live        the gated live test of the three file tools, in omcp-live
 
 One Onezone and two Oneproviders of Onedata 25.0 in Docker Compose, published on 127.0.0.1 only,
 as `layout.toml` beside this file declares them. The work is done by the Compose federation tool
@@ -570,6 +571,12 @@ LIVE_TESTS = {
         "ONEDATA_MCP_LIVE_TRANSFER",
         "ONEDATA_MCP_LIVE_TRANSFER_SPACE",
     ),
+    # get_file_attributes, list_children and create_directory (design/13-15)
+    "files": (
+        "test/live/test_files_live.py",
+        "ONEDATA_MCP_LIVE_FILES",
+        "ONEDATA_MCP_LIVE_FILES_SPACE",
+    ),
 }
 
 
@@ -622,6 +629,11 @@ def transfer_live(home: Home) -> None:
     )
 
 
+def files_live(home: Home) -> None:
+    """test/live/test_files_live.py (the three file tools of design/13-15) against omcp-live."""
+    live_test(home, "files")
+
+
 async def _fixture_check() -> None:
     from benchmark.k2val.clock import REAL_CLOCK
     from benchmark.k2val.config import load_config, read_federation_secrets
@@ -641,6 +653,10 @@ async def _fixture_check() -> None:
         "V3": SCENARIOS["V3"].fixture,
         "s2": FixtureSpec((FileSpec("20200104", "s2"),), writer_finish_s=30.0),
         "SR1": SCENARIOS["SR1"].fixture,  # the large file, written in parts (design/12)
+        # the file-tool scenarios (design/13-15)
+        "FA": SCENARIOS["FA"].fixture,  # modes set at the owner, seen at the local provider
+        "LCp": SCENARIOS["LCp"].fixture,  # more than a page of entries, two empty directories
+        "CDn": SCENARIOS["CDn"].fixture,  # a regular file where CD's directory would go
     }
     problems: list[str] = []
     try:
@@ -650,6 +666,8 @@ async def _fixture_check() -> None:
             kinds = ",".join(sorted({f.kind for f in spec.files}))
             took = time.monotonic() - began
             line = f"{label}: built {len(fixture.files)} files ({kinds}) in {took:.1f} s"
+            if fixture.baseline_tree is not None:
+                line += f", {len(fixture.baseline_tree)} entries seen at the local provider"
             if fixture.writer is not None:
                 fixture.writer.start()
                 await fixture.writer.wait()
@@ -687,6 +705,7 @@ COMMANDS = {
     "readiness-live": readiness_live,
     "qos-live": qos_live,
     "transfer-live": transfer_live,
+    "files-live": files_live,
 }
 
 

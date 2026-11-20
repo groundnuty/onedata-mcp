@@ -208,7 +208,7 @@ async def test_the_sweep_also_leaves_inherited_rules_alone(
 @pytest.mark.parametrize("sid", sorted(SCENARIOS))
 def test_the_trial_directory_does_not_name_the_scenario(sid: str) -> None:
     name = trial_dir_name(make_trial_id("20261120T000000Z", "glm", sid, 0))
-    assert re.fullmatch(r"logs-[0-9a-f]{12}", name)
+    assert re.fullmatch(r"logs-[a-p]{12}", name)
     assert sid.lower() not in name
 
 

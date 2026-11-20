@@ -46,6 +46,8 @@ class K2Context:
     flags: list[str] = field(default_factory=list)  # set by the oracle: premature_claim, ...
     # The QoS requirement ids the fixture built, per file name: the baseline of "unchanged".
     fixture_qos: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # The file-tool scenarios: the trial directory's tree before the agent started.
+    baseline_tree: dict[str, dict] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -662,3 +664,10 @@ def settled(settle: str, snapshot: Snapshot, names: list[str]) -> bool:
 from benchmark.k2val.sr_oracles import SR_ORACLES  # noqa: E402 - registered after the core set
 
 ORACLES.update(SR_ORACLES)
+
+
+# --- the file-tool scenarios (FA, LC, CD; design/13-15) ---------------------------------------
+# Their oracles and answer readers are in file_oracles.py (a leaf module: no import cycle).
+from benchmark.k2val.file_oracles import FILE_ORACLES  # noqa: E402
+
+ORACLES.update(FILE_ORACLES)

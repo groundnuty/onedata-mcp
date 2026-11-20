@@ -57,6 +57,12 @@ def file_name(day: str) -> str:
     return f"log_{day}.dat"
 
 
+def same_mode(seen: object, wanted: str) -> bool:
+    """POSIX permissions as Onedata reports them (an octal string, `"600"` or `"0600"`, per the
+    swagger; unverified on 25.0, which the live test prints) against the octal set."""
+    return isinstance(seen, str) and seen.lstrip("0") == wanted.lstrip("0")
+
+
 def content_for(name: str, size: int = FILE_SIZE) -> bytes:
     """Seeded random bytes: the same name always gives the same content."""
     seed = int.from_bytes(hashlib.sha256(f"k2val:{name}".encode()).digest()[:8], "big")
@@ -79,10 +85,36 @@ class FileSpec:
 
 
 @dataclass(frozen=True)
+class EntrySpec:
+    """A small file or a directory of the file-tool scenarios (FA, LC and CD; design/13-15), at
+    `path` relative to the trial directory (`calib_runs/log_20200103.dat`).
+
+    Made through the OWNER provider, parents first, with `content` as the whole body. `mode`,
+    when set, is the file's POSIX permissions in octal (`"600"`), set after the write. The trial
+    starts only once the LOCAL provider shows every entry as built: see
+    `FixtureBuilder._wait_local_tree`."""
+
+    path: str
+    kind: Literal["file", "dir"] = "file"
+    content: bytes = b""
+    mode: str | None = None
+
+    @property
+    def name(self) -> str:
+        return self.path.rsplit("/", 1)[-1]
+
+    @property
+    def onedata_type(self) -> str:
+        return "DIR" if self.kind == "dir" else "REG"
+
+
+@dataclass(frozen=True)
 class FixtureSpec:
     files: tuple[FileSpec, ...]
     # seconds after the first model turn at which the background writer finishes
     writer_finish_s: float | None = None
+    # the file-tool scenarios' small files and directories (design/13-15)
+    entries: tuple[EntrySpec, ...] = ()
 
 
 @dataclass
@@ -200,10 +232,19 @@ class BuiltFixture:
     writer: ScheduledWriter | None = None
     started_at: float = 0.0
     ready_at: float = 0.0
+    # The file-tool scenarios (design/13-15): the entries made, by relative path -> file id, and
+    # the trial directory's tree as the LOCAL provider showed it before the agent started (the
+    # baseline the oracles compare the end state with; `FedApi.tree`'s form).
+    entries: dict[str, str] = field(default_factory=dict)
+    baseline_tree: dict[str, dict] | None = None
 
     @property
     def dir_path(self) -> str:
         return f"/{self.space}/{self.dir_name}"
+
+    def ids(self) -> dict[str, str]:
+        """File ids by relative path, for a brief that gives an id (`{ids[log_20200102.dat]}`)."""
+        return dict(self.entries)
 
 
 def _baseline_holds(kind: str, reading: dict, want_qos: tuple[str, ...], size: int) -> bool:
@@ -341,6 +382,9 @@ class FixtureBuilder:
                 fixture.qos_rules[fs.name] = rule
                 await self._wait_rule_fulfilled(bf, rule, local_id)
 
+        if spec.entries:  # the file-tool scenarios (design/13-15)
+            await self._build_entries(fixture, spec.entries)
+
         s2 = [fixture.files[f.name] for f in spec.files if f.kind == "s2"]
         if s2 and spec.writer_finish_s is not None:
             fixture.writer = ScheduledWriter(
@@ -416,6 +460,63 @@ class FixtureBuilder:
             timeout_s=REPLICATION_TIMEOUT_S,
             what=f"the placement rule on {bf.name} is fulfilled and the file is locally covered",
         )
+
+    # --- the file-tool scenarios' entries (design/13-15) -----------------
+
+    async def _build_entries(self, fixture: BuiltFixture, entries: tuple[EntrySpec, ...]) -> None:
+        """Make each entry through the owner, parents first; then wait until the local provider
+        shows exactly the built tree, and record it as the baseline."""
+        ids = {"": fixture.dir_id}
+        for entry in sorted(entries, key=lambda e: e.path.count("/")):
+            parent, _, name = entry.path.rpartition("/")
+            if parent not in ids:
+                raise FixtureError(f"entry {entry.path}: its parent {parent} is not an entry")
+            if entry.kind == "dir":
+                file_id = await self.fed.mkdir("owner", ids[parent], name)
+            else:
+                file_id = await self.fed.create_reg("owner", ids[parent], name)
+                if entry.content:
+                    await self.fed.put("owner", file_id, entry.content, None)
+                if entry.mode is not None:
+                    await self.fed.set_mode("owner", file_id, entry.mode)
+            ids[entry.path] = file_id
+            fixture.entries[entry.path] = file_id
+        fixture.baseline_tree = await self._wait_local_tree(fixture, entries)
+
+    async def _wait_local_tree(
+        self, fixture: BuiltFixture, entries: tuple[EntrySpec, ...]
+    ) -> dict[str, dict]:
+        """The local provider's tree of the trial directory, once it is exactly the one built:
+        the same paths and ids, each of the built type, size and mode. A listing that fails
+        meanwhile is retried until the timeout (a FixtureError, never an empty baseline)."""
+        expected = {e.path: e for e in entries}
+        tree: dict[str, dict] = {}
+
+        async def as_built() -> bool:
+            nonlocal tree
+            try:
+                tree = await self.fed.tree("local", fixture.dir_id)
+            except Exception:  # noqa: BLE001 - not visible yet; the wait's timeout decides
+                return False
+            if set(tree) != set(expected):
+                return False
+            for path, entry in expected.items():
+                seen = tree[path]
+                if seen["fileId"] != fixture.entries[path] or seen["type"] != entry.onedata_type:
+                    return False
+                if entry.kind == "file" and seen.get("size") != len(entry.content):
+                    return False
+                if entry.mode is not None and not same_mode(seen.get("mode"), entry.mode):
+                    return False
+            return True
+
+        await self.fed.wait_until(
+            as_built,
+            timeout_s=LOCAL_SEES_TIMEOUT_S,
+            what=f"the local provider shows the {len(expected)} entries built in "
+            f"{fixture.dir_path} (types, sizes, modes)",
+        )
+        return tree
 
     # --- reset ----------------------------------------------------------
 
