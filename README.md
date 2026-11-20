@@ -1,77 +1,100 @@
-# Onedata MCP Server (PPAM 2026 fork)
+# Onedata MCP Server
 
-An [MCP](https://modelcontextprotocol.io/) server that connects assistants to [Onedata](https://onedata.org/) (Onezone + Oneprovider): spaces, harvesters, files, **QoS, distribution, providers, transfers**.
+An [MCP](https://modelcontextprotocol.io/) server that gives AI agents access to an [Onedata](https://onedata.org/) data federation. An agent can:
 
-`groundnuty/onedata-mcp` extends a pre-existing Onedata MCP base surface with seven federation-state tools (six per paper spec, plus a recursive `query_by_metadata` that needs no harvester) for the PPAM 2026 *LLM-agentic access to a federated scientific data layer with Onedata* benchmark. Pinned to **Onedata 25.0** swagger. The headline benchmark uses a curated 16-tool allowlist defined in [`benchmark/tool_allowlist.py`](benchmark/tool_allowlist.py); see [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) for endpoint mapping and the three corrections vs. paper §3 spec.
+- find spaces, providers and files, and read and write data and metadata;
+- see which provider physically holds which blocks of a file;
+- place data with QoS requirements, and schedule and follow transfers;
+- check, or make sure, that the data an analysis needs are complete and readable at its provider.
 
-## Tool surface
+It talks to the Onezone and Oneprovider REST APIs of **Onedata 25.0**.
 
-The server registers **29 tools** in total (the table below). Three lenses matter:
+## Tools
 
-- **Maturity — 16 `stable` / 13 `experimental`.** `stable` tools were validated against the PPAM 7-LLM K=8 panel (== the HEADLINE benchmark allowlist); `experimental` tools are registered but not yet panel-swept — either added after the paper freeze, or inherited from the upstream base surface and never validated against our panel. See [`onedata_mcp/tool_maturity.py`](onedata_mcp/tool_maturity.py). Origin (`ours`/`upstream`) is a provenance signal — note that panel-validation trumps origin: an upstream tool that survived K=8 is `stable`.
-- **Read-only token — 20 tools.** Running with a `data.readonly` Onedata token prunes the 9 mutating tools (see [`onedata_mcp/token_policy.py`](onedata_mcp/token_policy.py)).
-- **HEADLINE benchmark allowlist — 16 tools.** The subset the PPAM benchmark restricts the agent to (`benchmark/tool_allowlist.py::HEADLINE`); identical to the `stable` set. The benchmark curates *down* to 16 — it does not cap what the server exposes.
+The server registers 29 tools by default. **Access** `W` marks the 9 tools that change state in the federation. **Maturity** is explained [below](#maturity).
 
-You can restrict the exposed surface at launch — see [Selecting tools at launch](#selecting-tools-at-launch). The branch name (`14-tools`) is historical; the authoritative live count is what `tools/list` returns (29).
+| Tool | What it does | Access | Maturity |
+|---|---|---|---|
+| **Spaces and providers** | | | |
+| `list_user_spaces` | List the spaces the user belongs to | R | stable |
+| `list_marketplace_spaces` | List spaces advertised in the marketplace | R | experimental |
+| `list_space_providers` | List the providers supporting a space (by name or id) | R | stable |
+| **Files and directories** | | | |
+| `list_files_recursively` | List all files under a directory | R | stable |
+| `list_children` | List the direct children of a directory | R | experimental |
+| `get_file_id` | Resolve a path to a file id | R | experimental |
+| `get_file_attributes` | Read a file's attributes (size, type, replication state, …) | R | experimental |
+| `download_file` | Read a file's content | R | stable |
+| `grep_file_content` | Search a file's content for a pattern | R | experimental |
+| `create_file` | Create a file with given content | W | stable |
+| `create_directory` | Create a directory | W | experimental |
+| `move_file` | Move or rename a file or directory within a space | W | stable |
+| `delete_file` | Delete a file, or a directory recursively | W | stable |
+| **Metadata** | | | |
+| `get_file_metadata` | Read JSON, RDF or extended-attribute metadata | R | stable |
+| `set_file_metadata` | Write JSON, RDF or extended-attribute metadata | W | stable |
+| `query_by_metadata` | Find files whose JSON metadata matches a predicate (no harvester needed) | R | stable |
+| **Distribution, QoS and transfers** | | | |
+| `get_file_distribution` | Show which blocks of a file each provider and storage holds | R | stable |
+| `get_file_qos_summary` | Show the QoS requirements on a file and whether they are met | R | stable |
+| `add_file_qos_requirement` | Add a QoS requirement, e.g. "keep a replica at provider X" | W | stable |
+| `get_qos_requirement` | Read one QoS requirement | R | stable |
+| `remove_qos_requirement` | Remove a QoS requirement | W | experimental |
+| `schedule_file_replication` | Copy a file's data to a given provider | W | experimental |
+| `list_space_transfers` | List the transfers in a space | R | stable |
+| `get_transfer` | Read one transfer: type, destination, bytes moved, timing | R | stable |
+| **Data readiness** | | | |
+| `check_readiness` | Are the declared data complete and readable at this provider, and if not, why | R | experimental |
+| `ensure_readiness` | Bring the declared data here, wait, and keep them here | W | experimental |
+| **Harvesters** | | | |
+| `list_user_harvesters` | List the user's harvesters and their indices | R | experimental |
+| `get_harvester_index_schema` | Read a harvester index and its schema | R | experimental |
+| `query_harvester_index` | Query a harvester index | R | experimental |
 
-`Mat.` column: `stable` = panel-validated; `exp·up` = experimental, inherited from upstream (the genuine distrust set); `exp·ours` = experimental, added by this fork post-paper.
+The live list is whatever `tools/list` returns; `make tools-manifest` prints it as JSON.
 
-| Tool                          | Group         | Mat.      | Notes                                                |
-|-------------------------------|---------------|-----------|------------------------------------------------------|
-| `list_user_spaces`            | spaces        | stable    |                                                      |
-| `list_marketplace_spaces`     | spaces        | exp·up    |                                                      |
-| `list_space_providers`        | spaces        | stable    | **NEW** — providers from oneprovider's `/spaces/{sid}` |
-| `get_file_id`                 | files         | exp·up    |                                                      |
-| `get_file_attributes`         | files         | exp·up    |                                                      |
-| `list_children`               | files         | exp·up    |                                                      |
-| `list_files_recursively`      | files         | stable    |                                                      |
-| `download_file`               | files         | stable    |                                                      |
-| `grep_file_content`           | files         | exp·up    |                                                      |
-| `create_file`                 | files         | stable    |                                                      |
-| `create_directory`            | files         | exp·ours  | **NEW** — explicit directory creation (finding M-11) |
-| `delete_file`                 | files         | stable    |                                                      |
-| `move_file`                   | files         | stable    | **NEW** — CDMI (`PUT /cdmi/{dst_space}/{path}`); intra-space only |
-| `get_file_metadata`           | files         | stable    | json / rdf / xattrs                                  |
-| `set_file_metadata`           | files         | stable    | json / rdf / xattrs                                  |
-| `get_file_distribution`       | files         | stable    | **NEW** — per-provider, per-storage block ranges     |
-| `get_file_qos_summary`        | qos           | stable    | **NEW**                                              |
-| `add_file_qos_requirement`    | qos           | stable    | **NEW** — async; returns ID, replication eventual    |
-| `get_qos_requirement`         | qos           | stable    | **NEW** — detail by ID                               |
-| `remove_qos_requirement`      | qos           | exp·ours  | **NEW** — not in the panel-validated HEADLINE set    |
-| `list_space_transfers`        | transfers     | stable    | **NEW** — IDs only; pair with `get_transfer`         |
-| `get_transfer`                | transfers     | stable    | **NEW**                                              |
-| `schedule_file_replication`   | transfers     | exp·ours  | **NEW** — schedule a replication transfer to a target provider |
-| `list_user_harvesters`        | harvesters    | exp·up    |                                                      |
-| `get_harvester_index_schema`  | harvesters    | exp·up    |                                                      |
-| `query_harvester_index`       | harvesters    | exp·up    | excluded from headline benchmark allowlist           |
-| `query_by_metadata`           | metadata      | stable    | **NEW** — recursive predicate evaluator (no harvester) |
-| `check_readiness`             | readiness     | exp·ours  | **NEW** — are the declared data complete and readable here, or why not |
-| `ensure_readiness`            | readiness     | exp·ours  | **NEW** — places QoS rules, waits, holds; pruned under a read-only token |
+### Maturity
 
-### Selecting tools at launch
+- **stable**: validated with several LLMs against a live Onedata deployment.
+- **experimental**: implemented and unit-tested, but not yet validated that way; it may still change.
 
-Two env vars restrict which tools the server exposes (model-invisible; they prune the registered surface, they do not alter any tool). With neither set, all 29 are exposed.
-
-| Env var | Effect |
-| ------- | ------ |
-| `ONEDATA_MCP_MATURITY` | Comma-separated maturity tiers to expose. `stable` → only the 16 panel-validated tools; `stable,experimental` (or unset) → all 29. |
-| `ONEDATA_MCP_TOOLS` | Comma-separated explicit tool allowlist (e.g. `list_user_spaces,download_file`). Takes precedence over `ONEDATA_MCP_MATURITY`; unknown names are ignored with a warning. |
-
-```bash
-# Expose only the panel-validated set (conservative deployment):
-ONEDATA_MCP_MATURITY=stable uv run onedata-mcp
-```
-
-This composes with the read-only-token prune: both simply hide tools, so a read-only token + `ONEDATA_MCP_MATURITY=stable` yields the stable-and-non-mutating intersection.
+The classification lives in [`onedata_mcp/tool_maturity.py`](onedata_mcp/tool_maturity.py).
 
 ### Readiness tools
 
-`check_readiness` and `ensure_readiness` (experimental) answer one question: are the data an analysis declares complete and readable at the provider this server talks to? The agent declares them as an `extent`: per dataset (a space name or a directory path), optionally file names or inclusive `YYYY-MM-DD` date ranges that are matched against the `YYYYMMDD` in each file name.
+`check_readiness` and `ensure_readiness` answer one question: are the data an analysis declares complete and readable at the provider this server talks to? The agent declares them as an `extent`: per dataset (a space name or a directory path), optionally file names, or inclusive `YYYY-MM-DD` date ranges matched against the `YYYYMMDD` in each file name.
 
-- `check_readiness` is read-only. It answers ready, or not ready with a reason per file group: `being_written` (no other provider holds the whole file yet), `at_other_site`, `in_transfer`, `unreachable` (only at a provider that is down).
-- `ensure_readiness` also places one QoS rule per file (`providerId=<local provider> & anyStorage`, falling back to `providerId=<local provider>` if Onedata rejects it), so the system copies the file here and protects the replica from eviction, then waits up to `deadline_s`. One call waits at most 240 s (`ONEDATA_MCP_ENSURE_MAX_WAIT_S` changes the cap); call it again if the answer is not ready.
+- `check_readiness` is read-only. It answers ready, or not ready with a reason per group of files:
+  - `being_written`: no other provider holds the whole file yet;
+  - `at_other_site`;
+  - `in_transfer`;
+  - `unreachable`: the file is only at a provider that is down.
+- `ensure_readiness` places one QoS requirement per file for this provider (`providerId=<local provider> & anyStorage`). Onedata then copies the file here and protects the replica from eviction. The tool waits up to `deadline_s`; one call waits at most 240 s (`ONEDATA_MCP_ENSURE_MAX_WAIT_S` changes the cap). Call it again if the answer is not ready.
 
-A file counts as ready only when this provider holds all of it and another provider does too (or the file was written here). Transfer status and QoS `fulfilled` are not taken as proof. Spec: [`design/07-readiness-tools.md`](design/07-readiness-tools.md). Compare tool surfaces with `make tools-manifest`; the gated live test is `make test-readiness-live` (local Compose federation only).
+A file counts as ready only when this provider holds all of it, and either another provider does too or the file was written here. A transfer's status or a QoS requirement's `fulfilled` is never taken as proof. Design: [`design/07-readiness-tools.md`](design/07-readiness-tools.md).
+
+## Choosing which tools to expose
+
+The settings below only hide tools: none changes how a tool behaves or what it says to the model. They combine; for example, a read-only token plus `ONEDATA_MCP_MATURITY=stable` exposes the stable tools that do not write.
+
+| Setting | Effect |
+|---|---|
+| `ONEDATA_MCP_MATURITY` | Comma-separated tiers to expose: `stable` or `stable,experimental`. Unset exposes all tools. |
+| `ONEDATA_MCP_TOOLS` | Comma-separated explicit list of tool names. Takes precedence over `ONEDATA_MCP_MATURITY`; unknown names are ignored with a warning. |
+| A read-only Onedata token | A Oneprovider token with the `data.readonly` caveat hides the 9 `W` tools automatically. |
+
+```bash
+# Only the stable tools:
+ONEDATA_MCP_MATURITY=stable uv run onedata-mcp
+```
+
+**Preview features** are a separate switch from the maturity tiers. `ONEDATA_MCP_EXPERIMENTAL=1` turns them on:
+
+- two extra tools, `list_space_datasets` (list a space's top-level datasets) and `set_file_xattrs` (merge extended attributes; hidden under a read-only token);
+- `query_harvester_index` also accepts its query as a JSON string;
+- extra guidance in the server instructions.
+
+Off by default; with it off, the tool list is exactly the one above.
 
 ## Requirements
 
@@ -84,60 +107,49 @@ A file counts as ready only when this provider holds all of it and another provi
 uv sync
 ```
 
-## Environment variables
+## Configuration
 
-Configuration is loaded from the process environment. [python-dotenv](https://pypi.org/project/python-dotenv/) is used so a `.env` file is picked up when the server starts: the first one found from the directory of the installed `onedata_mcp` package upward to `/` (a checkout's own root `.env`), never overriding a variable already set. Set `ONEDATA_MCP_DOTENV=0` in the process environment to read no `.env` at all (see `USAGE.md`).
+The server reads its configuration from the environment. It also loads a `.env` file, the first one found from the installed `onedata_mcp` package upward (a checkout's root `.env`), without overriding variables already set. `ONEDATA_MCP_DOTENV=0` turns that off (see [USAGE.md](USAGE.md)).
 
-1. Copy the example file and edit values:
+```bash
+cp .env.example .env   # then edit the values
+```
 
-   ```bash
-   cp .env.example .env
-   ```
-
-2. Set the variables below (see `.env.example` for placeholders).
-
-### Onedata API (required for live calls)
+### Onedata connection (required for live calls)
 
 | Variable | Description |
-| -------- | ----------- |
-| `ONEDATA_ONEZONE_HOST` | Onezone base URL, e.g. `https://your-onezone.example` (no `/api/...` suffix). |
-| `ONEDATA_ONEZONE_TOKEN` | Token sent as `X-Auth-Token` to Onezone. |
-| `ONEDATA_ONEPROVIDER_HOST` | Oneprovider base URL, e.g. `https://your-oneprovider.example`. |
-| `ONEDATA_ONEPROVIDER_TOKEN` | Token sent as `X-Auth-Token` to Oneprovider. |
-| `ONEDATA_ALLOW_INSECURE_TLS` | Set to `true` only if you must use HTTPS with self-signed or otherwise unverifiable certificates (default: verify TLS). |
+|---|---|
+| `ONEDATA_ONEZONE_HOST` | Onezone base URL, e.g. `https://your-onezone.example` (no `/api/...` suffix) |
+| `ONEDATA_ONEZONE_TOKEN` | Token sent as `X-Auth-Token` to Onezone |
+| `ONEDATA_ONEPROVIDER_HOST` | Oneprovider base URL, e.g. `https://your-oneprovider.example` |
+| `ONEDATA_ONEPROVIDER_TOKEN` | Token sent as `X-Auth-Token` to Oneprovider |
+| `ONEDATA_ALLOW_INSECURE_TLS` | `true` only for self-signed or otherwise unverifiable certificates (default: verify TLS) |
 
-### Server / logging (optional)
+### Logging (optional)
 
 | Variable | Description |
-| -------- | ----------- |
-| `FASTMCP_LOG_LEVEL` | Logging level (default: `INFO`). |
-| `FASTMCP_LOG_FILE` | If set, logs are also appended to this file path. |
+|---|---|
+| `FASTMCP_LOG_LEVEL` | Log level (default `INFO`) |
+| `FASTMCP_LOG_FILE` | Also append logs to this file |
 
-## Run the MCP server (stdio)
+## Run
 
-This is the usual mode for desktop clients (Cursor, Claude Desktop, etc.):
+stdio, the usual mode for desktop clients (Cursor, Claude Desktop, …):
 
 ```bash
 uv run onedata-mcp
 ```
 
-Ensure the client runs the command from a directory where your `.env` exists, **or** export the same variables in the environment before starting the server.
+Start it from the directory that holds your `.env`, or pass the variables in the environment.
 
-### Cursor example (`mcp.json`)
-
-Adjust the path to your checkout:
+### Client configuration (`mcp.json`)
 
 ```json
 {
   "mcpServers": {
     "onedata": {
       "command": "uv",
-      "args": [
-        "run",
-        "--directory",
-        "/absolute/path/to/onedata-mcp",
-        "onedata-mcp"
-      ],
+      "args": ["run", "--directory", "/absolute/path/to/onedata-mcp", "onedata-mcp"],
       "env": {
         "ONEDATA_ONEZONE_HOST": "https://your-onezone.example",
         "ONEDATA_ONEZONE_TOKEN": "your-token",
@@ -149,8 +161,6 @@ Adjust the path to your checkout:
 }
 ```
 
-You can omit `env` here and rely on a `.env` file next to the project if the server process starts with that working directory.
-
 ### MCP Inspector
 
 ```bash
@@ -159,31 +169,38 @@ uv run fastmcp dev inspector onedata_mcp/main.py:mcp
 
 ## Telemetry (OpenTelemetry)
 
-The server can emit one OpenTelemetry span per MCP tool call (tool name,
-duration, success/error status, error class on failure) and continues an
-incoming W3C `traceparent`, so a client-initiated trace flows
-client → MCP server → Onedata REST as a single correlated trace.
+The server can emit one span per tool call (tool name, duration, status, error class) and continues an incoming W3C `traceparent`. A client-started trace therefore runs client → MCP server → Onedata REST as one trace.
 
-**Telemetry is opt-in and fully no-op by default.** With none of the `OTEL_*`
-variables set, no exporter is installed — there is no startup cost and no
-retry spam without a collector. Enable it purely through the standard `OTEL_*`
-environment variables (nothing is hardcoded):
+Telemetry is off, with no exporter and no cost, until you set the standard `OTEL_*` variables:
 
 ```bash
-export OTEL_EXPORTER_OTLP_ENDPOINT="http://<your-collector-host>:4318"  # OTLP/HTTP
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://<your-collector-host>:4318"   # OTLP/HTTP
 export OTEL_SERVICE_NAME="onedata-mcp"
-# optional: export OTEL_RESOURCE_ATTRIBUTES="deployment.environment=dev"
 uv run onedata-mcp
 ```
 
-Any OTLP/HTTP collector works (e.g. an `otel/opentelemetry-collector` container
-exposing `:4318`). Trace-context propagation: a client that places a
-`traceparent` in the MCP request `_meta` will have the server's spans parented
-to that trace.
+A client that puts a `traceparent` in the MCP request `_meta` gets the server's spans parented to its trace.
 
 ## Development
 
-- Format / lint: `uv run ruff format`
-- Tests: `uv run pytest`
+`make` is the entry point; `make help` lists every target.
 
-See `AGENTS.md` for repository conventions.
+```bash
+make check    # lint + format + unit tests
+make test     # unit tests only
+```
+
+More documentation:
+
+- [USAGE.md](USAGE.md): using the tools;
+- [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md): REST endpoint mapping;
+- [`design/`](design/): design decisions;
+- [AGENTS.md](AGENTS.md): repository conventions.
+
+## Background
+
+The federation-state tools (distribution, QoS, transfers, providers, metadata queries) were built and evaluated for the PPAM 2026 paper *LLM-agentic access to a federated scientific data layer with Onedata* ([DOI 10.5281/zenodo.20213326](https://doi.org/10.5281/zenodo.20213326)). Its multi-LLM benchmark harness is in [`benchmark/`](benchmark/), and the 16-tool set it evaluated is [`benchmark/tool_allowlist.py`](benchmark/tool_allowlist.py). The project builds on an earlier open-source Onedata MCP server.
+
+## License
+
+MIT, see [LICENSE.txt](LICENSE.txt).
