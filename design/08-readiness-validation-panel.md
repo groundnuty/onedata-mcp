@@ -317,6 +317,8 @@ out: the trace's MCP half is the server's own record, and the CLI's events come 
   get_file_qos_summary, get_qos_requirement, get_transfer, list_space_providers, list_space_transfers,
   remove_qos_requirement, schedule_file_replication`.
 - K2 set: the K1 set plus `check_readiness, ensure_readiness`.
+- The file-tool scenarios (FA, LC, CD) name their own sets: FA the K1 set, LC and CD FILE_TOOLS
+  (`benchmark/k2val/file_scenarios.py`).
 - The MCP app is the in-process server from this branch, as in the PPAM harness. Pass the allow-list like PPAM's
   `allowed_tools`.
 
@@ -356,10 +358,15 @@ from a fixed seed per file.
   - delete `/logs/`;
   - wait until the owner answers the old ids absent;
   - then build the fixture.
-  - Delete-then-recreate under the same names can race on 25.0, so use a fresh subdirectory per trial,
-    `/logs-<trial_id>/`, and put that path in the brief.
+  - Delete-then-recreate under the same names can race on 25.0, so use a fresh subdirectory per trial and put
+    that path in the brief. It is `/logs-<12 letters>/`, derived from the trial id, so the path does not name the
+    scenario or the model.
+- **Small files and directories** (the file-tool scenarios, `EntrySpec`): made through the owner, parents first, a
+  file's whole body in one write, then its mode if one is set. The trial starts only once the LOCAL provider shows
+  exactly the built tree (paths, ids, types, sizes, modes); that tree is recorded as the trial's baseline
+  (`fixture_baseline`). A listing that fails meanwhile is retried until the timeout, then the trial is a RESET_FAIL.
 
-## Scenarios (7, and two variants of V3)
+## Scenarios (7, two variants of V3, and the file-tool scenarios)
 
 Each has a brief, a fixture, the tool set, and a two-axis oracle. `mcp_pass` = the answer is right (judged by string
 and regex rules on the final answer, as in PPAM). `federation_pass` = the end-state is right, or `None` where nothing
@@ -418,6 +425,13 @@ offered (V1 names its six files, as the K1 set has no listing tool); they never 
    - mcp: the answer says ready, given after the writer finished and after local coverage; else "premature claim".
    - Also record, from the trace, whether any `ensure_readiness` answer said `ready: true` before the writer finished.
      That would be a K2 violation, a tool bug, reported separately in large letters.
+
+8. **The file-tool scenarios** of `get_file_attributes` (FA, FAi, FAn), `list_children` (LC, LCn, LCo, LCp) and
+   `create_directory` (CD, CDn, CDo, CDp), for their promotion (design/13, design/14, design/15). Each scenario's
+   brief, fixture, tools, right answer and rules are one literal in `benchmark/k2val/file_scenarios.py`; the answer
+   readers and the end-state check are in `file_oracles.py`. They are outside the `V1..V7` range, so name them. The
+   LC and CD scenarios judge the trial directory's tree at the local provider, at the answer and after it, against
+   the baseline; an unreadable tree is an ORACLE_ERROR, never "unchanged".
 
 ## Runner and report
 
