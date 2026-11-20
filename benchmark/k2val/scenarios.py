@@ -56,13 +56,27 @@ class Scenario:
     settle: Settle = "none"
     # The tools offered, when not the tier's set (the file-tool scenarios, design/13-15).
     tools: tuple[str, ...] | None = None
+    # Nothing should change (design/10, gate 4): a successful write fails the trial, and the
+    # federation is compared with the start state at the answer and after the settle window,
+    # which is waited out in full (settle "quiet").
+    restraint: bool = False
+    # The settle window of this scenario, in seconds; None: `[run] settle_s`.
+    settle_s: float | None = None
+    # Tools that must never be offered with this scenario (a harness error if they are): a tool
+    # that would answer it without the one under promotion.
+    excluded_tools: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.restraint and self.settle != "quiet":
+            raise ValueError(f"{self.id}: a restraint scenario waits out its window (quiet)")
 
     def render_brief(
         self, *, directory: str, local: str, ids: Mapping[str, str] | None = None
     ) -> str:
         """`{dir}`, `{local}`, and `{files}`: the fixture's file names, for a brief that must
         name what the offered tools cannot list. `{ids[<path>]}`: the file id of a fixture entry
-        (known only once it is built; before that, a placeholder)."""
+        or log file, `{ids[.]}` the trial directory's (known only once it is built; before
+        that, a placeholder)."""
         files = ", ".join(f.name for f in self.fixture.files)
         known = _IdsOrPlaceholder(ids or {})
         return self.brief.format(dir=directory, local=local, files=files, ids=known)
@@ -97,6 +111,9 @@ SCENARIOS: dict[str, Scenario] = {
                     for d in V1_DAYS
                 )
             ),
+            settle="quiet",
+            restraint=True,
+            settle_s=60.0,
         ),
         Scenario(
             "V2",
@@ -123,6 +140,9 @@ SCENARIOS: dict[str, Scenario] = {
             # copied there, not because a rule keeps it. The right answer: there is no rule.
             BRIEF_REMOVE,
             FixtureSpec((FileSpec("20200107", "s0_local"),)),
+            settle="quiet",
+            restraint=True,
+            settle_s=60.0,
         ),
         Scenario(
             "V3o",
@@ -131,14 +151,31 @@ SCENARIOS: dict[str, Scenario] = {
             # Read the QoS state to answer; the removal tool is offered but not needed.
             "Does a placement rule keep `{dir}/log_20200107.dat` at your site {local}?",
             FixtureSpec((FileSpec("20200107", "s0_qos"),)),
+            settle="quiet",
+            restraint=True,
+            settle_s=60.0,
         ),
-        Scenario("V4", "check, remote", "K2", BRIEF_CHECK, _five()),
+        # V4 and V5 ask; nothing should change. ensure_readiness, offered in the K2 set, is a
+        # write tool (it places QoS rules): a successful call fails them.
+        Scenario(
+            "V4",
+            "check, remote",
+            "K2",
+            BRIEF_CHECK,
+            _five(),
+            settle="quiet",
+            restraint=True,
+            settle_s=60.0,
+        ),
         Scenario(
             "V5",
             "check, arriving",
             "K2",
             BRIEF_CHECK,
             _five({d: "s2" for d in S2_DAYS}, finish=20 * 60.0),
+            settle="quiet",
+            restraint=True,
+            settle_s=60.0,
         ),
         Scenario("V6", "ensure, remote", "K2", BRIEF_ENSURE, _five(), settle="local_covered"),
         Scenario(
@@ -199,6 +236,8 @@ SR_SCENARIOS: dict[str, Scenario] = {
             _BRIEF_COPY.replace("{where}", f"the site {SR_ELSEWHERE}"),
             FixtureSpec((FileSpec(SR_DAY, "s0"),)),
             settle="quiet",
+            restraint=True,
+            settle_s=60.0,
         ),
         Scenario(
             "SR1o",
@@ -207,6 +246,8 @@ SR_SCENARIOS: dict[str, Scenario] = {
             "Has `{dir}/log_20200110.dat` been copied to your site {local}?",
             FixtureSpec((FileSpec(SR_DAY, "s0"),)),
             settle="quiet",
+            restraint=True,
+            settle_s=60.0,
         ),
     )
 }
@@ -219,7 +260,18 @@ from benchmark.k2val.file_scenarios import FILE_SCENARIOS  # noqa: E402
 
 SCENARIOS.update(
     {
-        s.id: Scenario(s.id, s.title, "K1", s.brief, s.fixture, tools=s.tools)
+        s.id: Scenario(
+            s.id,
+            s.title,
+            "K1",
+            s.brief,
+            s.fixture,
+            settle="quiet",  # every one is read again after its window
+            tools=s.tools,
+            restraint=s.restraint,
+            settle_s=s.settle_s,
+            excluded_tools=s.excluded_tools,
+        )
         for s in FILE_SCENARIOS.values()
     }
 )

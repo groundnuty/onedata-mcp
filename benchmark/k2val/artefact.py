@@ -59,6 +59,14 @@ class K2TrialArtefact(TrialArtefact):
     calls: tuple[dict, ...] = ()
     fixture_error: str | None = None
     teardown_problems: tuple[str, ...] = ()
+    # The tools the model was offered (checked against the scenario's set before dispatch).
+    offered_tools: tuple[str, ...] = ()
+    # Every check the trial was scored on (scoring.py): the answer, the oracle's end state, the
+    # required call, the restraint checks, writes inside the trial directory.
+    checks: tuple[dict, ...] = ()
+    # What scoring needs beside the snapshots, baseline, writer and calls (scoring.py), so that
+    # a trial can be scored again offline.
+    oracle_context: dict | None = None
     # Filled in by hand after the run: harness bug / deployment artefact / model failure.
     classification: str = ""
 

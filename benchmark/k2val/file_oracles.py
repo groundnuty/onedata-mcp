@@ -73,6 +73,12 @@ def tree_delta(baseline: dict[str, dict], now: dict[str, dict]) -> dict[str, lis
     }
 
 
+def tree_changes(baseline: dict[str, dict], now: dict[str, dict]) -> list[str]:
+    """`tree_delta` as sentences ([] when the tree is the baseline): the restraint check."""
+    delta = tree_delta(baseline, now)
+    return [f"{what} {paths}" for what, paths in delta.items() if paths]
+
+
 def end_state(spec: FileScenario, baseline: dict[str, dict], now: dict[str, dict]) -> list[str]:
     """Why the tree is not the expected end state ([] when it is): the baseline plus exactly
     `spec.added`, each of its type, an added directory with nothing in it but other added

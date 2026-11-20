@@ -59,7 +59,11 @@ class FakeToolApp:
         self.handlers = handlers or {}
 
     async def list_tools(self):
-        return []
+        """Every tool a scenario may offer (the runner checks the scenario's set is there)."""
+        from benchmark.k2val.config import K2_TOOLS
+        from benchmark.k2val.file_scenarios import FILE_TOOLS
+
+        return [SimpleNamespace(name=n) for n in sorted({*K2_TOOLS, *FILE_TOOLS})]
 
     async def call_tool(self, name, arguments):
         out = self.handlers[name](arguments)
@@ -525,12 +529,12 @@ async def test_an_unusable_space_is_reset_fail_not_a_model_failure(
 async def test_an_oracle_crash_is_recorded_and_the_sweep_goes_on(
     cfg, api, fed, clock, tmp_path, monkeypatch
 ) -> None:
-    from benchmark.k2val import runner
+    from benchmark.k2val import oracles
 
     def boom(ctx, trace):
         raise RuntimeError("oracle bug")
 
-    monkeypatch.setitem(runner.ORACLES, "V4", boom)
+    monkeypatch.setitem(oracles.ORACLES, "V4", boom)
     art = await run_trial(
         make_deps(cfg, api, clock, tmp_path, static("x")), cfg.models["glm"], SCENARIOS["V4"], 0
     )
@@ -897,3 +901,40 @@ async def test_an_anthropic_trial_through_the_real_tool_surface_and_the_spend_le
     assert len((tmp_path / "run" / "spend.jsonl").read_text().splitlines()) == 3
     assert art.serving_fingerprint == "claude-haiku-5-5"
     assert art.usage_in_tokens == 3000 and art.usage_out_tokens == 600
+
+
+# --- the surface the model is offered ------------------------------------------------------
+
+
+def test_the_offered_surface_must_be_the_scenarios_exactly() -> None:
+    from benchmark.k2val.config import K1_TOOLS
+    from benchmark.k2val.runner import _surface_problem
+
+    fa = SCENARIOS["FA"]
+    k1 = frozenset(K1_TOOLS)
+    assert _surface_problem(fa, k1, sorted(k1)) is None
+    with_listing = k1 | {"list_children"}  # a [tools] k1 override that would answer FA
+    assert "FA must not be offered ['list_children']" in _surface_problem(
+        fa, with_listing, sorted(with_listing)
+    )
+    assert "does not offer ['get_file_attributes']" in _surface_problem(
+        fa, k1, sorted(k1 - {"get_file_attributes"})
+    )
+    assert "would also see ['delete_file']" in _surface_problem(
+        fa, k1, sorted(k1 | {"delete_file"})
+    )
+
+
+class _NoTools(FakeToolApp):
+    async def list_tools(self):
+        return []
+
+
+@pytest.mark.asyncio
+async def test_a_trial_without_its_tools_is_a_harness_error_not_a_fail(
+    cfg, api, fed, clock, tmp_path
+) -> None:
+    deps = make_deps(cfg, api, clock, tmp_path, static("No."), app=_NoTools())
+    art = await run_trial(deps, cfg.models["glm"], SCENARIOS["V4"], 0)
+    assert art.outcome == "HARNESS_ERROR" and "does not offer" in art.error
+    assert deps.adapters == {}  # no model was called

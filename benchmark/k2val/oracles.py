@@ -50,6 +50,10 @@ class K2Context:
     # before the agent started, and the trial directory's tree (the file-tool scenarios).
     baseline_tree: dict[str, dict] | None = None
     baseline_files: dict[str, dict] = field(default_factory=dict)
+    # Where the trial worked: its directory (path and id) and the local provider's id.
+    directory: str = ""
+    dir_id: str = ""
+    local_provider_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -439,14 +443,25 @@ def verify_v2(ctx: K2Context, trace: AgentTrace) -> OracleResult:
 
 
 def verify_v3(ctx: K2Context, trace: AgentTrace) -> OracleResult:
+    """V3, remove rule. mcp: the answer says the rule was removed AND the fixture's rule was no
+    longer on the file when the answer was given (else PREMATURE CLAIM). federation: after the
+    settle the file has no QoS requirement at all. That remove_qos_requirement removed the
+    fixture's rule is the scenario's required-call check (scoring.REQUIRED)."""
+    at = require_usable(ctx.at_answer, "at the answer")
     snap = require_usable(ctx.after_settle, "after the settle")
+    built = {q for ids in ctx.fixture_qos.values() for q in ids}
+    present = {q for n in ctx.file_names if n in at.files for q in at.files[n].qos_ids}
+    still = sorted(built & present)
     fed = not snap.any_qos(ctx.file_names)
     claim = claims_removed(trace.final_answer)
     parts = ["the file has no QoS requirement" if fed else "a QoS requirement is still on the file"]
+    if claim and still:
+        ctx.flags.append("premature_claim")
+        parts.append(f"PREMATURE CLAIM: said removed, but {still} was still on it at the answer")
     parts.append(
         "the answer says it was removed" if claim else "the answer does not say it was removed"
     )
-    return _result(claim, fed, parts)
+    return _result(claim and not still, fed, parts)
 
 
 def _unusable(ctx: K2Context, *snaps: Snapshot | None) -> None:

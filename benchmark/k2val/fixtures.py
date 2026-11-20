@@ -243,8 +243,9 @@ class BuiltFixture:
         return f"/{self.space}/{self.dir_name}"
 
     def ids(self) -> dict[str, str]:
-        """File ids by relative path, for a brief that gives an id (`{ids[log_20200102.dat]}`)."""
-        return dict(self.entries)
+        """File ids by relative path, for a brief that gives an id (`{ids[log_20200102.dat]}`):
+        the entries, the log files, and the trial directory itself (`.`)."""
+        return {".": self.dir_id, **{n: bf.file_id for n, bf in self.files.items()}, **self.entries}
 
     def baseline(self) -> dict:
         """The start state the agent got, as the LOCAL provider reported it before the first

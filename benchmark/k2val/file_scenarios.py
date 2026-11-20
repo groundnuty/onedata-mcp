@@ -64,6 +64,11 @@ class FileScenario:
     # fails the federation axis.
     added: Mapping[str, str] = field(default_factory=dict)
     added_content: Mapping[str, str] = field(default_factory=dict)
+    # Nothing should change (scoring.py's restraint checks); the settle window it waits out.
+    restraint: bool = False
+    settle_s: float = 30.0
+    # Tools never to be offered with it (a harness error if they are).
+    excluded_tools: tuple[str, ...] = ()
 
 
 # Every scenario of this module, by id; each family's section below adds its own.
@@ -102,6 +107,8 @@ def _fa_fixture(odd: str | None) -> FixtureSpec:
     return FixtureSpec((), entries=tuple(_log(d, "600" if d == odd else "644") for d in FA_DAYS))
 
 
+# A listing that returns permissions would answer FA without get_file_attributes.
+FA_EXCLUDED = ("list_children", "list_files_recursively")
 FA_RULES = (
     "Pass when the answer reader returns the expected name (or none). The reader takes a name "
     "named alone, else the last sentence that names one file or says none; an answer it cannot "
@@ -120,6 +127,9 @@ FA = FileScenario(
     answer="log_20200103.dat (mode 600; the other three are 644)",
     rules=FA_RULES,
     expect="log_20200103.dat",
+    restraint=True,
+    settle_s=60.0,
+    excluded_tools=FA_EXCLUDED,
 )
 FAI = FileScenario(
     id="FAi",
@@ -132,6 +142,9 @@ FAI = FileScenario(
     answer="log_20200102.dat (mode 600; the other three are 644)",
     rules=FA_RULES,
     expect="log_20200102.dat",
+    restraint=True,
+    settle_s=60.0,
+    excluded_tools=FA_EXCLUDED,
 )
 FAN = FileScenario(
     id="FAn",
@@ -144,6 +157,9 @@ FAN = FileScenario(
     answer="none: all four files have mode 644",
     rules=FA_RULES,
     expect="none",
+    restraint=True,
+    settle_s=60.0,
+    excluded_tools=FA_EXCLUDED,
 )
 FILE_SCENARIOS.update({s.id: s for s in (FA, FAI, FAN)})
 
@@ -182,6 +198,7 @@ LC = FileScenario(
     answer="calib_runs, raw_frames and spare_slots (the last two are empty)",
     rules=LC_RULES,
     expect=frozenset(LC_DIRS),
+    restraint=True,
 )
 LCN = FileScenario(
     id="LCn",
@@ -194,6 +211,7 @@ LCN = FileScenario(
     answer="none: it holds only log_20200101.dat and log_20200102.dat",
     rules=LC_RULES,
     expect=frozenset(),
+    restraint=True,
 )
 LCO = FileScenario(
     id="LCo",
@@ -212,6 +230,7 @@ LCO = FileScenario(
         "log_20200103.dat. The federation axis: the tree after the answer equals the baseline."
     ),
     expect=frozenset({"log_20200101.dat", "log_20200102.dat", "log_20200103.dat"}),
+    restraint=True,
 )
 # Fourteen entries: more than the default page of 10. In name order (unverified on 25.0; the
 # live test prints the order), `calib_runs` comes first and the two empty directories last,
@@ -236,6 +255,7 @@ LCP = FileScenario(
     answer="calib_runs, raw_frames and spare_slots (the last two are on the second page)",
     rules=LC_RULES,
     expect=frozenset(LC_DIRS),
+    restraint=True,
 )
 FILE_SCENARIOS.update({s.id: s for s in (LC, LCN, LCO, LCP)})
 
@@ -279,6 +299,7 @@ CDN = FileScenario(
         "equals the baseline."
     ),
     expect="not_created",
+    restraint=True,
 )
 CDO = FileScenario(
     id="CDo",

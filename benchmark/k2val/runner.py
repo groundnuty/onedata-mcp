@@ -29,11 +29,12 @@ from benchmark.k2val.config import K2valConfig, ModelConf
 from benchmark.k2val.federation import FedApi
 from benchmark.k2val.fixtures import BuiltFixture, FixtureBuilder, FixtureSpec
 from benchmark.k2val.legs import AdapterFactory
-from benchmark.k2val.oracles import ORACLES, K2Context, k2_violations, settled
+from benchmark.k2val.oracles import K2Context, k2_violations, settled
 from benchmark.k2val.recording import CallRecord, RecordingApp
 from benchmark.k2val.scenarios import SYSTEM_PROMPT_TEMPLATE, Scenario
+from benchmark.k2val.scoring import context_to_json, score
 from benchmark.k2val.secrets import redact, say
-from benchmark.k2val.snapshot import Snapshot, UnusableSnapshot, require_usable, take_snapshot
+from benchmark.k2val.snapshot import Snapshot, UnusableSnapshot, take_snapshot
 from benchmark.k2val.spend import SpendTracker
 
 TOOL_RESULT_CAP = 8 * 1024
@@ -101,11 +102,17 @@ def _to_toolcall(rec: CallRecord) -> ToolCall:
 async def _settle(
     deps: RunDeps, fixture: BuiltFixture, scenario: Scenario, first: Snapshot
 ) -> Snapshot:
+    """The federation after the settle window (`Scenario.settle_s`, else `[run] settle_s`).
+    The federation is read every `settle_poll_s` until the awaited end state shows or the window
+    ends. "quiet" (every restraint scenario) awaits nothing, so the whole window is waited out
+    and the last reading, taken at its end, is the one returned, even if the first reading
+    already matched."""
     if scenario.settle == "none":
         return first
+    window = scenario.settle_s if scenario.settle_s is not None else deps.cfg.limits.settle_s
     names = list(fixture.files)
     snap = first
-    deadline = deps.clock.time() + deps.cfg.limits.settle_s
+    deadline = deps.clock.time() + window
     while not settled(scenario.settle, snap, names) and deps.clock.time() < deadline:
         await deps.clock.sleep(deps.settle_poll_s)
         snap = await take_snapshot(deps.fed, fixture, deps.clock)
@@ -193,13 +200,26 @@ async def run_trial(
                 )
             )
 
-        if fixture.entries:  # a brief may give an entry's file id, known only now
-            brief = scenario.render_brief(directory=directory, local=local_name, ids=fixture.ids())
+        # a brief may give a file id, known only now
+        brief = scenario.render_brief(directory=directory, local=local_name, ids=fixture.ids())
 
         tools = _tools_for(deps, scenario)
         rec_app = RecordingApp(
             deps.app, allowed=tools, call_cap_s=cfg.limits.tool_call_cap_s, clock=deps.clock.time
         )
+        # The surface the model gets is the scenario's, exactly (design/10: a tool that answers
+        # the task without the one under promotion must not be there).
+        offered = sorted(t.name for t in await rec_app.list_tools())
+        if problem := _surface_problem(scenario, tools, offered):
+            return persist(
+                artefact(
+                    "HARNESS_ERROR",
+                    error=f"offered tools: {problem}",
+                    fixture_started_at=fixture.started_at,
+                    fixture_ready_at=fixture.ready_at,
+                    offered_tools=tuple(offered),
+                )
+            )
         try:
             adapter = deps.adapter_factory(conf, lambda c: cost.__setitem__(0, cost[0] + c))
         except Exception as e:  # noqa: BLE001 - e.g. an unreadable key file
@@ -272,6 +292,7 @@ async def run_trial(
             "fixture_baseline": fixture.baseline(),
             "calls": tuple(r.to_json() for r in records),
             "directory": directory,
+            "offered_tools": tuple(offered),
         }
         writer_record = fixture.writer.record() if fixture.writer else None
         common["writer"] = writer_record
@@ -318,15 +339,18 @@ async def run_trial(
             },
             baseline_tree=fixture.baseline_tree,
             baseline_files=dict(fixture.files_baseline),
+            directory=directory,
+            dir_id=fixture.dir_id,
+            local_provider_id=await deps.fed.provider_id("local"),
         )
         common["snapshot_after_settle"] = after_settle.to_json()
+        common["oracle_context"] = context_to_json(ctx)
         trace = AgentTrace(final_answer=final_answer, tool_calls=common["tool_calls"])
         try:
             # One usability rule for every scenario (snapshot.py): nothing is judged on a reading
-            # that failed, whatever the oracle would make of it.
-            require_usable(at_answer, "at the answer")
-            require_usable(after_settle, "after the settle")
-            result = ORACLES[scenario.id](ctx, trace)
+            # that failed, whatever the oracle would make of it. Then the oracle and the checks
+            # every scenario of a kind shares (scoring.py).
+            scored = score(scenario, ctx, trace)
         except UnusableSnapshot as e:
             return persist(
                 artefact(
@@ -348,11 +372,12 @@ async def run_trial(
         common["writer"] = writer_record
         return persist(
             artefact(
-                "PASS" if result.mcp_pass else "FAIL",
-                oracle_mcp_pass=result.mcp_pass,
-                oracle_federation_pass=result.federation_pass,
-                oracle_diagnosis=result.diagnosis,
-                flags=tuple(dict.fromkeys([*flags, *ctx.flags])),
+                scored.outcome,
+                oracle_mcp_pass=scored.oracle.mcp_pass,
+                oracle_federation_pass=scored.oracle.federation_pass,
+                oracle_diagnosis=scored.diagnosis,
+                checks=tuple(c.to_json() for c in scored.checks),
+                flags=tuple(dict.fromkeys([*flags, *ctx.flags, *scored.flags])),
                 k2_violations=tuple(k2_violations(ctx)),
                 **common,
             )
@@ -367,6 +392,18 @@ async def run_trial(
                 deps.notes.append(f"{trial_id}: teardown problems: {teardown_problems}")
         if tracked:
             deps.spend.end_trial()
+
+
+def _surface_problem(scenario: Scenario, tools: frozenset[str], offered: list[str]) -> str | None:
+    """Why the surface the model would see is not the scenario's, or None."""
+    problems = []
+    if missing := sorted(tools - set(offered)):
+        problems.append(f"the app does not offer {missing}")
+    if extra := sorted(set(offered) - tools):
+        problems.append(f"the model would also see {extra}")
+    if excluded := sorted(set(scenario.excluded_tools) & (tools | set(offered))):
+        problems.append(f"{scenario.id} must not be offered {excluded}")
+    return "; ".join(problems) or None
 
 
 def _fingerprint(adapter: Any, dispatch: Any) -> str | None:
