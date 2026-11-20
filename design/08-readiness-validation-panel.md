@@ -480,9 +480,10 @@ Nothing should change in V1, V3n, V3o, V4, V5, SR1n, SR1o, FA, FAi, FAn, LC, LCn
 - **Harness outcomes, never a FAIL.** A federation reading that fails or is malformed (a QoS summary without its
   map, a block map without a size, a provider's own entry or one of its storages failed, a size other than the one
   written, a failed listing) is unusable: the trial is ORACLE_ERROR. A size of 0 covers nothing. Before dispatch, the
-  tools the model is offered must be the scenario's set exactly, on every leg (the in-process app, and the HTTP
-  server of the Claude and CLI legs, which refuses to start otherwise); a mismatch or an excluded tool is a
-  HARNESS_ERROR.
+  tools the model is offered must be the scenario's set exactly: checked against the in-process app for every leg
+  (a mismatch or an excluded tool is a HARNESS_ERROR), and again by the HTTP server of the Claude and CLI legs,
+  which refuses to start on a mismatch, and by the `claude_sdk` leg, which stops on a tool beyond the set (both an
+  ADAPTER_ERROR).
 
 ## Reading the answer: a deterministic reader and a judge
 

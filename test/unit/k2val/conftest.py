@@ -19,6 +19,24 @@ KEY_LLMLAB = "lk-SECRET-key-44cd"
 
 
 @pytest.fixture(autouse=True)
+def _never_the_real_judge(monkeypatch: pytest.MonkeyPatch):
+    """A unit test never calls the real judge (design/08): its one call path raises. Tests of
+    the judge's retry and error handling override `_ask` in a subclass, which this leaves be."""
+    from benchmark.k2val import judge
+
+    reached: list[str] = []
+
+    async def refuse(self, spec, system, prompt):
+        reached.append(prompt[:60])
+        raise AssertionError("a unit test reached the real judge")
+
+    monkeypatch.setattr(judge.ClaudeSdkJudge, "_ask", refuse)
+    yield
+    # the judge turns a raised error into a verdict's judge_error, so check after the test too
+    assert reached == [], f"a unit test reached the real judge: {reached}"
+
+
+@pytest.fixture(autouse=True)
 def _masker():
     MASKER.clear()
     yield
