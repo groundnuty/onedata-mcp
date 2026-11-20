@@ -159,14 +159,21 @@ def _sr1i(ctx: K2Context) -> tuple[bool, str]:
 
 
 def _fa(ctx: K2Context) -> tuple[bool, str]:
-    wanted = {f"{ctx.directory}/{rel}" for rel in (ctx.baseline_tree or {})}
+    """FA and FAi: the file that differs must have been read (the right target); the others may
+    be deduced from it. FAn ("none differs") can only be known by reading every file."""
+    from benchmark.k2val.file_scenarios import FILE_SCENARIOS
+
+    expect = FILE_SCENARIOS[ctx.scenario_id].expect
+    files = {f"{ctx.directory}/{rel}" for rel in (ctx.baseline_tree or {})}
+    wanted = files if expect == "none" else {f"{ctx.directory}/{expect}"}
     read = {
         resolve_target(ctx, c.arguments.get("file_id_or_path"))
         for c in successful(ctx, "get_file_attributes")
     }
     missing = sorted(p.rsplit("/", 1)[-1] for p in wanted - read)
     if not missing:
-        return True, "get_file_attributes read every one of the files"
+        what = "every one of the files" if expect == "none" else f"the file that differs ({expect})"
+        return True, f"get_file_attributes read {what}"
     return False, f"NO SUCCESSFUL get_file_attributes of {missing}"
 
 

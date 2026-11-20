@@ -355,17 +355,25 @@ def test_lci_requires_the_directorys_id() -> None:
     assert REQUIRED["LCi"](make_ctx("LCi", snap(), tree=tree, calls=(by_id,)))[0] is True
 
 
-def test_fa_requires_every_file_read() -> None:
+def test_fa_requires_the_file_that_differs_and_fan_every_file() -> None:
     names = [f"log_2020010{d}.dat" for d in range(1, 5)]
     tree = _tree(*names)
-    reads = [
+    odd = "log_20200103.dat"  # FA's expected answer
+    three = [
         call(i, "get_file_attributes", file_id_or_path=f"{DIR}/{n}")
-        for i, n in enumerate(names[:3])
+        for i, n in enumerate(names)
+        if n != "log_20200104.dat"
     ]
-    ok, why = REQUIRED["FA"](make_ctx("FA", snap(), tree=tree, calls=tuple(reads)))
-    assert not ok and names[3] in why
-    reads.append(call(3, "get_file_attributes", file_id_or_path=f"f-{names[3]}"))  # by id
-    assert REQUIRED["FA"](make_ctx("FA", snap(), tree=tree, calls=tuple(reads)))[0] is True
+    # FA: reading the file that differs (and deducing the rest) is enough
+    assert REQUIRED["FA"](make_ctx("FA", snap(), tree=tree, calls=tuple(three)))[0] is True
+    no_odd = tuple(c for c in three if not str(c.arguments["file_id_or_path"]).endswith(odd))
+    ok, why = REQUIRED["FA"](make_ctx("FA", snap(), tree=tree, calls=no_odd))
+    assert not ok and odd in why
+    # FAn: "none differs" needs every file read
+    ok, why = REQUIRED["FAn"](make_ctx("FAn", snap(), tree=tree, calls=tuple(three)))
+    assert not ok and "log_20200104.dat" in why
+    four = (*three, call(3, "get_file_attributes", file_id_or_path=f"f-{names[3]}"))  # by id
+    assert REQUIRED["FAn"](make_ctx("FAn", snap(), tree=tree, calls=four))[0] is True
 
 
 def test_cd_requires_create_directory_of_the_path() -> None:
