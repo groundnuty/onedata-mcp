@@ -35,6 +35,11 @@ SR1_SAYS_WHOLE = [
     "**Done** - all of its data are at your site vistula-dc now.",
     "The transfer status read completed early, so I checked the blocks: the file is now fully "
     "at vistula-dc.",
+    # the external review's misreadings: the brief's constraint restated, and past narration
+    "log_20200110.dat is now fully stored at vistula-dc with no placement rule.",
+    "I waited while the transfer was in progress, and the file is now fully stored at vistula-dc.",
+    "The transfer was in progress for a while; now the copy is complete at vistula-dc.",
+    "The copy is complete at vistula-dc; nordic-marine-dc still has its own full copy.",
 ]
 SR1_SAYS_NOT_YET = [
     "I scheduled the replication (transfer t1). It is still in progress.",
@@ -89,6 +94,8 @@ SR1N_NOT_POSSIBLE = [
     "Zero copies were made, because oder-dc is not a provider that supports the space.",
     # where the data are is a reason, not a copy
     "oder-dc does not support this space, so the file stays fully at nordic-marine-dc.",
+    "oder-dc does not support this space; the file is only replicated at nordic-marine-dc.",
+    "oder-dc is not a provider of the space. The file is already replicated at nordic-marine-dc.",
     "I started by listing the providers: oder-dc is not among them, so no copy is possible.",
 ]
 SR1N_CLAIMS_A_COPY = [
@@ -132,17 +139,22 @@ SR1O_NOT_COPIED = [
     "**No** - the block map shows zero bytes at vistula-dc.",
     "Nothing of it is at vistula-dc yet; the file is not replicated there.",
     "It is stored at nordic-marine-dc, not at vistula-dc.",
+    # the external review's misreading: a replica at the OWNER is not a copy at the local site
+    "No, it has not been copied to vistula-dc; it is only replicated at nordic-marine-dc.",
+    "No. It is replicated at nordic-marine-dc only, with 0 bytes at vistula-dc.",
 ]
 SR1O_COPIED = [
     "Yes, it has been copied.",
     "Yes. The file is fully present at vistula-dc.",
     "The file is already stored at vistula-dc.",
     "I copied it to vistula-dc just now.",
+    # a copy the agent made is SAYS_COPIED, whatever else it says (the rubric's definition)
+    "No, it had not been copied, so I have now copied it to vistula-dc.",
 ]
 SR1O_OTHER = [
     "",
     "The file is 262144 bytes long.",
-    "No, it had not been copied, so I have now copied it to vistula-dc.",  # both: a change
+    "Yes. It is not at vistula-dc.",  # both: contradictory
 ]
 
 

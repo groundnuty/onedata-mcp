@@ -206,9 +206,12 @@ SCENARIOS: dict[str, Scenario] = {
 #       not in the federation at all). Right: it cannot be done, and why; nothing is copied.
 # SR1o  offered, not needed: "has it been copied to your site?" Right: no. Nothing is copied.
 #
-# Not built: a variant giving the target by id. The tool takes only an id, so the name form
-# (SR1, SR1n) is the one with something to resolve; every successful call passes an id. See
-# design/12 for the reasoning and for the variants the protocol asks about.
+# SR1i  SR1's task with the FILE given by its id only (the file argument's id form): it
+#       requires a successful call that passes that id.
+#
+# Not built: a variant giving the TARGET provider by id. The tool takes only an id there, so the
+# name form (SR1, SR1n) is the one with something to resolve, and every successful call passes
+# an id: inapplicable, recorded in design/12 with the other variants the protocol asks about.
 # ---------------------------------------------------------------------------------------------
 
 SR_DAY = "20200110"
@@ -226,6 +229,16 @@ SR_SCENARIOS: dict[str, Scenario] = {
             "copy without a rule",
             "K1",
             _BRIEF_COPY.replace("{where}", "your site {local}"),
+            FixtureSpec((FileSpec(SR_DAY, "s0", LARGE_FILE_SIZE),)),
+            settle="local_covered",
+        ),
+        Scenario(
+            "SR1i",
+            "copy without a rule, file by id",
+            "K1",
+            "Make a copy of the file with the id `{ids[log_20200110.dat]}` at your site {local}, "
+            "without setting up any placement rule for it, and tell me when its data are fully "
+            "there.",
             FixtureSpec((FileSpec(SR_DAY, "s0", LARGE_FILE_SIZE),)),
             settle="local_covered",
         ),

@@ -99,11 +99,27 @@ def test_the_settles() -> None:
 
 
 def test_they_are_registered_after_the_v_scenarios_and_named_to_run() -> None:
-    assert list(SCENARIOS)[9:12] == list(SR) == list(SR_SCENARIOS)  # right after V1..V7, V3n, V3o
+    # right after V1..V7, V3n, V3o
+    assert list(SCENARIOS)[9:13] == ["SR1", "SR1i", "SR1n", "SR1o"] == list(SR_SCENARIOS)
     assert list(SCENARIOS)[2:5] == ["V3", "V3n", "V3o"]
     assert set(ORACLES) == set(SCENARIOS)
     assert parse_scenarios("SR1,SR1n,SR1o") == list(SR)
     assert "SR1" not in parse_scenarios("V1..V7")
+
+
+def test_sr1i_is_sr1_with_the_file_given_by_its_id_only() -> None:
+    text = brief("SR1i")
+    assert text == brief("SR1").replace(
+        f"`{DIR}/log_20200110.dat`", "the file with the id `<id of log_20200110.dat>`"
+    )
+    built = SCENARIOS["SR1i"].render_brief(
+        directory=DIR, local="vistula-dc", ids={"log_20200110.dat": "f" * 32}
+    )
+    assert "`" + "f" * 32 + "`" in built and DIR not in built and SR_FILE not in built
+    for tool in K2_TOOLS:
+        assert tool not in built
+    assert SCENARIOS["SR1i"].fixture == SCENARIOS["SR1"].fixture
+    assert SCENARIOS["SR1i"].settle == "local_covered"
 
 
 # --- the fixture -------------------------------------------------------------------------------
@@ -355,3 +371,33 @@ async def test_the_http_legs_record_a_refused_schedule_as_failed_under_its_bare_
         ("schedule_file_replication", False),
         ("schedule_file_replication", True),
     ]
+
+
+@pytest.mark.asyncio
+async def test_sr1i_a_copy_by_the_given_id_passes_and_one_by_path_misses_the_required_call(
+    cfg, api, fed, clock, tmp_path, sr_app
+):
+    real_new_id = fed.new_id
+    fed.new_id = lambda prefix: real_new_id(prefix) + "0" * 14  # 20+ characters, as on 25.0
+
+    async def by_id(app, given):
+        await _copy(app, given)
+        fed.tick()
+        await app.call_tool("get_file_distribution", {"file_id_or_path": given})
+        return "The copy is complete: the file is now fully stored at vistula-dc."
+
+    deps = make_deps(cfg, api, clock, tmp_path, scripted(by_id), app=sr_app)
+    art = await run_trial(deps, cfg.models["glm"], small("SR1i"), 0)
+    assert art.outcome == "PASS", art.oracle_diagnosis
+    assert DIR not in art.brief and "<id of" not in art.brief
+
+    async def by_path(app, given):
+        path = fed.path_of(fed.nodes[given])  # the file's path, which the brief does not give
+        await _copy(app, path)
+        fed.tick()
+        return "The copy is complete: the file is now fully stored at vistula-dc."
+
+    deps = make_deps(cfg, api, clock, tmp_path / "2", scripted(by_path), app=sr_app)
+    art = await run_trial(deps, cfg.models["glm"], small("SR1i"), 1)
+    assert art.outcome == "FAIL"
+    assert "given the file's id" in art.oracle_diagnosis

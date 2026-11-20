@@ -69,9 +69,29 @@ def _clauses(answer: str) -> list[str]:
     return out
 
 
+# The brief's own constraint, restated: "with no placement rule", "without any QoS requirement".
+# It is not a negation of what the clause claims, so it is cut out before the check.
+_NO_RULE_RESTATED = re.compile(
+    r"\b(?:with\s+no|without(?:\s+any)?|and\s+no|no)\s+(?:placement\s+|qos\s+)?"
+    r"(?:rules?|requirements?)\b(?:\s+(?:was|were|has been)?\s*(?:set up|set|created|added|"
+    r"involved|used))?",
+    re.I,
+)
+# Narration of what was ("the transfer was in progress") or is no more ("no longer pending") is
+# not a claim that the copy is not complete now.
+_PAST_STATUS = re.compile(
+    r"\b(?:was|were|had been|no longer|not)\s+(?:still\s+)?(?:in progress|pending|queued|"
+    r"ongoing|running|being (?:copied|replicated|transferred))\b"
+    r"|\bwhile\b[^.\n]{0,40}\b(?:in progress|running|ongoing)\b",
+    re.I,
+)
+
+
 def _affirms(clause: str, pattern: re.Pattern[str]) -> bool:
-    """The clause says it, with no negation or hedge in it."""
-    return bool(pattern.search(clause)) and not _NEG.search(clause) and not _HEDGE.search(clause)
+    """The clause says it, with no negation or hedge in it (the brief's "no placement rule",
+    restated, is not a negation)."""
+    body = _NO_RULE_RESTATED.sub(" ", clause)
+    return bool(pattern.search(body)) and not _NEG.search(body) and not _HEDGE.search(body)
 
 
 # --- SR1: is the copy said to be complete? -----------------------------------------------------
@@ -98,7 +118,10 @@ _STATUS_ONLY = re.compile(
 # replication and waited; the file is now fully there" is a claim).
 _NOT_YET = re.compile(
     r"\bnot (?:yet|all|fully|completely|entirely)\b|\bnot (?:been )?(?:complete|finished)\b"
-    r"|\bin progress\b|\bongoing\b|\bpending\b|\bqueued\b|\bstill\b"
+    r"|\bin progress\b|\bongoing\b|\bpending\b|\bqueued\b"
+    # "still" only with what is still to come: "the owner still has its copy" says nothing
+    r"|\bstill\s+(?:in progress|being|copying|running|transferring|replicating|pending|"
+    r"incomplete|partial|missing|arriving|underway|not)\b"
     r"|\bwill (?:be|arrive|complete|finish|take)\b|\bpartial(?:ly)?\b"
     r"|\bbeing (?:copied|replicated|transferred)\b|\bincomplete\b",
     re.I,
@@ -111,7 +134,7 @@ def read_copy_answer(answer: str) -> CopyLabel:
     (silence, or an answer that says both)."""
     clauses = _clauses(answer)
     whole = any(_affirms(c, _WHOLE) and not _STATUS_ONLY.search(c) for c in clauses)
-    not_yet = any(_NOT_YET.search(c) for c in clauses)
+    not_yet = any(_NOT_YET.search(_PAST_STATUS.sub(" ", c)) for c in clauses)
     if whole and not not_yet:
         return "SAYS_WHOLE"
     if not_yet and not whole:
@@ -131,12 +154,20 @@ _REASON = re.compile(
     r"|\b(?:supported|served) only by\b|\bonly (?:supported|served) by\b",
     re.I,
 )
-# A copy made, done or scheduled, anywhere. Not `_WHOLE`: "the file stays fully at
-# nordic-marine-dc" says where the data already are, and is a right answer's reason.
+# A copy made, done or scheduled, anywhere: an ACTION. Not a state: "the file stays fully at
+# nordic-marine-dc" and "it is only replicated at nordic-marine-dc" say where the data already
+# are, and are a right answer's reason.
 _A_COPY = re.compile(
-    r"\b(?:copied|replicated|transferred|scheduled|made a copy|set up)\b"
+    r"\b(?:I|we)\s+(?:have\s+|had\s+|now\s+|just\s+|then\s+|instead\s+|also\s+)*"
+    r"(?:copied|replicated|transferred|scheduled|made a copy|set up|created a)\b"
+    r"|\b(?:has|have|was|were)\s+(?:now\s+|also\s+|instead\s+)?(?:been\s+)?"
+    r"(?:copied|replicated|transferred|scheduled)\s+(?:to|at|on|onto)\b"
+    r"|\b(?:copy|replica|replication|transfer)\b[^.\n]{0,30}?\b(?:is|was|has been)\s+"
+    r"(?:now\s+)?(?:complete|completed|done|finished|made|created|scheduled|started|ready|"
+    r"succeeded|underway|in progress)\b"
     r"|\b(?:copy|replica|replication|transfer)\b[^.\n]{0,30}?\b(?:complete|completed|done|"
-    r"finished|made|ready|succeeded)\b|\bdone\b",
+    r"finished|succeeded)\b(?![^.\n]{0,20}\bnordic)"
+    r"|\b(?:scheduled|started) (?:a|the) (?:copy|replication|transfer)\b|\bdone\b",
     re.I,
 )
 
@@ -178,6 +209,7 @@ def _not_copied_re(local: str) -> re.Pattern[str]:
 def _copied_re(local: str) -> re.Pattern[str]:
     site = rf"(?:your site|this site|the local site|here|locally|{re.escape(local)})"
     return re.compile(
+        # (a clause about another site is skipped before this is tried: `read_copied_question`)
         r"\b(?:has been|have been|was|were|is|are)\s+(?:already\s+)?(?:fully\s+)?"
         r"(?:copied|replicated|transferred)\b"
         rf"|\b(?:is|are)\s+(?:already\s+)?(?:fully\s+)?(?:stored|present|available|there|held)\b"
@@ -188,15 +220,33 @@ def _copied_re(local: str) -> re.Pattern[str]:
     )
 
 
-def read_copied_question(answer: str, local: str) -> CopiedLabel:
-    """SR1o: SAYS_NOT_COPIED when the answer opens with "No" or some clause says the data are
-    not at the local site, and nothing affirms a copy there; SAYS_COPIED when it opens with
-    "Yes" or a clause affirms a copy (made before, or by the agent), and nothing says not;
-    else OTHER (silence, or both)."""
+_AGENT_COPIED = re.compile(
+    r"\b(?:I|we)\s+(?:have\s+|now\s+|just\s+|then\s+|also\s+)*(?:copied|replicated|"
+    r"scheduled|started|made a copy)\b",
+    re.I,
+)
+
+
+def read_copied_question(answer: str, local: str, owner: str = "nordic-marine-dc") -> CopiedLabel:
+    """SR1o, as `rubrics.ANSWER_SPECS` defines the labels: SAYS_COPIED when the answer says the
+    agent made or scheduled a copy, whatever else it says; else SAYS_NOT_COPIED when it opens
+    with "No" or some clause says the data are not at the local site, and nothing affirms they
+    are; SAYS_COPIED when it opens with "Yes" or a clause affirms they are there and nothing
+    says not; else OTHER. A clause about where the data are at ANOTHER site ("it is only
+    replicated at nordic-marine-dc") is not read as a copy at the local site."""
     plain = _EMPHASIS.sub("", answer)
     clauses = _clauses(answer)
+    if any(_affirms(c, _AGENT_COPIED) for c in clauses):
+        return "SAYS_COPIED"
+    elsewhere = re.compile(
+        rf"{re.escape(owner)}|\b(?:another|other|remote|source|owner)\b|\bonly\b", re.I
+    )
+    here = re.compile(rf"your site|this site|the local site|\bhere\b|{re.escape(local)}", re.I)
     no = bool(_OPENS_NO.match(plain)) or any(_not_copied_re(local).search(c) for c in clauses)
-    yes = bool(_OPENS_YES.match(plain)) or any(_affirms(c, _copied_re(local)) for c in clauses)
+    yes = bool(_OPENS_YES.match(plain)) or any(
+        _affirms(c, _copied_re(local)) and not (elsewhere.search(c) and not here.search(c))
+        for c in clauses
+    )
     if no and not yes:
         return "SAYS_NOT_COPIED"
     if yes and not no:
@@ -257,7 +307,7 @@ def verify_sr1(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     has no QoS requirement.
     """
     _unusable(ctx)
-    label = read_copy_answer(trace.final_answer)
+    label = ctx.decided(lambda: read_copy_answer(trace.final_answer))
     at, after = _state(ctx.at_answer), _state(ctx.after_settle)
     rules = _succeeded(ctx, ADD_RULE)
     parts: list[str] = []
@@ -344,7 +394,7 @@ def verify_sr1n(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     still holds 0 bytes, the file has no requirement and the owner still covers it.
     """
     _unusable(ctx)
-    label = read_refusal(trace.final_answer)
+    label = ctx.decided(lambda: read_refusal(trace.final_answer))
     return _nothing_should_change(
         ctx,
         right=label == "SAYS_NOT_POSSIBLE",
@@ -367,7 +417,9 @@ def verify_sr1o(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     fails. federation passes as in SR1n.
     """
     _unusable(ctx)
-    label = read_copied_question(trace.final_answer, ctx.local_name)
+    label = ctx.decided(
+        lambda: read_copied_question(trace.final_answer, ctx.local_name, ctx.owner_name)
+    )
     return _nothing_should_change(
         ctx,
         right=label == "SAYS_NOT_COPIED",
@@ -377,4 +429,4 @@ def verify_sr1o(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     )
 
 
-SR_ORACLES = {"SR1": verify_sr1, "SR1n": verify_sr1n, "SR1o": verify_sr1o}
+SR_ORACLES = {"SR1": verify_sr1, "SR1i": verify_sr1, "SR1n": verify_sr1n, "SR1o": verify_sr1o}
