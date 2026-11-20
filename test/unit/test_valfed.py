@@ -183,6 +183,38 @@ def test_a_live_test_runs_in_the_live_space_with_the_token_in_the_environment_on
     assert env["ONEDATA_MCP_DOTENV"] == "0"
 
 
+def test_the_transfer_live_test_gets_the_owner_and_the_writer_token_in_the_environment_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its probe files are written through `owner`, so that a copy to `local` has data to move."""
+    tools, writer = "tok-tools-SECRET-1f2e3d", "tok-writer-SECRET-9a8b7c"
+    home = valfed.Home(tmp_path)
+    home.tokens.mkdir()
+    home.token_file("tools").write_text(tools + "\n")
+    home.token_file("writer").write_text(writer + "\n")
+    monkeypatch.setattr(valfed, "facts", lambda _home: FACTS)
+    runs: list[tuple[list[str], dict[str, str]]] = []
+
+    def fake_run(argv, cwd, env):
+        runs.append((argv, env))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(valfed.subprocess, "run", fake_run)
+
+    valfed.COMMANDS["transfer-live"](home)
+
+    ((argv, env),) = runs
+    assert argv[-3:] == ["test/live/test_transfer_live.py", "-v", "-s"]
+    assert not any(tools in part or writer in part for part in argv)
+    assert env["ONEDATA_MCP_LIVE_TRANSFER"] == "1"
+    assert env["ONEDATA_MCP_LIVE_TRANSFER_SPACE"] == valfed.LIVE_SPACE
+    assert env["ONEDATA_ONEPROVIDER_HOST"] == FACTS["providers"]["local"]["url"]
+    assert env["ONEDATA_ONEPROVIDER_TOKEN"] == tools
+    assert env["ONEDATA_MCP_LIVE_TRANSFER_SOURCE_HOST"] == FACTS["providers"]["owner"]["url"]
+    assert env["ONEDATA_MCP_LIVE_TRANSFER_SOURCE_TOKEN"] == writer
+    assert env["SSL_CERT_FILE"] == str(home.ca_pem)
+
+
 def test_a_failed_live_test_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home = valfed.Home(tmp_path)
     home.tokens.mkdir()
