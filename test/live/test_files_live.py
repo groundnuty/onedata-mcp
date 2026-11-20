@@ -203,3 +203,101 @@ async def test_attribute_errors_as_the_model_reads_them(files_mcp: FastMCP, prob
         {"file_id_or_path": f"{probe}/seed.txt", "attributes": ["mode"]},
     )
     assert result.is_error is True and "mode->posixPermissions" in text
+
+
+# =============================================================================================
+# list_children (design/14)
+# =============================================================================================
+
+
+async def _all_pages(mcp: FastMCP, path: str, **arguments) -> tuple[list[str], int]:
+    """Every entry name, page by page with the token; and how many pages it took."""
+    names: list[str] = []
+    token = None
+    pages = 0
+    while True:
+        args = {"parent_id_or_path": path, **arguments}
+        if token:
+            args["token"] = token
+        result, text = await _call(mcp, "list_children", args)
+        assert result.is_error is False, text
+        page = _payload(result, text)
+        pages += 1
+        names += [c["name"] for c in page["children"]]
+        if page["isLast"]:
+            return names, pages
+        token = page["nextPageToken"]
+        assert token, page
+        assert pages < 10, "no end to the listing"
+
+
+@pytest.mark.asyncio
+async def test_a_directory_longer_than_one_page_is_listed_with_the_token(
+    files_mcp: FastMCP, probe: str
+) -> None:
+    """LCp's shape: 11 files and 3 subdirectories (two empty), 14 entries for a page of 10. It
+    settles that a token page is accepted (the tool no longer sends offset with it), and prints
+    the order of the entries (LCp assumes name order puts the empty directories last)."""
+    base = f"{probe}/listing"
+    for day in range(1, 12):
+        await create_file(f"{base}/log_202001{day:02d}.dat", f"log {day}\n", create_parents=True)
+    await create_file(f"{base}/calib_runs/log_20200112.dat", "log 12\n", create_parents=True)
+    for name in ("raw_frames", "spare_slots"):
+        result, text = await _call(files_mcp, "create_directory", {"path": f"{base}/{name}"})
+        assert result.is_error is False, text
+
+    result, text = await _call(files_mcp, "list_children", {"parent_id_or_path": base})
+    first = _payload(result, text)
+    print(f"first page (default limit): {[c['name'] for c in first['children']]}")
+    print(f"isLast {first['isLast']}, nextPageToken given: {bool(first['nextPageToken'])}")
+    assert len(first["children"]) == 10 and first["isLast"] is False
+
+    names, pages = await _all_pages(files_mcp, base)
+    print(f"all entries in order, {pages} pages: {names}")
+    assert sorted(names) == sorted(
+        [f"log_202001{d:02d}.dat" for d in range(1, 12)]
+        + ["calib_runs", "raw_frames", "spare_slots"]
+    )
+
+    result, text = await _call(
+        files_mcp, "list_files_recursively", {"parent_id_or_path": base, "limit": 100}
+    )
+    listed = [f["path"] for f in _payload(result, text)["files"]]
+    print(f"recursive file listing: {listed}")
+    # LC and LCp "require" list_children because this listing shows no empty directory
+    assert not any(p.rstrip("/").endswith(("raw_frames", "spare_slots")) for p in listed)
+
+    result, text = await _call(
+        files_mcp, "list_children", {"parent_id_or_path": base, "offset": 10, "limit": 10}
+    )
+    print(f"offset 10: {[c['name'] for c in _payload(result, text)['children']]}")
+
+
+@pytest.mark.asyncio
+async def test_listing_errors_and_an_empty_directory_as_the_model_reads_them(
+    files_mcp: FastMCP, probe: str
+) -> None:
+    result, text = await _call(
+        files_mcp, "list_children", {"parent_id_or_path": f"{probe}/seed.txt"}
+    )
+    print(f"listing a regular file answered: is_error={result.is_error} {text}")
+    if result.is_error:
+        assert "regular file, not a directory" in text or "not found" not in text
+
+    result, text = await _call(
+        files_mcp, "list_children", {"parent_id_or_path": f"{probe}/no-such-dir"}
+    )
+    print(f"listing a missing path answered: {text}")
+    assert result.is_error is True and "not found" in text
+
+    result, text = await _call(files_mcp, "create_directory", {"path": f"{probe}/empty"})
+    assert result.is_error is False, text
+    result, text = await _call(files_mcp, "list_children", {"parent_id_or_path": f"{probe}/empty"})
+    page = _payload(result, text)
+    print(f"an empty directory: {page}")
+    assert page["children"] == [] and page["isLast"] is True
+
+    result, text = await _call(
+        files_mcp, "list_children", {"parent_id_or_path": probe, "token": "not-a-token"}
+    )
+    print(f"a made-up token answered: {text}")
