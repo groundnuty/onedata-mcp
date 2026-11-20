@@ -117,6 +117,10 @@ async def test_each_component_is_percent_encoded(
         ("/Alpha/a/..", "has an empty, '.' or '..' component"),
         ("/Alpha/./b", "has an empty, '.' or '..' component"),
         ("/Alpha/a//b", "has an empty, '.' or '..' component"),
+        ("reports/2020", "Paths must start with '/': use /<space_name>/<path_to_directory>"),
+        ("//Alpha/b", "does not start with a space name"),
+        ("/./b", "does not start with a space name"),
+        ("/../b", "does not start with a space name"),
     ],
 )
 async def test_a_path_that_cannot_name_a_new_directory_is_refused_before_any_request(
@@ -326,6 +330,46 @@ async def test_a_space_lookup_without_a_structured_not_found_does_not_call_it_mi
 
 
 # --- through the MCP client ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_relative_path_with_an_empty_list_of_roots_reaches_no_api(
+    mcp: FastMCP, httpx_mock: HTTPXMock
+) -> None:
+    """With roots=[] the path is left as given; read as /reports/2020 it would make a directory
+    in a space named reports."""
+    async with Client(mcp, roots=[]) as client:
+        result = await client.call_tool(
+            "create_directory", {"path": "reports/2020"}, raise_on_error=False
+        )
+
+    text = "\n".join(c.text for c in result.content if hasattr(c, "text"))
+    assert result.is_error is True
+    assert "Paths must start with '/': use /<space_name>/<path_to_directory>" in text
+    assert [r for r in httpx_mock.get_requests() if r.url.path.find("/spaces") < 0] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool", "arguments", "form"),
+    [
+        ("create_directory", {"path": "reports/2020"}, "/<space_name>/<path_to_directory>"),
+        ("list_children", {"parent_id_or_path": "Alpha/d"}, "/<space_name>/<path_to_directory>"),
+        ("get_file_attributes", {"file_id_or_path": "Alpha/a.nc"}, "/<space_name>/<path_to_file>"),
+    ],
+)
+async def test_a_relative_path_with_no_mcp_session_gets_the_same_hint(
+    mcp: FastMCP, httpx_mock: HTTPXMock, tool: str, arguments: dict, form: str
+) -> None:
+    """The validation panel's API legs call the app with no MCP session; the roots request
+    then raised "session is not available", which said nothing about the path."""
+    with pytest.raises(Exception) as caught:
+        await mcp.call_tool(tool, arguments)
+
+    text = str(caught.value)
+    assert f"Paths must start with '/': use {form}" in text
+    assert "session is not available" not in text
+    assert [r for r in httpx_mock.get_requests() if r.url.path.find("/spaces") < 0] == []
 
 
 @pytest.mark.asyncio

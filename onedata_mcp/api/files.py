@@ -535,22 +535,34 @@ _HOW_TO_NAME_A_DIRECTORY = "Give the new directory's full path, /<space_name>/<p
 
 def _directory_path(path: str) -> tuple[str, str]:
     """(the space's name, the new directory's path under its root), or a ValueError saying what
-    to give. An empty, `.` or `..` component is refused: in the request path the HTTP client
-    resolves `a/../b` to `b`, which would make the directory somewhere else."""
-    normalized = path.strip("/")
-    if not normalized:
+    to give. The path must be absolute: a relative one left unresolved (a client with an empty
+    list of roots) would otherwise read its first component as a space. The space component and
+    every later one must be a name: an empty, `.` or `..` component is refused, since in the
+    request path the HTTP client resolves `a/../b` to `b`, which would make the directory
+    somewhere else."""
+    if not path.startswith("/"):
+        raise ValueError(
+            "Paths must start with '/': use /<space_name>/<path_to_directory> "
+            f"(got {_shown(path)})."
+        )
+    body = path[1:].rstrip("/")
+    if not body:
         raise ValueError(f"The path is empty. {_HOW_TO_NAME_A_DIRECTORY}")
-    if "/" not in normalized:
+    space_name, *rest = body.split("/")
+    if space_name in ("", ".", ".."):
+        raise ValueError(
+            f"{_shown(path)} does not start with a space name. {_HOW_TO_NAME_A_DIRECTORY}"
+        )
+    if not rest:
         raise ValueError(
             f"{_shown(path)} is the root directory of a space, which always exists. "
             f"{_HOW_TO_NAME_A_DIRECTORY}"
         )
-    space_name, relative = normalized.split("/", 1)
-    if any(part in ("", ".", "..") for part in relative.split("/")):
+    if any(part in ("", ".", "..") for part in rest):
         raise ValueError(
             f"{_shown(path)} has an empty, '.' or '..' component. {_HOW_TO_NAME_A_DIRECTORY}"
         )
-    return space_name, relative
+    return space_name, "/".join(rest)
 
 
 async def _type_at(path: str) -> str | None:
