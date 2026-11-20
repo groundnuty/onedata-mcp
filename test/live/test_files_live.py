@@ -301,3 +301,84 @@ async def test_listing_errors_and_an_empty_directory_as_the_model_reads_them(
         files_mcp, "list_children", {"parent_id_or_path": probe, "token": "not-a-token"}
     )
     print(f"a made-up token answered: {text}")
+
+
+# =============================================================================================
+# create_directory (design/15)
+# =============================================================================================
+
+
+async def _type_of(mcp: FastMCP, path: str) -> str:
+    result, text = await _call(
+        mcp, "get_file_attributes", {"file_id_or_path": path, "attributes": ["type"]}
+    )
+    assert result.is_error is False, text
+    return _payload(result, text)["type"]
+
+
+@pytest.mark.asyncio
+async def test_a_directory_is_made_and_a_second_creation_says_it_exists(
+    files_mcp: FastMCP, probe: str
+) -> None:
+    path = f"{probe}/archive"
+    result, text = await _call(files_mcp, "create_directory", {"path": path})
+
+    assert result.is_error is False, text
+    made = _payload(result, text)
+    assert made["path"] == path and made["fileId"] == await get_file_id(path)
+    assert await _type_of(files_mcp, path) == "DIR"
+
+    result, text = await _call(files_mcp, "create_directory", {"path": path})
+    print(f"creating it again answered: {text}")
+    assert result.is_error is True
+    assert "already exists as a directory" in text
+
+
+@pytest.mark.asyncio
+async def test_a_regular_file_in_the_way_is_named_as_one(files_mcp: FastMCP, probe: str) -> None:
+    """CDn's state: the error must say a regular file is there, not a directory."""
+    path = f"{probe}/occupied"
+    await create_file(path, "not a dir\n")
+
+    result, text = await _call(files_mcp, "create_directory", {"path": path})
+
+    print(f"a file in the way answered: {text}")
+    assert result.is_error is True
+    assert "already exists as a regular file, so no directory was created" in text
+    assert await _type_of(files_mcp, path) == "REG"
+
+
+@pytest.mark.asyncio
+async def test_nested_paths_and_their_failures(files_mcp: FastMCP, probe: str) -> None:
+    result, text = await _call(files_mcp, "create_directory", {"path": f"{probe}/2020/01"})
+    assert result.is_error is False, text
+    assert await _type_of(files_mcp, f"{probe}/2020") == "DIR"
+    assert await _type_of(files_mcp, f"{probe}/2020/01") == "DIR"
+
+    result, text = await _call(
+        files_mcp,
+        "create_directory",
+        {"path": f"{probe}/missing/child", "create_parents": False},
+    )
+    print(f"a missing parent with create_parents false answered: {text}")
+    assert result.is_error is True
+    assert "parent directory" in text  # the hint keys on enoent; printed above if 25.0 differs
+
+    result, text = await _call(files_mcp, "create_directory", {"path": f"{probe}/seed.txt/sub"})
+    print(f"a regular file on the path answered: {text}")
+    assert result.is_error is True
+
+
+@pytest.mark.asyncio
+async def test_a_question_mark_and_a_hash_are_part_of_the_name(
+    files_mcp: FastMCP, probe: str
+) -> None:
+    """Percent-encoded: before, `?` started a query and `#` a fragment."""
+    path = f"{probe}/a?b#c"
+    result, text = await _call(files_mcp, "create_directory", {"path": path})
+    print(f"creating {path!r} answered: is_error={result.is_error} {text}")
+    if result.is_error:
+        return  # Onedata may refuse such a name; the error is printed above
+    result, text = await _call(files_mcp, "list_children", {"parent_id_or_path": probe})
+    names = [c["name"] for c in _payload(result, text)["children"]]
+    assert "a?b#c" in names and "a" not in names
