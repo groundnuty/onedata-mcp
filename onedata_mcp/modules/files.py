@@ -1,11 +1,12 @@
+import json
 import re
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 from urllib.parse import urlparse
 
 from fastmcp import Context, FastMCP
 from mcp.shared.exceptions import McpError
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import BeforeValidator, Field
 
 from onedata_mcp.api.files import (
     _looks_like_directory_intent,
@@ -28,6 +29,56 @@ from onedata_mcp.api.files import (
 )
 
 ONEDATA_FILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{20,}$")
+
+# --- the `attributes` input of get_file_attributes and list_children ---------------------------
+
+MAX_ATTRIBUTES = 64  # the swagger names 34 attributes; `xattr.<key>` adds any number
+ATTRIBUTE_NAMES_DOC = (
+    "(Optional) Names of the attributes to return, at most 64. Allowed names:\n"
+    "- identity and location: fileId, parentFileId, index, name, conflictingName, path, type\n"
+    "- permissions: activePermissionsType, posixPermissions, acl\n"
+    "- ownership, provider and shares: ownerUserId, originProviderId, directShareIds\n"
+    "- links: hardlinkCount, symlinkValue\n"
+    "- display ids: displayUid, displayGid\n"
+    "- times and size: creationTime, atime, mtime, ctime, size\n"
+    "- replication: isFullyReplicatedLocally, localReplicationRate\n"
+    "- metadata: hasCustomMetadata, hasJsonMetadata, jsonMetadata, and xattr.<key> for one "
+    "extended attribute"
+)
+DEFAULT_ATTRIBUTES_DOC = (
+    "path, name, type (REG for a regular file, DIR for a directory, SYMLNK for a symbolic "
+    "link), size, posixPermissions, atime and mtime"
+)
+
+
+def _attribute_list(value: Any) -> Any:
+    """Read a list sent as its JSON text (`'["size", "mtime"]'`, seen from Qwen3-Coder) as that
+    list. Any other string is refused, with what to send instead. Everything else goes on to
+    pydantic's own list check, so the published schema stays a list of strings."""
+    if not isinstance(value, str):
+        return value
+    try:
+        parsed = json.loads(value)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
+        return parsed
+    raise ValueError(
+        'attributes must be a list of attribute names, for example ["size", "mtime"]; '
+        f"got the string {value[:80]!r}"
+    )
+
+
+AttributeNames = Annotated[
+    Optional[Annotated[list[str], Field(max_length=MAX_ATTRIBUTES)]],
+    BeforeValidator(_attribute_list),
+]
+
+GET_FILE_ATTRIBUTES_DOC = (
+    "Get the attributes of a file or directory, given by path or file id.\n\n"
+    "Returns an object that maps each requested attribute name to its value. Without "
+    f"`attributes`, it returns {DEFAULT_ATTRIBUTES_DOC}."
+)
 
 
 def _is_probable_file_id(value: str) -> bool:
@@ -120,31 +171,20 @@ def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
             path = await _resolve_with_mcp_root(path, ctx)
             return await get_file_id(path)
 
-    @mcp.tool(name="get_file_attributes", annotations=ToolAnnotations(readOnlyHint=True))
+    @mcp.tool(
+        name="get_file_attributes",
+        description=GET_FILE_ATTRIBUTES_DOC,
+        annotations=ToolAnnotations(readOnlyHint=True),
+    )
     async def mcp_get_file_attributes(
         file_id_or_path: str = Field(
-            description="File id or path to the file in format /<space_name>/<path_to_file>"
+            description=(
+                "Path of the file or directory, /<space_name>/<path_to_file>, or its file id"
+            )
         ),
-        attributes: Optional[list[str]] = Field(
-            default=None,
-            description="""
-            (Optional) List of attribute names to request from Oneprovider. 
-            Allowed values:
-            - Identity/location: fileId, parentFileId, index, name, conflictingName, path, type
-            - Permissions/access: activePermissionsType, posixPermissions, acl
-            - Ownership/provider/shares: ownerUserId, originProviderId, directShareIds
-            - Links: hardlinkCount, symlinkValue
-            - Display ids: displayUid, displayGid
-            - Timestamps/size: creationTime, atime, mtime, ctime, size
-            - Replication: isFullyReplicatedLocally, localReplicationRate
-            - Metadata: hasCustomMetadata, hasJsonMetadata, jsonMetadata, xattr.*
-            """,
-        ),
+        attributes: AttributeNames = Field(default=None, description=ATTRIBUTE_NAMES_DOC),
         ctx: Optional[Context] = None,
     ) -> dict[str, Any]:
-        """
-        Get attributes for a file id or a logical path.
-        """
         file_id_or_path = await _resolve_with_mcp_root(file_id_or_path, ctx)
         return await get_file_attributes(file_id_or_path, attributes=attributes)
 

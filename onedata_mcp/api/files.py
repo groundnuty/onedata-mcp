@@ -127,21 +127,126 @@ async def get_file_id(path: str) -> str:
     return response["body"]["fileId"]
 
 
+# --- A file id in a request path, and errors a caller can act on --------------------------------
+#
+# Used by get_file_attributes, list_children and create_directory (design/13-15). The stable
+# tools that share `_normalize_path_to_file_id` keep their own handling: changing them needs
+# their own gates.
+
+_SHOWN_MAX = 80
+_HOW_TO_NAME_A_FILE = "Give a path, /<space_name>/<path>, or a file id."
+
+
+def _shown(value: str) -> str:
+    """The value as echoed in an error: quoted, and cut short if it is long."""
+    if len(value) <= _SHOWN_MAX:
+        return repr(value)
+    return repr(value[:_SHOWN_MAX]) + "..."
+
+
+def _target(file_id_or_path: str) -> str:
+    kind = "path" if file_id_or_path.startswith("/") else "file id"
+    return f"{kind} {_shown(file_id_or_path)}"
+
+
+def _id_in_path(file_id: str, file_id_or_path: str) -> str:
+    """The file id as one percent-encoded path segment.
+
+    Unencoded, a `?` or `#` in an id cuts the request path short, and a `/` adds segments. An
+    empty id, `.` or `..` is refused before any request: the HTTP client resolves dot segments
+    to another URL (`/data/..` is the API root)."""
+    if not file_id.strip():
+        raise ValueError(f"The file id or path is empty. {_HOW_TO_NAME_A_FILE}")
+    if file_id.strip() in {".", ".."}:
+        raise ValueError(
+            f"{_shown(file_id_or_path)} is not a file id or path. {_HOW_TO_NAME_A_FILE}"
+        )
+    return quote(file_id, safe="")
+
+
+def _status(error: OnedataApiError) -> int | None:
+    response = error.response if isinstance(error.response, dict) else {}
+    status = response.get("status_code")
+    return status if isinstance(status, int) else None
+
+
+def _is_forbidden(error: OnedataApiError) -> bool:
+    return (
+        _status(error) == 403 or error.error_id == "forbidden" or error.errno in {"eacces", "eperm"}
+    )
+
+
+def _is_absent(error: OnedataApiError) -> bool:
+    return _status(error) == 404 or error.error_id == "notFound" or error.errno == "enoent"
+
+
+def _rejects_the_id(error: OnedataApiError) -> bool:
+    """A 400 about the id itself (`badValueIdentifier`, or a bad value whose key is `id`), not
+    about another input such as an unknown attribute name, which passes on unchanged."""
+    if _status(error) != 400:
+        return False
+    body_error = error.body.get("error")
+    details = body_error.get("details") if isinstance(body_error, dict) else None
+    key = details.get("key") if isinstance(details, dict) else None
+    return error.error_id == "badValueIdentifier" or (
+        (error.error_id or "").startswith("badValue") and key == "id"
+    )
+
+
+def _file_error_hint(error: OnedataApiError, file_id_or_path: str, action: str) -> str | None:
+    """What the caller can do about a failed call on a file or directory, or None to pass the
+    error on unchanged. Keyed on the HTTP status the swagger lists (400, 403, 404), with the
+    error id and errno as a fallback: the exact 25.0 bodies are not pinned here."""
+    target = _target(file_id_or_path)
+    if _is_forbidden(error):
+        return (
+            f"Not allowed to {action} {target}: the token has no access to it. Calling again "
+            "will not help."
+        )
+    if _is_absent(error):
+        return (
+            f"Nothing exists at {target}: it may have been deleted, or the value is not a file "
+            f"id. {_HOW_TO_NAME_A_FILE}"
+        )
+    if _rejects_the_id(error):
+        return f"Onedata rejected {target} as a file id. {_HOW_TO_NAME_A_FILE}"
+    return None
+
+
+def _with_hint(hint: str, error: OnedataApiError) -> OnedataApiError:
+    """The hint first, then Onedata's own message."""
+    return OnedataApiError(f"{hint} [{error}]", response=error.response)
+
+
 async def get_file_attributes(
     file_id_or_path: str,
     *,
     attributes: Iterable[str] | None = DEFAULT_FILE_ATTRIBUTE_KEYS,
 ) -> dict[str, Any]:
+    """The attributes of a file or directory, given by path or id.
+
+    Without `attributes` (or with an empty list), the default set is asked for. A deprecated
+    attribute name is refused with its new name; a failure the caller can act on (nothing at
+    the id or path, a rejected id, no access) is raised with what to do about it, followed by
+    Onedata's own message."""
     config = get_oneprovider_config()
     requested_attributes = tuple[str, ...](attributes or DEFAULT_FILE_ATTRIBUTE_KEYS)
+    _reject_deprecated_attributes(requested_attributes)
 
-    file_id = await _normalize_path_to_file_id(file_id_or_path)
-    response = await request(
-        config,
-        "GET",
-        f"/data/{file_id}",
-        json_body=({"attributes": list(requested_attributes)} if requested_attributes else None),
-    )
+    try:
+        file_id = await _normalize_path_to_file_id(file_id_or_path)
+        response = await request(
+            config,
+            "GET",
+            f"/data/{_id_in_path(file_id, file_id_or_path)}",
+            json_body={"attributes": list(requested_attributes)},
+        )
+    except OnedataApiError as e:
+        await _raise_invalid_space_error_if_needed(e, file_id_or_path)
+        hint = _file_error_hint(e, file_id_or_path, "read the attributes of")
+        if hint is None:
+            raise
+        raise _with_hint(hint, e) from e
     logger.debug(f"Fetched file attributes for file {file_id_or_path}: {response['body']}")
     return response["body"]
 
