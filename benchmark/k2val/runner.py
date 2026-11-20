@@ -55,6 +55,17 @@ def make_trial_id(run_id: str, model: str, scenario_id: str, ix: int) -> str:
     return f"{scenario_id.lower()}-{model}-k{ix}-{tag}"
 
 
+_DIGITS_TO_LETTERS = str.maketrans("0123456789", "ghijklmnop")
+
+
+def trial_dir_name(trial_id: str) -> str:
+    """The trial's directory, `logs-<12 letters>`: opaque, so a path never tells a model which
+    scenario or variant it is in (`logs-v3n-...` did); `logs-` for the sweep at run start;
+    letters only, so no run of 8 digits in a path reads as a date."""
+    tag = hashlib.sha1(trial_id.encode()).hexdigest()[:12].translate(_DIGITS_TO_LETTERS)
+    return f"logs-{tag}"
+
+
 @dataclass
 class RunDeps:
     cfg: K2valConfig
@@ -107,7 +118,7 @@ async def run_trial(
     cfg = deps.cfg
     started = deps.clock.time()
     trial_id = make_trial_id(deps.run_id, conf.name, scenario.id, trial_ix)
-    dir_name = f"logs-{trial_id}"
+    dir_name = trial_dir_name(trial_id)
     directory = f"/{conf.space}/{dir_name}"
     local_name = cfg.federation.local.name
     brief = scenario.render_brief(directory=directory, local=local_name)
@@ -456,4 +467,4 @@ def _blank_artefact(
     return art
 
 
-__all__ = ["RunDeps", "make_trial_id", "run_sweep", "run_trial", "time"]
+__all__ = ["RunDeps", "make_trial_id", "run_sweep", "run_trial", "time", "trial_dir_name"]

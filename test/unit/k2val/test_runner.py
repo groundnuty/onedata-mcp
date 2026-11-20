@@ -16,7 +16,7 @@ from benchmark.k2val.artefact import read_trials
 from benchmark.k2val.config import PriceTiers
 from benchmark.k2val.fixtures import FILE_SIZE
 from benchmark.k2val.report import build_report
-from benchmark.k2val.runner import RunDeps, make_trial_id, run_sweep, run_trial
+from benchmark.k2val.runner import RunDeps, make_trial_id, run_sweep, run_trial, trial_dir_name
 from benchmark.k2val.scenarios import SCENARIOS
 from benchmark.k2val.secrets import say
 from benchmark.k2val.spend import SpendTracker
@@ -144,7 +144,7 @@ async def test_a_full_trial_v2_passes_end_to_end(cfg, api, fed, clock, tmp_path,
     assert art.outcome == "PASS", art.oracle_diagnosis
     assert (art.oracle_mcp_pass, art.oracle_federation_pass) == (True, True)
     assert art.space == "k2val-glm"
-    assert art.directory == f"/k2val-glm/logs-{make_trial_id(RUN_ID, 'glm', 'V2', 0)}"
+    assert art.directory == f"/k2val-glm/{trial_dir_name(make_trial_id(RUN_ID, 'glm', 'V2', 0))}"
     # the brief names the directory and the file, never a tool
     brief = deps.adapters["glm"].briefs[0]
     assert art.directory in brief and "log_20200105.dat" in brief
@@ -677,6 +677,19 @@ async def test_secrets_never_reach_a_written_file_or_stdout(
     out = capsys.readouterr()
     for secret in secrets:
         assert secret not in out.out and secret not in out.err
+
+
+def test_the_trial_directory_does_not_name_the_scenario_or_the_model() -> None:
+    """`logs-v3n-glm-...` told a model it was in a variant of V3."""
+    names = {
+        trial_dir_name(make_trial_id(RUN_ID, model, sid, ix))
+        for model in ("glm", "haiku-low")
+        for sid in ("V3", "V3n", "V3o", "CD", "CDn")
+        for ix in range(8)
+    }
+    assert len(names) == 80  # one per trial
+    for name in names:
+        assert re.fullmatch(r"logs-[a-p]{12}", name), name
 
 
 def test_a_trial_id_has_no_eight_digit_run() -> None:
