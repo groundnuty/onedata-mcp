@@ -59,6 +59,7 @@ async def test_the_description_follows_the_surface_rules(qos_mcp: FastMCP) -> No
     text = f"{tool.description} {field}"
 
     assert "Returns nothing on success" in text
+    assert "parent directories" in text  # an inherited rule affects every file under it
     others = (ALL_KNOWN | FLAG_GATED) - {"remove_qos_requirement"}
     assert [name for name in others if name in text] == []
     assert not re.search(r"\.md\b|design/|https?://|§|\bM-\d", text)

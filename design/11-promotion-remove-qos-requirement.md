@@ -19,22 +19,22 @@ The listing is `scripts/tools_manifest.py`'s output (`make -s tools-manifest`) w
 
 | Selection | Before (master `4cd4c47`) | Promoted surface (since branch commit `ac6141a`) |
 |---|---|---|
-| `remove_qos_requirement` alone | `471147719eef6f8c9e0b42c1ff6b3d7816ba014bebcbc02e23950923eddb7924` | `1e6ccb560597d0887484b0fdccfc0c59616cb2265ebe09944f79d619deef7b78` |
-| the panel's K1 set (11 tools) | `4c8ef3f22fee7805e7c7ef72b4258a6a3bc4ee2f95ef1dafb7d0edd8ebf61b66` (= design/09's "existing 11") | `f72ad02e712d8f8d761095bcf54f978b8ad18bac1b10704973ecdc1c3d4f9a04` |
+| `remove_qos_requirement` alone | `471147719eef6f8c9e0b42c1ff6b3d7816ba014bebcbc02e23950923eddb7924` | `107ce0b82032cd183a25ec0f323f7eddc6b40bb38c9b05cb95f54400da1657c7` |
+| the panel's K1 set (11 tools) | `4c8ef3f22fee7805e7c7ef72b4258a6a3bc4ee2f95ef1dafb7d0edd8ebf61b66` (= design/09's "existing 11") | `dc1d10dcce1a81e8b15c273adb99d007db9a6fdd169ce366ed43b5a38d49cd2e` |
 
 - `ac6141a` is the last commit that changes the surface; later commits leave it alone.
 - The `tools/list` diff over the K1 set is this one line. Name, input schema and annotations are unchanged:
 
   ```
   -    "description": "Remove a QoS requirement by id. Does not roll back already-replicated data.",
-  +    "description": "Remove a QoS requirement by id. Returns nothing on success.\nDoes not roll back already-replicated data.",
+  +    "description": "Remove a QoS requirement by id. Returns nothing on success.\nDoes not roll back already-replicated data. A requirement listed for a file\nmay be set on one of its parent directories: removing it removes it for every\nfile under that directory.",
   ```
 
 - **Earlier evidence is supporting only.** The triage of the experimental tools (2026-11-20) counted the earlier panel run (V1–V7) and reported 28 V3 trials, all passing, with the tool called and no error. Those were eight API configs at K=3 and two CLI agents. The figure is reported here, not recounted. That run used the old description; gate 4 needs a run at the surface above.
 
 **Before the gate-4 run**, check that the surface has not moved:
 
-    ONEDATA_MCP_TOOLS=remove_qos_requirement make -s tools-manifest | sha256sum   # expect 1e6ccb56...
+    ONEDATA_MCP_TOOLS=remove_qos_requirement make -s tools-manifest | sha256sum   # expect 107ce0b8...
 
 ## Gate 1: implementation (done, branch commit `6a9fe20`)
 
@@ -64,7 +64,7 @@ Checked against the protocol's rules; `test_the_description_follows_the_surface_
 - **Cites no document the model cannot read:** yes.
 - **Errors tell the caller how to fix the call:** done in gate 1. The error text names `get_file_qos_summary`, although the description must not. Only an error of this tool carries the name, and that tool is the stable source of these ids. It is offered with this one in every shipped set: the default list, and the panel's K1 and K2. The exceptions are a hand-written `ONEDATA_MCP_TOOLS` and `ONEDATA_MCP_MATURITY=experimental`, under which the hint points to a tool that is not there.
 - **`make conformance`: TODO.** It needs `npx` and a local port, and was not run here. Command: `make conformance`.
-- **Open point, not fixed:** a file's QoS summary also lists requirements *inherited* from ancestor directories. Removing such an id removes the directory's requirement, for every file under it, and the description does not say so. No scenario exercises it, and the protocol does not call it a defect, so it is left as it is. If it is to be added, add it **before** the gate-4 run: after promotion the same change costs a smoke re-run.
+- **Inherited requirements:** a file's QoS summary also lists requirements inherited from ancestor directories, and removing such an id removes the directory's requirement for every file under it. **Fixed before the gate-4 run:** the description now says so.
 
 ## Gate 3: live check (built in branch commit `d5f7ff5`, not run)
 
