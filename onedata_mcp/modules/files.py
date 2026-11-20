@@ -435,8 +435,8 @@ def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
         """Create a directory at the given path. Returns `{fileId, path}` of the new directory.
 
         By default, missing parent directories along the path are created too. Fails if
-        anything already exists at the path; the error says whether it is a directory or a
-        regular file."""
+        something already exists at the path; when the provider can tell, the error says
+        whether it is a directory or a regular file."""
         path = await _resolve_with_mcp_root(path, ctx)
         return await api_create_directory(path, create_parents=create_parents)
 

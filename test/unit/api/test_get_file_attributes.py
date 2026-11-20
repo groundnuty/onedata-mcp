@@ -19,7 +19,7 @@ from pytest_httpx import HTTPXMock
 from onedata_mcp.api import files
 from onedata_mcp.modules import files as files_module
 from onedata_mcp.tool_maturity import ALL_KNOWN, FLAG_GATED
-from onedata_mcp.utils import OnedataApiError, OnedataInvalidSpaceError
+from onedata_mcp.utils import OnedataApiError
 
 API = "https://provider.example/api/v3/oneprovider"
 FID = "0000000000AbCdEf0123456789"
@@ -190,7 +190,7 @@ async def test_an_unknown_attribute_name_passes_onedatas_error_on_unchanged(
         onedata_error(404, "posix", "enoent"),
     ],
 )
-async def test_an_id_that_names_nothing_says_how_to_name_a_file(
+async def test_a_structured_not_found_says_the_provider_reports_nothing(
     httpx_mock: HTTPXMock, error: dict
 ) -> None:
     httpx_mock.add_response(method="GET", url=f"{API}/data/{FID}", **error)
@@ -199,7 +199,7 @@ async def test_an_id_that_names_nothing_says_how_to_name_a_file(
         await files.get_file_attributes(FID)
 
     text = str(caught.value)
-    assert text.startswith(f"Nothing exists at file id '{FID}'")
+    assert text.startswith(f"This provider reports nothing at file id '{FID}'")
     assert "Give a path, /<space_name>/<path>, or a file id." in text
     assert "(Onedata's own text)" in text  # Onedata's message follows the hint
 
@@ -218,7 +218,7 @@ async def test_a_malformed_id_is_rejected_with_the_same_advice(
     httpx_mock.add_response(method="GET", url=f"{API}/data/abc", **error)
 
     with pytest.raises(
-        OnedataApiError, match=r"^Onedata rejected file id 'abc' as a file id\. Give"
+        OnedataApiError, match=r"^This provider rejected file id 'abc' as a file id\. Give"
     ):
         await files.get_file_attributes("abc")
 
@@ -262,16 +262,70 @@ async def test_a_lookup_refused_for_access_gets_the_access_hint(httpx_mock: HTTP
 
 
 @pytest.mark.asyncio
-async def test_an_id_of_an_unsupported_space_lists_the_spaces(httpx_mock: HTTPXMock) -> None:
+@pytest.mark.parametrize("via", ["id", "path"])
+async def test_an_unsupported_space_is_not_called_missing(httpx_mock: HTTPXMock, via: str) -> None:
+    """`spaceNotSupportedBy` says this provider does not support the space; the space may still
+    exist (the shared resolver of the stable tools reads it as "does not exist")."""
+    body = {"error": {"id": "spaceNotSupportedBy", "details": {"spaceId": "s9"}}}
+    if via == "id":
+        target, shown = "dsadas", "file id 'dsadas'"
+        httpx_mock.add_response(method="GET", url=f"{API}/data/dsadas", status_code=400, json=body)
+    else:
+        target, shown = "/Beta/a.dat", "path '/Beta/a.dat'"
+        httpx_mock.add_response(method="POST", url=lookup_url(target), status_code=400, json=body)
+
+    with pytest.raises(OnedataApiError) as caught:
+        await files.get_file_attributes(target)
+
+    text = str(caught.value)
+    assert text.startswith(
+        f"This provider does not support the space of {shown}, so it cannot read the "
+        "attributes of it here; the space may still exist. Spaces this token sees at this "
+        'provider: "Alpha".'
+    )
+    assert "does not exist" not in text and "spaceNotSupportedBy" in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("via", ["id", "path"])
+async def test_a_bare_404_gives_the_possible_causes_not_one(
+    httpx_mock: HTTPXMock, via: str
+) -> None:
+    """A 404 without a structured body: the target may be missing, its space unsupported, or
+    hidden from the token. Nothing more is claimed."""
+    if via == "id":
+        target, shown = FID, f"file id '{FID}'"
+        httpx_mock.add_response(method="GET", url=f"{API}/data/{FID}", status_code=404, text="no")
+    else:
+        target, shown = "/Alpha/a.dat", "path '/Alpha/a.dat'"
+        httpx_mock.add_response(
+            method="POST", url=lookup_url(target), status_code=404, json={"error": {}}
+        )
+
+    with pytest.raises(OnedataApiError) as caught:
+        await files.get_file_attributes(target)
+
+    text = str(caught.value)
+    assert text.startswith(f"This provider answered 404 for {shown} without saying why")
+    assert "space may not be supported by this provider" in text and "token's access" in text
+    assert "reports nothing" not in text and "not found" not in text.split("[")[0]
+    assert "status=404" in text  # the underlying error is kept
+
+
+@pytest.mark.asyncio
+async def test_a_file_on_the_way_names_a_component_not_the_path(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(
-        method="GET",
-        url=f"{API}/data/dsadas",
-        status_code=400,
-        json={"error": {"id": "spaceNotSupportedBy", "details": {"spaceId": "dsadas"}}},
+        method="POST",
+        url=lookup_url("/Alpha/a.dat/x"),
+        **onedata_error(400, "posix", "enotdir"),
     )
 
-    with pytest.raises(OnedataInvalidSpaceError, match=r'Available spaces: "Alpha"\.'):
-        await files.get_file_attributes("dsadas")
+    with pytest.raises(OnedataApiError) as caught:
+        await files.get_file_attributes("/Alpha/a.dat/x")
+
+    assert str(caught.value).startswith(
+        "A component of path '/Alpha/a.dat/x' before its last part is not a directory"
+    )
 
 
 @pytest.mark.asyncio
@@ -385,7 +439,7 @@ async def test_the_error_reaches_the_model_with_the_hint(
     is_error, text = await call(mcp, {"file_id_or_path": FID})
 
     assert is_error is True
-    assert f"Nothing exists at file id '{FID}'" in text
+    assert f"This provider reports nothing at file id '{FID}'" in text
     assert "provider.example" not in text  # host-free
 
 

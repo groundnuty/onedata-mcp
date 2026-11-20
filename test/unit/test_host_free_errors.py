@@ -759,6 +759,41 @@ async def test_an_invalid_space_error_redacts_the_id_the_service_echoes(
     )
     httpx_mock.add_response(
         method="GET",
+        url="https://provider.example/api/v3/oneprovider/data/dsadas/files",
+        status_code=400,
+        json={
+            "error": {
+                "id": "spaceNotSupportedBy",
+                "details": {"spaceId": f"https://{NODE_FQDN}:{NODE_PORT}/x", "providerId": "p1"},
+            }
+        },
+    )
+
+    # the shared resolver of the stable tools (list_children has its own text since design/14)
+    with pytest.raises(OnedataInvalidSpaceError) as excinfo:
+        await files.list_files_recursively("dsadas", limit=10)
+
+    _assert_host_free(str(excinfo.value))
+    assert str(excinfo.value).startswith('Space "<address>" does not exist.')
+
+
+@pytest.mark.asyncio
+async def test_list_children_says_the_space_is_unsupported_without_echoing_the_service(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """design/14: it names the target the caller gave, never the service's echoed id, and
+    Onedata's own message that follows is redacted."""
+    _set_env(monkeypatch)
+    _set_node_names(monkeypatch)
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/spaces",
+        json=[],
+        is_reusable=True,
+        is_optional=True,
+    )
+    httpx_mock.add_response(
+        method="GET",
         url="https://provider.example/api/v3/oneprovider/data/dsadas/children",
         status_code=400,
         json={
@@ -769,11 +804,13 @@ async def test_an_invalid_space_error_redacts_the_id_the_service_echoes(
         },
     )
 
-    with pytest.raises(OnedataInvalidSpaceError) as excinfo:
+    with pytest.raises(OnedataApiError) as excinfo:
         await files.list_children("dsadas", limit=10, offset=0)
 
     _assert_host_free(str(excinfo.value))
-    assert str(excinfo.value).startswith('Space "<address>" does not exist.')
+    assert str(excinfo.value).startswith(
+        "This provider does not support the space of file id 'dsadas'"
+    )
 
 
 @pytest.mark.asyncio
@@ -791,7 +828,7 @@ async def test_without_a_node_list_an_invalid_space_error_keeps_the_id_the_servi
     )
     httpx_mock.add_response(
         method="GET",
-        url="https://provider.example/api/v3/oneprovider/data/dsadas/children",
+        url="https://provider.example/api/v3/oneprovider/data/dsadas/files",
         status_code=400,
         json={
             "error": {
@@ -802,7 +839,7 @@ async def test_without_a_node_list_an_invalid_space_error_keeps_the_id_the_servi
     )
 
     with pytest.raises(OnedataInvalidSpaceError) as excinfo:
-        await files.list_children("dsadas", limit=10, offset=0)
+        await files.list_files_recursively("dsadas", limit=10)
 
     assert str(excinfo.value).startswith(f'Space "{echoed}" does not exist.')
 
