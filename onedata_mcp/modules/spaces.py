@@ -16,9 +16,10 @@ from onedata_mcp.api.spaces import (
 def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
     """Register onedata spaces module tools and prompts with the MCP server.
 
-    When ``experimental`` is set, additionally registers un-validated tools
-    (currently ``list_space_datasets``) gated behind ONEDATA_MCP_EXPERIMENTAL —
-    see onedata_mcp/experimental.py and onedata-mcp#1.
+    When ``experimental`` is set, additionally registers the preview tools
+    ``list_space_datasets`` and ``list_marketplace_spaces``, gated behind
+    ONEDATA_MCP_EXPERIMENTAL — see onedata_mcp/experimental.py and
+    design/10-tool-maturity.md.
     """
 
     if experimental:
@@ -59,33 +60,40 @@ def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
         """
         return await list_user_spaces()
 
-    @mcp.tool(name="list_marketplace_spaces", description="List marketplace spaces with details")
-    async def mcp_list_marketplace_spaces(
-        tags: list[str] | None = Field(
-            default=None,
-            description="Optional tags filter; returns spaces that match at least one provided tag",
-        ),
-        limit: int = Field(default=20, ge=1, le=50),
-        token: str | None = Field(
-            default=None,
-            description="Pagination token from previous response",
-        ),
-        offset: int = Field(
-            default=0,
-            description="Offset relative to token start point; can be negative",
-        ),
-    ) -> dict[str, Any]:
-        """
-        List spaces advertised in the Marketplace and return detailed entries.
+    if experimental:
 
-        Supports tags filtering and pagination with limit/token/offset.
-        """
-        return await list_marketplace_spaces(
-            tags=tags,
-            limit=limit,
-            token=token,
-            offset=offset,
+        @mcp.tool(
+            name="list_marketplace_spaces",
+            description="List marketplace spaces with details",
         )
+        async def mcp_list_marketplace_spaces(
+            tags: list[str] | None = Field(
+                default=None,
+                description=(
+                    "Optional tags filter; returns spaces that match at least one provided tag"
+                ),
+            ),
+            limit: int = Field(default=20, ge=1, le=50),
+            token: str | None = Field(
+                default=None,
+                description="Pagination token from previous response",
+            ),
+            offset: int = Field(
+                default=0,
+                description="Offset relative to token start point; can be negative",
+            ),
+        ) -> dict[str, Any]:
+            """
+            List spaces advertised in the Marketplace and return detailed entries.
+
+            Supports tags filtering and pagination with limit/token/offset.
+            """
+            return await list_marketplace_spaces(
+                tags=tags,
+                limit=limit,
+                token=token,
+                offset=offset,
+            )
 
     @mcp.tool(name="list_space_providers", annotations=ToolAnnotations(readOnlyHint=True))
     async def mcp_list_space_providers(

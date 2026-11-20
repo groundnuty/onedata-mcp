@@ -16,10 +16,11 @@ Two axes:
 ``origin`` (a distrust signal for anything unvalidated)
   ``ours``     — authored here after the upstream base commit (85b8515).
   ``upstream`` — inherited from the upstream base surface, or adapted from its
-                 later commits (the flag-gated tools, see ``FLAG_GATED``).
+                 later commits (two of the flag-gated tools, see ``FLAG_GATED``).
 
 Validation trumps origin: an upstream-origin tool that passed validation is
-``stable``. The least-trusted set is ``experimental`` ∩ ``upstream``.
+``stable``. The least-trusted set is ``experimental`` ∩ ``upstream``, plus the
+flag-gated tools, which are off the default list altogether.
 
 The initial ``stable`` set is the 16 tools the earlier multi-LLM benchmark
 evaluated (``benchmark.tool_allowlist.HEADLINE``, frozen as that benchmark's
@@ -34,7 +35,7 @@ import os
 
 logger = logging.getLogger(__name__)
 
-# --- classification (the 29 tools registered by default; 27 verified against fork 85b8515) ---
+# --- classification (the 23 tools registered by default) ---
 
 # maturity == "stable": passed the promotion protocol (design/10-tool-maturity.md).
 STABLE: frozenset[str] = frozenset(
@@ -69,15 +70,9 @@ EXPERIMENTAL: frozenset[str] = frozenset(
         "check_readiness",
         "ensure_readiness",
         # inherited from the upstream base surface, not yet validated (the
-        # genuine distrust set)
+        # genuine distrust set of the default list)
         "get_file_attributes",
-        "get_file_id",
-        "get_harvester_index_schema",
-        "grep_file_content",
         "list_children",
-        "list_marketplace_spaces",
-        "list_user_harvesters",
-        "query_harvester_index",
     }
 )
 
@@ -103,19 +98,26 @@ UPSTREAM: frozenset[str] = frozenset(
     }
 )
 
-# Registered ONLY when ONEDATA_MCP_EXPERIMENTAL is on (onedata_mcp/experimental.py);
-# with the flag off they do not exist on the server, so they are kept out of
-# ALL_KNOWN, the surface registered by default. Both are ``experimental`` (never
-# validated, and ``maturity_of`` already answers that for anything outside
-# STABLE) and ``upstream`` in origin: adapted from later upstream commits
-# (``list_space_datasets`` from 63c21b5, ``set_file_xattrs`` from 46f030a) rather
-# than present at the base commit, so they are not in UPSTREAM. They are therefore
-# outside the EXPERIMENTAL ∩ UPSTREAM set of the registered-by-default distrust tools,
-# but carry the same two labels through ``maturity_of`` / ``origin_of``.
+# Registered ONLY with the preview flag ONEDATA_MCP_EXPERIMENTAL
+# (onedata_mcp/experimental.py): with it off they do not exist on the server, so
+# they are kept out of ALL_KNOWN, the surface registered by default. All are
+# ``experimental`` (``maturity_of`` already answers that for anything outside
+# STABLE) and ``upstream`` in origin (``origin_of`` answers that for every member).
+# The first two were adapted from later upstream commits (63c21b5, 46f030a), so they
+# are not in UPSTREAM; the other six are inherited from the base commit and stay in
+# it. The six were moved off the default list (design/10-tool-maturity.md, "Leaving
+# the default surface"); each comment says why. They can return to the default list
+# through the promotion protocol.
 FLAG_GATED: frozenset[str] = frozenset(
     {
         "list_space_datasets",
         "set_file_xattrs",
+        "get_file_id",  # redundant: every path-taking tool resolves paths itself
+        "get_harvester_index_schema",  # no harvester in the test federation to validate it
+        "grep_file_content",  # untested; matches a literal, case-sensitive substring
+        "list_marketplace_spaces",  # finds spaces no other tool can act on
+        "list_user_harvesters",  # no harvester in the test federation to validate it
+        "query_harvester_index",  # no harvester in the test federation to validate it
     }
 )
 

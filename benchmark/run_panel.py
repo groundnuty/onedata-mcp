@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 import time
 from pathlib import Path
@@ -40,6 +41,12 @@ from dotenv import load_dotenv
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(REPO_ROOT / ".env")
+
+# The scenarios offer tools that master registers only with the preview flag (A3 offers
+# get_file_id). Set it before the server is imported; the Claude leg's spawned server gets
+# it through claude_agent_sdk._FORWARDED_ENV_KEYS, so every leg sees the same surface. An
+# explicit value in the environment wins.
+os.environ.setdefault("ONEDATA_MCP_EXPERIMENTAL", "1")
 
 # Imports that touch onedata_mcp.config must come AFTER load_dotenv.
 from benchmark import scenarios as _scenarios_module  # noqa: E402

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 import time
 from typing import Any
@@ -29,6 +30,11 @@ from fastmcp.exceptions import ToolError
 # Load .env BEFORE importing onedata_mcp.main, since main.py builds the
 # FastMCP server eagerly and config.get_*_config() reads env at call-time.
 load_dotenv()
+
+# The smoke exercises every callable tool, including the preview tools that are registered
+# only with this flag (get_file_id, grep_file_content, list_marketplace_spaces, the
+# harvester tools). An operator's explicit value still wins.
+os.environ.setdefault("ONEDATA_MCP_EXPERIMENTAL", "1")
 
 from onedata_mcp.main import mcp  # noqa: E402
 

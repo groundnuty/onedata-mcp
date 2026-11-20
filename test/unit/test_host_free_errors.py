@@ -281,7 +281,8 @@ async def test_a_tool_answer_for_a_zone_call_names_the_zone(
     _set_env(monkeypatch)
     httpx_mock.add_exception(_tls_failure())
     mcp = FastMCP(name="onedata-mcp-test")
-    spaces_module.register_module(mcp)
+    # list_marketplace_spaces is the zone-side tool; it is registered only with the preview flag.
+    spaces_module.register_module(mcp, experimental=True)
 
     async with Client(mcp) as client:
         result = await client.call_tool("list_marketplace_spaces", {}, raise_on_error=False)
