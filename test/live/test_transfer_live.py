@@ -48,6 +48,7 @@ import pytest_asyncio
 from fastmcp import Client, FastMCP
 
 from benchmark.k2val.federation import FedApi, provider_config
+from benchmark.k2val.fixtures import FILE_SIZE, LARGE_FILE_SIZE, PART
 from onedata_mcp.modules import files as files_module
 from onedata_mcp.modules import transfers as transfers_module
 
@@ -56,10 +57,9 @@ SPACE_ENV = "ONEDATA_MCP_LIVE_TRANSFER_SPACE"
 SOURCE_HOST_ENV = "ONEDATA_MCP_LIVE_TRANSFER_SOURCE_HOST"
 SOURCE_TOKEN_ENV = "ONEDATA_MCP_LIVE_TRANSFER_SOURCE_TOKEN"
 TOOL = "schedule_file_replication"
-# The panel's standard file (benchmark/k2val/fixtures.py FILE_SIZE) and the larger one its copy
-# scenarios use, so that a transfer is still running when a model answers (design/12, gate 4).
-SIZES = (256 * 1024, 128 * 1024 * 1024)
-PART = 8 * 1024 * 1024  # written in parts at explicit offsets: bounded memory
+# The panel's standard file and the larger one SR1 uses, so that a transfer is still running
+# when a model answers (design/12, gate 4). Written in PART-sized parts at explicit offsets.
+SIZES = (FILE_SIZE, LARGE_FILE_SIZE)
 SEES_TIMEOUT_S = 120.0
 WHOLE_TIMEOUT_S = 600.0
 NOTHING_COPIED_WAIT_S = 20.0

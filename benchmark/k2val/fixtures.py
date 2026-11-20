@@ -13,6 +13,10 @@ Kinds of file (design/08, Fixtures):
   is confirmed from the blocks.
 - `s0_qos`: an `s0` file with a QoS rule `providerId=<local id>`, waited until it is fulfilled
   and the file is locally covered.
+- Any kind but `s2` may be larger than the standard 256 KiB (`FileSpec.size`): such a file is
+  written in `PART`-sized writes at explicit offsets, so memory stays bounded. The copy scenarios
+  of `schedule_file_replication` (SR1, design/12) use `LARGE_FILE_SIZE`, so that a transfer is
+  still running when a model answers and a premature "done" can be seen.
 - `s2`: being written, mirroring the preallocated mode of the reference ingest tool (its
   `preallocate` and `ingestsparse` steps): create at the owner; extend with an EMPTY write at the
   final size (`PUT ...?offset=<size>`, which on 25.0 sets the size and writes no block); write a
@@ -33,6 +37,10 @@ from benchmark.k2val.federation import FedApi, FixtureError
 
 FILE_SIZE = 256 * 1024
 CHUNK = 64 * 1024
+# A file a transfer takes long enough over to be seen in transfer (design/12, gate 4). To be
+# calibrated by the live test's time to whole (test/live/test_transfer_live.py) before a run.
+LARGE_FILE_SIZE = 128 * 1024 * 1024
+PART = 8 * 1024 * 1024  # a large file's writes
 REST_PARTS = (FILE_SIZE - CHUNK) // CHUNK  # parts the background writer writes
 SWEEP_PREFIX = "logs"
 
@@ -57,6 +65,11 @@ def content_for(name: str, size: int = FILE_SIZE) -> bytes:
 class FileSpec:
     day: str  # YYYYMMDD
     kind: Kind = "s0"
+    size: int = FILE_SIZE
+
+    def __post_init__(self) -> None:
+        if self.kind == "s2" and self.size != FILE_SIZE:
+            raise ValueError("an s2 file has the standard size: its writer's parts assume it")
 
     @property
     def name(self) -> str:
@@ -191,11 +204,11 @@ class BuiltFixture:
         return f"/{self.space}/{self.dir_name}"
 
 
-def _baseline_holds(kind: str, reading: dict, want_qos: tuple[str, ...]) -> bool:
+def _baseline_holds(kind: str, reading: dict, want_qos: tuple[str, ...], size: int) -> bool:
     """The state a kind of file starts a trial in (see the module docstring)."""
     if kind == "s2":
         return reading["size_known"]
-    if not reading["size_known"] or reading["size"] != FILE_SIZE:
+    if not reading["size_known"] or reading["size"] != size:
         return False
     if tuple(reading["qos_ids"]) != want_qos:
         return False
@@ -210,12 +223,14 @@ class FixtureBuilder:
 
     # --- state checks ---------------------------------------------------
 
-    async def _confirm_at_owner(self, file_id: str, name: str, ids: tuple[str, str]) -> None:
+    async def _confirm_at_owner(
+        self, file_id: str, name: str, ids: tuple[str, str], size: int = FILE_SIZE
+    ) -> None:
         owner_id, local_id = ids
 
         async def at_owner_only() -> bool:
             d = await self.fed.distribution("owner", file_id)
-            return d.size == FILE_SIZE and d.covers(owner_id) and d.bytes_of(local_id) == 0
+            return d.size == size and d.covers(owner_id) and d.bytes_of(local_id) == 0
 
         await self.fed.wait_until(
             at_owner_only,
@@ -254,7 +269,7 @@ class FixtureBuilder:
             if await self.fed.lookup("local", built.path) != built.file_id:
                 return False
             attrs = await self.fed.attrs("local", built.file_id, ["size"])
-            return bool(attrs) and attrs.get("size") == FILE_SIZE
+            return bool(attrs) and attrs.get("size") == built.spec.size
 
         await self.fed.wait_until(
             sees,
@@ -289,7 +304,7 @@ class FixtureBuilder:
         )
 
         for fs in spec.files:
-            data = content_for(fs.name)
+            data = content_for(fs.name) if fs.size == FILE_SIZE else b""
             file_id = await self.fed.create_reg("owner", fixture.dir_id, fs.name)
             bf = BuiltFile(fs, file_id, f"{fixture.dir_path}/{fs.name}")
             fixture.files[fs.name] = bf
@@ -300,9 +315,14 @@ class FixtureBuilder:
                 await self._confirm_preallocated(file_id, fs.name, ids)
                 await self.fed.put("owner", file_id, data[:CHUNK], 0)
                 await self._confirm_prefix(file_id, fs.name, ids)
-            else:
+            elif fs.size == FILE_SIZE:
                 await self.fed.put("owner", file_id, data, None)  # whole body, no offset
                 await self._confirm_at_owner(file_id, fs.name, ids)
+            else:  # a large file: parts at explicit offsets, each made on its own
+                for offset in range(0, fs.size, PART):
+                    part = content_for(f"{fs.name}@{offset}", min(PART, fs.size - offset))
+                    await self.fed.put("owner", file_id, part, offset)
+                await self._confirm_at_owner(file_id, fs.name, ids, fs.size)
 
         # The agent, the transfer and the QoS rule all work through the LOCAL provider: it must
         # know each file (at its final size) before it is asked to replicate or hold one.
@@ -348,7 +368,7 @@ class FixtureBuilder:
                 if reading is None:
                     return False
                 last["reading"] = reading
-                return _baseline_holds(kind, reading, want_qos)
+                return _baseline_holds(kind, reading, want_qos, bf.spec.size)
 
             await self.fed.wait_until(
                 as_built,

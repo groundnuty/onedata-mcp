@@ -654,4 +654,11 @@ def settled(settle: str, snapshot: Snapshot, names: list[str]) -> bool:
         return not snapshot.any_qos(names)
     if settle == "complete":
         return snapshot.all_local_covered(names) and snapshot.all_owner_covered(names)
-    return True
+    # "quiet": nothing is to arrive, so the whole window is waited out
+    return settle != "quiet"
+
+
+# --- schedule_file_replication's scenarios (design/12): SR1, SR1n, SR1o ---------------------
+from benchmark.k2val.sr_oracles import SR_ORACLES  # noqa: E402 - registered after the core set
+
+ORACLES.update(SR_ORACLES)

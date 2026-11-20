@@ -633,12 +633,14 @@ async def _fixture_check() -> None:
     fed = FedApi.from_conf(cfg.federation, read_federation_secrets(cfg.federation))
     builder = FixtureBuilder(fed, SMOKE_SPACE, REAL_CLOCK)
     stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
-    # V4's fixture, then the kinds it lacks: a transfer (V1), a QoS rule (V3), a file being written.
+    # V4's fixture, then the kinds it lacks: a transfer (V1), a QoS rule (V3), a file being written,
+    # a large file (SR1).
     cases = {
         "V4": SCENARIOS["V4"].fixture,
         "V1": SCENARIOS["V1"].fixture,
         "V3": SCENARIOS["V3"].fixture,
         "s2": FixtureSpec((FileSpec("20200104", "s2"),), writer_finish_s=30.0),
+        "SR1": SCENARIOS["SR1"].fixture,  # the large file, written in parts (design/12)
     }
     problems: list[str] = []
     try:

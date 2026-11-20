@@ -126,9 +126,13 @@ class FakeFed:
             obj["ticks"] += 1
             if obj["ticks"] >= self.replication_ticks:
                 node = self.nodes.get(obj["fileId"])
-                if node is not None:
+                is_transfer = obj in self.transfers.values()
+                # A transfer copies to its target. A copy to the owner, which already holds the
+                # data, changes nothing; rules here are always `providerId=<local>`.
+                target = obj.get("replicatingProviderId", LOCAL_ID) if is_transfer else LOCAL_ID
+                if node is not None and target == LOCAL_ID:
                     node.blocks[LOCAL_ID] = [list(b) for b in node.blocks.get(OWNER_ID, [])]
-                obj["status"] = "completed" if obj in self.transfers.values() else "fulfilled"
+                obj["status"] = "completed" if is_transfer else "fulfilled"
 
     # --- routing --------------------------------------------------------
 
@@ -186,6 +190,8 @@ class FakeFed:
             return self._transfer_post(body)
         if mm := re.fullmatch(r"/transfers/([^/]+)", rest):
             return self._transfer_get(mm[1])
+        if m == "GET" and (mm := re.fullmatch(r"/spaces/([^/]+)", rest)) and mm[1] in self.roots:
+            return self._space(mm[1])
         self.unexpected.append(f"{m} {request.url}")
         return error(404)
 
@@ -336,7 +342,36 @@ class FakeFed:
             },
         )
 
+    # Provider names, as the space's providers list them (`GET /spaces/{id}`); here a space's
+    # id is its name.
+    PROVIDER_NAMES = {LOCAL_ID: "vistula-dc", OWNER_ID: "nordic-marine-dc"}
+
+    def space_of(self, fid: str) -> str | None:
+        root = next((n for n in map(self.nodes.get, self.lineage(fid)) if n and not n.parent), None)
+        return root.name if root is not None else None
+
+    def _space(self, space: str) -> httpx.Response:
+        providers = [{"providerId": p, "providerName": n} for p, n in self.PROVIDER_NAMES.items()]
+        return httpx.Response(200, json={"spaceId": space, "name": space, "providers": providers})
+
     def _transfer_post(self, body: dict) -> httpx.Response:
+        """As 25.0 is expected to answer (unverified; the live test prints the real bodies): an
+        unknown file is a 404, a target outside the space's providers a 400 naming the space."""
+        if body.get("fileId") not in self.nodes:
+            return error(404)
+        target = body.get("replicatingProviderId")
+        if target not in self.PROVIDER_NAMES:
+            details = {"spaceId": self.space_of(body["fileId"]), "providerId": target}
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "id": "spaceNotSupportedBy",
+                        "details": details,
+                        "description": f"Space is not supported by provider {target}.",
+                    }
+                },
+            )
         tid = self.new_id("t")
         self.transfers[tid] = {**body, "status": "pending", "ticks": 0}
         return httpx.Response(201, json={"transferId": tid})
