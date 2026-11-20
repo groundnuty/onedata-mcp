@@ -6,6 +6,7 @@
     make valfed-status            containers, CPU and memory caps, peak memory, host load
     make valfed-check             no-model check of the panel's federation layer, in omcp-smoke
     make valfed-readiness-live    the gated live readiness test, in omcp-live
+    make valfed-qos-live          the gated live test of remove_qos_requirement, in omcp-live
 
 One Onezone and two Oneproviders of Onedata 25.0 in Docker Compose, published on 127.0.0.1 only,
 as `layout.toml` beside this file declares them. The work is done by the Compose federation tool
@@ -554,9 +555,22 @@ def status(home: Home) -> None:
     print(f"host 5-minute load: {load5():.2f} (limit {LOAD_LIMIT})")
 
 
-def readiness_live(home: Home) -> None:
-    """test/live/test_readiness_live.py against omcp-live, TLS verified, tokens from their files
+# The gated live tests: name -> (test file, the variable that enables it, the one naming its
+# space). Each runs in LIVE_SPACE.
+LIVE_TESTS = {
+    "readiness": (
+        "test/live/test_readiness_live.py",
+        "ONEDATA_MCP_LIVE_READINESS",
+        "ONEDATA_MCP_LIVE_READINESS_SPACE",
+    ),
+    "qos": ("test/live/test_qos_live.py", "ONEDATA_MCP_LIVE_QOS", "ONEDATA_MCP_LIVE_QOS_SPACE"),
+}
+
+
+def live_test(home: Home, name: str) -> None:
+    """A gated live test against omcp-live, TLS verified, the MCP server's token from its file
     (passed in the environment, never on a command line)."""
+    test, enable, space = LIVE_TESTS[name]
     found = facts(home)
     tools = home.token_file("tools").read_text().strip()
     env = dict(
@@ -568,13 +582,21 @@ def readiness_live(home: Home) -> None:
         ONEDATA_ONEZONE_TOKEN=tools,
         ONEDATA_ONEPROVIDER_HOST=found["providers"]["local"]["url"],
         ONEDATA_ONEPROVIDER_TOKEN=tools,
-        ONEDATA_MCP_LIVE_READINESS="1",
-        ONEDATA_MCP_LIVE_READINESS_SPACE=LIVE_SPACE,
+        **{enable: "1", space: LIVE_SPACE},
     )
-    test = "test/live/test_readiness_live.py"
     rc = subprocess.run([sys.executable, "-m", "pytest", test, "-v", "-s"], cwd=REPO, env=env)
     if rc.returncode:
-        raise ValfedError(f"the live readiness test failed (exit {rc.returncode})")
+        raise ValfedError(f"the live {name} test failed (exit {rc.returncode})")
+
+
+def readiness_live(home: Home) -> None:
+    """test/live/test_readiness_live.py against omcp-live."""
+    live_test(home, "readiness")
+
+
+def qos_live(home: Home) -> None:
+    """test/live/test_qos_live.py (remove_qos_requirement) against omcp-live."""
+    live_test(home, "qos")
 
 
 async def _fixture_check() -> None:
@@ -638,6 +660,7 @@ COMMANDS = {
     "status": status,
     "check": check,
     "readiness-live": readiness_live,
+    "qos-live": qos_live,
 }
 
 

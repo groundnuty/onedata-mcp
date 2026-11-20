@@ -7,6 +7,7 @@ import io
 import tarfile
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -127,3 +128,67 @@ def test_extract_strips_the_tarball_top_directory(tmp_path: Path) -> None:
     valfed._extract(buffer, tmp_path, strip=1)
     assert (tmp_path / "README.md").read_bytes() == b"core"
     assert (tmp_path / "deploy" / "x.py").read_bytes() == b"x = 1"
+
+
+@pytest.mark.parametrize(
+    ("command", "test", "enable", "space"),
+    [
+        (
+            "readiness-live",
+            "test/live/test_readiness_live.py",
+            "ONEDATA_MCP_LIVE_READINESS",
+            "ONEDATA_MCP_LIVE_READINESS_SPACE",
+        ),
+        (
+            "qos-live",
+            "test/live/test_qos_live.py",
+            "ONEDATA_MCP_LIVE_QOS",
+            "ONEDATA_MCP_LIVE_QOS_SPACE",
+        ),
+    ],
+)
+def test_a_live_test_runs_in_the_live_space_with_the_token_in_the_environment_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    test: str,
+    enable: str,
+    space: str,
+) -> None:
+    """No federation: `facts` and `subprocess.run` are faked."""
+    token = "tok-tools-SECRET-1f2e3d"
+    home = valfed.Home(tmp_path)
+    home.tokens.mkdir()
+    home.token_file("tools").write_text(token + "\n")
+    monkeypatch.setattr(valfed, "facts", lambda _home: FACTS)
+    runs: list[tuple[list[str], dict[str, str]]] = []
+
+    def fake_run(argv, cwd, env):
+        runs.append((argv, env))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(valfed.subprocess, "run", fake_run)
+
+    valfed.COMMANDS[command](home)
+
+    ((argv, env),) = runs
+    assert argv[-3:] == [test, "-v", "-s"]
+    assert not any(token in part for part in argv)
+    assert env[enable] == "1" and env[space] == valfed.LIVE_SPACE
+    assert env["ONEDATA_ONEPROVIDER_HOST"] == FACTS["providers"]["local"]["url"]
+    assert env["ONEDATA_ONEZONE_HOST"] == FACTS["zone"]["url"]
+    assert env["ONEDATA_ONEPROVIDER_TOKEN"] == env["ONEDATA_ONEZONE_TOKEN"] == token
+    assert env["ONEDATA_ALLOW_INSECURE_TLS"] == "false"
+    assert env["SSL_CERT_FILE"] == str(home.ca_pem)
+    assert env["ONEDATA_MCP_DOTENV"] == "0"
+
+
+def test_a_failed_live_test_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = valfed.Home(tmp_path)
+    home.tokens.mkdir()
+    home.token_file("tools").write_text("tok\n")
+    monkeypatch.setattr(valfed, "facts", lambda _home: FACTS)
+    monkeypatch.setattr(valfed.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1))
+
+    with pytest.raises(valfed.ValfedError, match="the live qos test failed"):
+        valfed.qos_live(home)

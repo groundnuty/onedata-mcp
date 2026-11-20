@@ -13,13 +13,15 @@
 #   RID=<existing-id> to attach to an existing run for cross-llm
 #   merging or re-runs.
 
-.PHONY: help install test test-file test-verbose test-readiness-live tools-manifest lint format check \
+.PHONY: help install test test-file test-verbose test-readiness-live test-qos-live tools-manifest \
+        lint format check \
         spaces-create spaces-support spaces-status \
         smoke smoke-d1 smoke-fast \
         sweep sweep-cyfronet sweep-deepseek sweep-claude sweep-all \
         sweep-headline sweep-k8 \
         k2val k2val-scan k2val-jail-probe k2val-jail-smoke test-k2val-jail-live \
         valfed-up valfed-reset valfed-down valfed-status valfed-check valfed-readiness-live \
+        valfed-qos-live \
         conformance inspect-smoke \
         report report-latest rescore \
         show-grid show-grid-rate show-headline show-trial inspect-fail list-runs \
@@ -40,6 +42,7 @@ help:
 	@echo "    tools-manifest     print tools/list as sorted JSON, no network (ROOT=<checkout>"
 	@echo "                       to import another checkout; set ONEDATA_MCP_TOOLS to pick tools)"
 	@echo "    test-readiness-live  readiness tools against the LOCAL Compose federation only"
+	@echo "    test-qos-live      remove_qos_requirement against the LOCAL Compose federation only"
 	@echo ""
 	@echo "  Federation provisioning  (run once per panel-LLM addition)"
 	@echo "    spaces-create      create per-LLM Onedata spaces (idempotent)"
@@ -87,6 +90,7 @@ help:
 	@echo "    valfed-status      containers, CPU and memory caps, peak memory, host load"
 	@echo "    valfed-check       no-model check: panel fixtures built and torn down in omcp-smoke"
 	@echo "    valfed-readiness-live  the gated live readiness test, in omcp-live"
+	@echo "    valfed-qos-live    the gated live test of remove_qos_requirement, in omcp-live"
 	@echo ""
 	@echo "  MCP-protocol validation  (paper-grade artifacts)"
 	@echo "    conformance        run modelcontextprotocol/conformance suite v0.1.16+"
@@ -143,6 +147,12 @@ tools-manifest:
 # variables and ONEDATA_MCP_LIVE_READINESS_SPACE (see the test's docstring).
 test-readiness-live:
 	ONEDATA_MCP_LIVE_READINESS=1 uv run pytest test/live/test_readiness_live.py -v -s
+
+# Live test of remove_qos_requirement (add, remove, gone from the summary; an unknown id's
+# error). It writes a file and QoS requirements, and refuses any host but 127.0.0.1, localhost
+# or *.datahub.test. Needs the usual ONEDATA_* variables and ONEDATA_MCP_LIVE_QOS_SPACE.
+test-qos-live:
+	ONEDATA_MCP_LIVE_QOS=1 uv run pytest test/live/test_qos_live.py -v -s
 
 lint:
 	uv run ruff check benchmark/ onedata_mcp/ test/ --fix
@@ -433,6 +443,9 @@ valfed-check:
 
 valfed-readiness-live:
 	$(VALFED) readiness-live
+
+valfed-qos-live:
+	$(VALFED) qos-live
 
 # ---------------------------------------------------------------------------
 # MCP-protocol validation
