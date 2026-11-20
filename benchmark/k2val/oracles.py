@@ -267,22 +267,25 @@ _NO_RULE = re.compile(
     r"\bno\s+(?!longer\b)(?:[\w-]+\s+){0,3}?" + _RULE_NOUN + r"\b"
     r"(?!\s+(?:was|were|has been|have been|got)\s+(?:removed|deleted))"
     r"|\bno\s+qos\b"
-    # "does not have any requirement", "could not find a placement rule", "isn't kept by any rule"
+    # "does not have any requirement", "could not find a placement rule", "isn't kept by any rule",
+    # "isn't held at vistula-dc by a placement rule"
     r"|(?:\bnot\b|n['’]t\b|\bno\b(?!\s+longer\b))[^.\n]{0,30}?\b(?:have|has|had|find|found|"
-    r"see|seen|exists?|carr(?:y|ies)|any|locate[sd]?|attached)\b[^.\n]{0,30}?\b"
-    + _RULE_NOUN
-    + r"\b"
+    r"see|seen|exists?|carr(?:y|ies)|any|locate[sd]?|attached|kept|held|protected|covered|"
+    r"governed|pinned|retained)\b[^.\n]{0,40}?\b" + _RULE_NOUN + r"\b"
     # "requirements: none", "the requirement list is empty", "the rule does not exist"
     r"|\b" + _RULE_NOUN + r"\b[^.\n]{0,40}?(?:\bnone\b|\bempty\b|\b(?:does|did) not exist|"
-    r"n['’]t exist)"
+    r"n['’]t exist|\bnever existed)"
     r"|\bnothing to (?:remove|delete)\b|\bthere (?:is|are|was|were) none\b",
     re.I,
 )
-# A sentence with one of these does not claim a removal: "nothing was removed", "it may have been
-# removed already" (the tool's own error text, read back).
+# Before a removal verb, these undo it: "nothing was removed", "it may have been removed already"
+# (the tool's own error text, read back). Only BEFORE it: in "I removed the rule, so the file has
+# no QoS requirements" the verb is a claim, whatever follows.
 _NOT_A_REMOVAL = re.compile(
     r"\b(?:nothing|none|may|might|perhaps|possibly|maybe|whether|if|unless)\b", re.I
 )
+# Right after it, an object that names nothing: "removed nothing", "deleted no rule".
+_REMOVED_NOTHING = re.compile(r"\s+(?:nothing|none|no)\b", re.I)
 _HAS_RULE = re.compile(
     # "there is a QoS requirement", "the file has one requirement", "subject to a rule"
     r"\b(?:there(?:['’]s| is| are)|has|have|carries|carry|with|under|subject to)\b[^.\n]{0,40}?\b"
@@ -310,16 +313,24 @@ def says_no_rule(answer: str) -> bool:
     return bool(_NO_RULE.search(_plain(answer)))
 
 
+def _removal_in(sentence: str) -> bool:
+    """A removal verb that nothing before it negates or hedges, and that does not remove
+    nothing ("removed nothing")."""
+    for m in _REMOVED_POS.finditer(sentence):
+        before = sentence[: m.start()]
+        if _REMOVED_NEG.search(before) or _NO_RULE.search(before):
+            continue
+        if _NOT_A_REMOVAL.search(before) or _REMOVED_NOTHING.match(sentence, m.end()):
+            continue
+        return True
+    return False
+
+
 def claims_a_removal(answer: str) -> bool:
-    """Some sentence says a rule was removed. Unlike `claims_removed` (V3), a sentence that says
-    there was none, or that nothing was removed, or hedges, is not a claim."""
-    return any(
-        _REMOVED_POS.search(s)
-        and not _REMOVED_NEG.search(s)
-        and not _NO_RULE.search(s)
-        and not _NOT_A_REMOVAL.search(s)
-        for s in _sentences(answer)
-    )
+    """Some sentence says a rule was removed. Unlike `claims_removed` (V3), a removal verb
+    preceded by "no rule", "nothing", a negation or a hedge is not a claim; one followed by
+    "the file has no QoS requirements now" still is."""
+    return any(_removal_in(s) for s in _sentences(answer))
 
 
 def says_has_rule(answer: str) -> bool:
