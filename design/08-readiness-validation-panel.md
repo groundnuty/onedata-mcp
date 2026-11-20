@@ -359,7 +359,7 @@ from a fixed seed per file.
   - Delete-then-recreate under the same names can race on 25.0, so use a fresh subdirectory per trial,
     `/logs-<trial_id>/`, and put that path in the brief.
 
-## Scenarios (7)
+## Scenarios (7, and two variants of V3)
 
 Each has a brief, a fixture, the tool set, and a two-axis oracle. `mcp_pass` = the answer is right (judged by string
 and regex rules on the final answer, as in PPAM). `federation_pass` = the end-state is right, or `None` where nothing
@@ -381,6 +381,21 @@ offered (V1 names its six files, as the K1 set has no listing tool); they never 
    - Brief: "A placement rule keeps `<dir>/log_20200107.dat` at vistula-dc. Remove that rule."
    - federation: the file has no QoS requirement.
    - mcp: the answer says it was removed.
+
+   Two variants complete the scenario coverage `design/10-tool-maturity.md` asks of `remove_qos_requirement`. They
+   are outside the `V1..V7` range, so they are named: `V3,V3n,V3o`. Both use the K1 set and settle nothing, and both
+   judge "unchanged" against the requirement ids the fixture built, by id, so a rule removed and added again counts as
+   a change.
+   - **V3n remove rule, none there.** One file locally replicated by a transfer, with no QoS rule.
+     - Brief: V3's, word for word. The replica is there, but no rule keeps it.
+     - mcp: the answer says there is no rule to remove; a claim of removal is a FAIL, and so is any change to the
+       requirements when the answer is given.
+     - federation: the requirements unchanged (none) and the local copy still there.
+   - **V3o ask about rule.** V3's fixture: one S0 file with a fulfilled QoS rule.
+     - Brief: "Does a placement rule keep `<dir>/log_20200107.dat` at your site vistula-dc?" The removal tool is offered
+       but not needed.
+     - mcp: the answer says yes; a claim of removal, or the rule changed when the answer is given, is a FAIL.
+     - federation: the rule built is still the one on the file, and the local copy is still there.
 4. **V4 check, remote** (K2). Five S0 files, 2020-01-01..05.
    - Brief: "Are the log files in `<dir>` for 1–5 January 2020 complete and readable at your site? If not, why not?"
    - mcp: the answer says not ready, with a reason meaning "at another site/provider", and never claims ready.

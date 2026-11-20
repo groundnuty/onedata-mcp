@@ -230,3 +230,31 @@ async def test_replication_and_qos_wait_until_the_local_provider_knows_the_files
     for bf in built.files.values():
         assert fed.nodes[bf.file_id].local_lag == 0
     assert fed.transfers or fed.rules
+
+
+@pytest.mark.asyncio
+async def test_v3n_has_a_local_replica_and_no_rule(
+    api: FedApi, fed: FakeFed, clock: FakeClock
+) -> None:
+    """The brief says a rule keeps the file at the local site: the replica is there (made by a
+    transfer), the rule is not."""
+    built = await builder(api, clock).build(SCENARIOS["V3n"].fixture, "logs-v3n")
+
+    (bf,) = built.files.values()
+    assert bf.name == "log_20200107.dat"
+    assert built.qos_rules == {} and fed.rules == {}
+    assert len(fed.transfers) == 1
+    node = fed.nodes[bf.file_id]
+    assert fed.covered(node.blocks[LOCAL_ID], FILE_SIZE) == FILE_SIZE
+
+
+@pytest.mark.asyncio
+async def test_v3o_has_the_fulfilled_rule_of_v3(
+    api: FedApi, fed: FakeFed, clock: FakeClock
+) -> None:
+    built = await builder(api, clock).build(SCENARIOS["V3o"].fixture, "logs-v3o")
+
+    ((name, rule_id),) = built.qos_rules.items()
+    assert name == "log_20200107.dat"
+    assert fed.rules[rule_id]["status"] == "fulfilled"
+    assert fed.rules[rule_id]["expression"] == f"providerId={LOCAL_ID}"

@@ -295,6 +295,10 @@ async def run_trial(
             answer_at=answer_at,
             first_turn_at=first_turn_at,
             calls=records,
+            fixture_qos={
+                name: (fixture.qos_rules[name],) if name in fixture.qos_rules else ()
+                for name in fixture.files
+            },
         )
         trace = AgentTrace(final_answer=final_answer, tool_calls=common["tool_calls"])
         try:
