@@ -70,6 +70,8 @@ The panel is defined by role, so that it survives model churn. The current insta
   - DeepSeek-V4-Flash, which reads "incomplete" as "absent" and claims "done" early.
 - **A small commercial model at low effort:** Claude Haiku at effort low.
 - **A capable control:** Claude Sonnet at medium effort. A scenario it fails is suspect: fix the scenario, oracle or tool before reading the probes.
+
+The Claude configs run on the operator's subscription through `claude-agent-sdk` (backend `claude_sdk`), so the standing panel needs no Anthropic API key.
 - **Smoke pair**, for re-validation after wording changes: Qwen3-Coder plus Haiku at effort low.
 
 Prompts are neutral: they name no tool and give no workflow advice. Each model config gets its own space, so trials cannot interfere.

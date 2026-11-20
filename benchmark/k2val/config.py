@@ -35,8 +35,12 @@ K1_TOOLS = (
 )
 K2_TOOLS = (*K1_TOOLS, "check_readiness", "ensure_readiness")
 
-BACKENDS = ("openai_compat", "anthropic", "codex", "agy")
+BACKENDS = ("openai_compat", "anthropic", "claude_sdk", "codex", "agy")
 CLI_BACKENDS = ("codex", "agy")
+# `--effort` of the Claude Code CLI. The SDK's own type lists four of them (no "xhigh"), but it
+# forwards the string unchanged.
+CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+CLAUDE_THINKING_MODES = ("adaptive", "disabled")
 # Hard ceiling of the guard: a config may lower the concurrency per model, never raise it.
 MAX_CONCURRENCY_PER_MODEL = 2
 
@@ -110,7 +114,8 @@ class RunLimits:
 
 @dataclass(frozen=True)
 class SpendConf:
-    """Anthropic spend (Haiku and the Sonnet control share it). The cap is a config value."""
+    """Spend of the `anthropic` backend (an API key billed per token). The cap is a config value.
+    The `claude_sdk` backend runs on the subscription and is not counted."""
 
     cap_usd: float = 50.0
     reserve_usd: float = 0.50
@@ -147,10 +152,12 @@ class ModelConf:
     temperature: float = 1.0
     top_p: float | None = None
     extra_body: dict[str, Any] = field(default_factory=dict)
-    # anthropic
+    # anthropic, claude_sdk
     effort: str = ""
     price: PriceTiers | None = None
-    # codex / agy
+    # claude_sdk: "adaptive", "disabled", or a thinking budget in tokens; "" = not passed
+    thinking: str = ""
+    # codex / agy; claude_sdk (optional): the `claude` executable, else the one on PATH
     binary: str = ""
     reasoning_effort: str = ""
 
@@ -160,7 +167,13 @@ class ModelConf:
 
     @property
     def is_anthropic(self) -> bool:
+        """Billed per token to an API key: the only backend the `[spend]` cap applies to."""
         return self.backend == "anthropic"
+
+    @property
+    def is_claude_sdk(self) -> bool:
+        """Claude Code on the operator's subscription (`claude_sdk`): no key, no price."""
+        return self.backend == "claude_sdk"
 
 
 @dataclass(frozen=True)
@@ -204,6 +217,40 @@ def _provider(raw: dict[str, Any], key: str) -> ProviderConf:
     return ProviderConf(table["name"], table["host"], table["token_file"])
 
 
+def _thinking(name: str, value: Any) -> str:
+    """`thinking` as a string: "adaptive", "disabled" or a positive token budget; "" if unset."""
+    if value is None or value == "":
+        return ""
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ConfigError(f"models.{name}.thinking must be a string or an integer")
+    if isinstance(value, int) or str(value).isdigit():
+        if int(value) <= 0:
+            raise ConfigError(f"models.{name}.thinking: a token budget must be positive")
+        return str(int(value))
+    if value not in CLAUDE_THINKING_MODES:
+        raise ConfigError(
+            f"models.{name}.thinking must be one of {CLAUDE_THINKING_MODES} or a token budget; "
+            f"got {value!r}"
+        )
+    return value
+
+
+def _check_claude_sdk(name: str, conf: ModelConf) -> None:
+    """A `claude_sdk` config rides on the subscription. A key or a price on it would only
+    mislead (nothing reads them, and nothing is billed per token), so they are refused."""
+    if conf.effort not in CLAUDE_EFFORTS:
+        raise ConfigError(
+            f"models.{name}.effort is required for claude_sdk and must be one of "
+            f"{CLAUDE_EFFORTS}; got {conf.effort!r}"
+        )
+    for key, present in (("key_file", conf.key_file), ("price", conf.price)):
+        if present:
+            raise ConfigError(
+                f"models.{name} (claude_sdk) runs on the subscription: remove {key} "
+                "(it is for the 'anthropic' backend, which bills an API key)"
+            )
+
+
 def _model(name: str, raw: dict[str, Any]) -> ModelConf:
     backend = raw.get("backend", "")
     if backend not in BACKENDS:
@@ -232,6 +279,7 @@ def _model(name: str, raw: dict[str, Any]) -> ModelConf:
             )
         except KeyError as e:
             raise ConfigError(f"models.{name}.price needs {e.args[0]}") from None
+    thinking = _thinking(name, raw.get("thinking"))
     conf = ModelConf(
         name=name,
         backend=backend,
@@ -246,6 +294,7 @@ def _model(name: str, raw: dict[str, Any]) -> ModelConf:
         extra_body=extra_body,
         effort=raw.get("effort", ""),
         price=price,
+        thinking=thinking,
         binary=raw.get("binary", ""),
         reasoning_effort=raw.get("reasoning_effort", ""),
     )
@@ -253,6 +302,10 @@ def _model(name: str, raw: dict[str, Any]) -> ModelConf:
         raise ConfigError(f"models.{name} (openai_compat) needs base_url and key_file")
     if backend == "anthropic" and not (conf.key_file and conf.effort and conf.price):
         raise ConfigError(f"models.{name} (anthropic) needs key_file, effort and [price]")
+    if backend == "claude_sdk":
+        _check_claude_sdk(name, conf)
+    elif conf.thinking:
+        raise ConfigError(f"models.{name}.thinking is only for the claude_sdk backend")
     if conf.is_cli and not conf.binary:
         raise ConfigError(f"models.{name} ({backend}) needs binary")
     # The jail gives the CLI a fresh home per run, and agy's MCP server is written into it, so

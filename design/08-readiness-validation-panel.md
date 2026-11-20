@@ -28,7 +28,8 @@ agent study's outcome.
 3. **Record everything.** Each trial's artefact; each change with its triggering trial, and a before/after of each
    description or answer; per-model results. All of it goes in `artefacts/k2val/<run_id>/` (gitignored), plus a
    committed summary `research/k2val-<run_id>.md`.
-4. **Concurrency:** at most 2 trials at once per model. **Anthropic spend** (the Haiku configs and the Sonnet control)
+4. **Concurrency:** at most 2 trials at once per model. **Anthropic spend** (the `anthropic` backend only: an API key
+   billed per token; the Claude configs of the standing panel run on the subscription and are not counted)
    is tracked and recorded per call and per run, in one shared tally. The cap is a config value (`[spend] cap_usd`,
    default $50; the operator lifted the earlier $5 Haiku cap). Refuse to start an Anthropic trial once the run's spend
    plus a $0.50 reserve would exceed the cap, and never make a call once the spend has reached it.
@@ -62,12 +63,12 @@ default.
 
 | name | backend | api_id | sampling / extra |
 |---|---|---|---|
-| sonnet-medium (control) | Anthropic Messages API, key file `anthropic.key` | `claude-sonnet-5-5` | no sampling params (Sonnet 5.5 rejects them); `thinking = {type: "adaptive"}` (disabled is rejected); `output_config = {effort: "medium"}`. A capable reference that should pass every scenario |
+| sonnet-medium (control) | `claude_sdk`: Claude Code on the subscription, no key | `claude-sonnet-5-5` | no sampling params (Sonnet 5.5 rejects them); `thinking` left at the model's default (adaptive; disabled is rejected); `effort = "medium"` (the CLI's `--effort`). A capable reference that should pass every scenario |
 | glm | openai_compat, base `https://llmlab.plgrid.pl/api/v1`, key file `lk` | `zai-org/GLM-5.3-Flash` | temperature 1.0, top_p 0.95; nothing else (reasoning effort stays at the server default) |
 | qwen36 | openai_compat, same base and key | `Qwen/Qwen3.6-35B-A3B` | PPAM's settings: temperature 1.0, no other sampling fields |
 | qwencoder | openai_compat, same base and key | `Qwen/Qwen3-Coder-30B-A3B-Instruct` | temperature 0.7, top_p 0.8, top_k 20, repetition_penalty 1.05 (top_k and repetition_penalty go in `extra_body`, as vLLM takes them); non-thinking model |
 | deepseek | openai_compat, same base and key | `deepseek-ai/DeepSeek-V4-Flash-0731` | temperature 1.0, top_p 0.95; nothing else (reasoning at the server default). Chosen because in an earlier study's traces it read "incomplete" as "absent" and claimed done too early, the failure modes V5 and V7 probe |
-| haiku-low, haiku-medium, haiku-high | Anthropic Messages API, key file `anthropic.key` | `claude-haiku-5-5` | the same model at three efforts: `output_config = {effort: "low" / "medium" / "high"}`; no sampling params; `thinking = {type: "adaptive"}`; price tiers ≤200k prompt in/out $0.10/$0.50 per Mtok, above $0.50/$2.50 |
+| haiku-low, haiku-medium, haiku-high | `claude_sdk`: Claude Code on the subscription, no key | `claude-haiku-5-5` | the same model at three efforts: `effort = "low" / "medium" / "high"`; no sampling params; `thinking` left at the model's default; no price: the cost of a trial is 0, noted "subscription" |
 | gpt-luna-low (wave 2) | Codex CLI 0.169, `codex exec --json --ephemeral --dangerously-bypass-approvals-and-sandbox` (in the jail only) | `gpt-5.6-luna` | `-c model_reasoning_effort=low` |
 | gemini-flash-low (wave 2) | Antigravity CLI 1.5.12, `agy --output-format stream-json --dangerously-skip-permissions --print=<prompt>` (in the jail only) | `gemini-3.8-flash-low` | `--effort low` |
 
@@ -79,8 +80,14 @@ default.
   adaptive thinking and effort, and verify the parameter names against the docs, not from memory. Thinking blocks
   must be passed back unchanged in the next assistant turn, as the API requires. Accepted effort values are `low`,
   `medium`, `high`, `xhigh` and `max` (SDK `OutputConfigParam`).
-- Anthropic spend (the Haiku configs and the Sonnet control together) is tracked per call and per run; see Guards.
-- Key files: `<key dir>/lk` and `<key dir>/anthropic.key`.
+- **The Claude configs run on the subscription** (backend `claude_sdk`, `benchmark/k2val/claude_sdk.py`): Claude Code
+  through `claude-agent-sdk`, with no API key, key file or price. The trial's MCP server is the CLI legs' loopback HTTP
+  server (the query waits until the CLI has attached it). No built-in tool, `setting_sources=[]`, and the scenario's
+  system prompt is the only one supplied; the CLI still adds a fixed preamble of about 580 tokens of its own (date,
+  environment, model name, token budget, account email), and `effort` is passed to the CLI, not observed.
+  The `anthropic` backend (an API key, `[spend]`) stays in the code for anyone who has a key.
+- Anthropic spend (the `anthropic` backend only) is tracked per call and per run; see Guards.
+- Key files: `<key dir>/lk`, and `<key dir>/anthropic.key` for the `anthropic` backend only.
 - **CLI legs (wave 2).** `gpt-luna-low` and `gemini-flash-low` drive the real agent CLIs, which send everything they see
   to OpenAI or Google. They are disabled by default and run only when ALL of these hold; otherwise the run skips them,
   says so, and continues with the API configs. They never run unjailed.

@@ -92,6 +92,14 @@ def _trace_lines(row: dict) -> list[str]:
     return lines
 
 
+def _cost_cell(rows: list[dict]) -> str:
+    """USD billed to an API key; "subscription" for a config that ran on the subscription (its
+    trials carry cost 0, which would read as free)."""
+    if rows and all((r.get("raw_trace") or {}).get("billing") == "subscription" for r in rows):
+        return "subscription"
+    return f"{sum(r.get('cost_usd') or 0 for r in rows):.4f}"
+
+
 def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | None = None) -> str:
     rows = read_trials(run_dir)
     meta = meta or {}
@@ -185,7 +193,7 @@ def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | N
                     f"| {m} | {len(mine)} | {mean(r['rounds_used'] for r in mine):.1f} | "
                     f"{mean(r['usage_out_tokens'] for r in mine):.0f} | "
                     f"{mean(r['wall_clock_seconds'] for r in mine):.0f} | "
-                    f"{sum(r.get('cost_usd') or 0 for r in mine):.4f} |"
+                    f"{_cost_cell(mine)} |"
                 )
         w("")
 
