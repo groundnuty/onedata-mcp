@@ -4,6 +4,7 @@ import contextlib
 import functools
 import json
 import logging
+import os
 import re
 import ssl
 import time
@@ -183,7 +184,7 @@ def transport_failure(
         exc_info=exc,
     )
     return OnedataApiError(
-        f"{label}: {method} {path} - {kind} (service: {config.service})",
+        f"{label}: {method} {shorten_path(path)} - {kind} (service: {config.service})",
         response=None,
         kind=kind,
         service=config.service,
@@ -191,20 +192,20 @@ def transport_failure(
 
 
 # What the structured JSON body of a non-2xx answer may not show. Onedata's own error
-# ids and descriptions reach the agent unchanged, except for exactly three things, all
-# of which apply ONLY when the deploy gives a node list (ONEDATA_MCP_NODE_NAMES, the
-# fallback mode for a federation whose real names must stay hidden):
-#   1. a node the list names (its host name or address, with a port that follows it) is
-#      replaced by its DECLARED name, so the text an agent sees is the same on every
-#      deployment of the same layout;
+# ids and descriptions reach the agent unchanged, except for these rules:
+#   1. a node's host name or address (with a port that follows it) is replaced by its
+#      DECLARED name, so the text an agent sees is the same on every deployment of the same
+#      layout. The nodes are the two hosts this server is configured with (see
+#      `known_node_names`; declared as `onezone` and `oneprovider`) and, when the deploy
+#      gives a node list (ONEDATA_MCP_NODE_NAMES, the fallback mode for a federation whose
+#      real names must stay hidden), the list's nodes. A list entry for a host wins;
 #   2. a URL is masked;
-#   3. a `host=` or `port=` pair is masked.
-# Anything else, a dotted file name included, passes untouched. Both masks run after
-# the replacement, so a URL or a pair naming a known node reads `<address>`.
-# With no list (unset, empty or `{}`, as on Compose, where the names are already the
-# declared ones) none of the three applies: an Onedata error text reaches the caller
-# byte for byte as Onedata wrote it. Transport errors and non-JSON bodies are this
-# server's own fixed host-free texts and are the same in both modes.
+#   3. a `host=` or `port=` pair is masked, ONLY when a node list is given.
+# Rules 1 and 2 hold with or without a list: no model-facing error text names a configured
+# host or carries a URL. Both masks run after the replacement, so a URL or a pair naming a
+# known node reads `<address>`. Anything else, a dotted file name or an unlisted node
+# included, passes untouched. Transport errors and non-JSON bodies are this server's own
+# fixed host-free texts and are the same in every mode.
 _MASK = "<address>"
 # A URL starts at a token start; the scan of a hostile `a.a.a. ...` body stays linear.
 # Trailing sentence punctuation stays outside the URL.
@@ -253,16 +254,51 @@ def replace_node_names(text: str, node_names: tuple[tuple[str, str], ...]) -> st
     return pattern.sub(_declared_name, text)
 
 
-def redact_endpoints(text: str, config: OnedataConfig) -> str:
-    """Apply the three rules above to a service's error text; every other byte is kept.
+def _host_of(url: Any) -> str | None:
+    """The lower-cased host name or address of a configured URL; None for anything unusable."""
+    if not isinstance(url, str) or not url.strip():
+        return None
+    try:
+        host = urlparse(url.strip()).hostname
+    except ValueError:
+        return None
+    return host.lower() if host else None
 
-    Without a node list (`config.node_names` empty) the text is returned as it is.
+
+def known_node_names(config: OnedataConfig) -> tuple[tuple[str, str], ...]:
+    """The `(host, declared name)` pairs an error text may not show a host of.
+
+    The hosts this server is configured with, whichever service the failed call was for
+    (ONEDATA_ONEZONE_HOST as `onezone`, ONEDATA_ONEPROVIDER_HOST as `oneprovider`, and the
+    call's own base URL as its `config.service`), and then the deploy's node list, whose entry
+    for the same host wins. Never raises: an unset or malformed host is left out.
     """
-    if not config.node_names:
-        return text
-    text = replace_node_names(text, config.node_names)
+    merged: dict[str, str] = {}
+    for url, name in (
+        (os.getenv("ONEDATA_ONEZONE_HOST"), "onezone"),
+        (os.getenv("ONEDATA_ONEPROVIDER_HOST"), "oneprovider"),
+        (config.base_url, config.service),
+    ):
+        host = _host_of(url)
+        if host:
+            merged[host] = name
+    merged.update(dict(config.node_names))
+    return tuple(sorted(merged.items()))
+
+
+def _redact(text: str, names: tuple[tuple[str, str], ...], with_pairs: bool) -> str:
+    text = replace_node_names(text, names)
     text = _URL_RE.sub(_MASK, text)
-    return _KEYWORD_RE.sub(_MASK, text)
+    return _KEYWORD_RE.sub(_MASK, text) if with_pairs else text
+
+
+def redact_endpoints(text: str, config: OnedataConfig) -> str:
+    """Apply the rules above to a service's error text; every other byte is kept.
+
+    A configured host is replaced and a URL masked in every mode; the `host=`/`port=` pairs
+    are masked only when the deploy gives a node list (`config.node_names`).
+    """
+    return _redact(text, known_node_names(config), bool(config.node_names))
 
 
 _JSON_STRING_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
@@ -273,21 +309,42 @@ def redact_json_text(text: str, config: OnedataConfig) -> str:
 
     On the serialized text an escape such as `\\n` or `\\"` would sit against a name
     and break its boundary (`\\nnode17`, `host=\\"x\\"`). A string no rule touches is
-    kept byte for byte. Without a node list the whole text is kept as it is.
+    kept byte for byte.
     """
-    if not config.node_names:
-        return text
+    names = known_node_names(config)
+    with_pairs = bool(config.node_names)
 
     def _one(match: re.Match[str]) -> str:
         literal = match.group(0)
         try:
             decoded = json.loads(literal)
         except ValueError:  # not JSON (the repr fallback): redact the literal as it is
-            return redact_endpoints(literal, config)
-        redacted = redact_endpoints(decoded, config)
+            return _redact(literal, names, with_pairs)
+        redacted = _redact(decoded, names, with_pairs)
         return literal if redacted == decoded else json.dumps(redacted)
 
     return _JSON_STRING_RE.sub(_one, text)
+
+
+# A tool's error text is read by a model, so it is bounded: Onedata's own message is cut
+# at the limit, after the redaction (a cut before it could leave half a host name that no
+# rule matches), and a path segment (typically an id) is echoed at no more than a
+# limited length.
+MAX_ERROR_CHARS = 2000
+_PATH_SEGMENT_MAX = 128
+
+
+def bound_message(text: str, limit: int = MAX_ERROR_CHARS) -> str:
+    """`text` cut to `limit` characters, `...` marking the cut. Redact before calling this."""
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def shorten_path(path: str) -> str:
+    """The request path with each overlong segment (an id) cut short, `...` marking the cut."""
+    return "/".join(
+        seg if len(seg) <= _PATH_SEGMENT_MAX else seg[:_PATH_SEGMENT_MAX] + "..."
+        for seg in path.split("/")
+    )
 
 
 def http_failure_message(
@@ -301,17 +358,17 @@ def http_failure_message(
 ) -> str:
     """The message for a non-2xx answer: the status, and the body when it is safe to show.
 
-    A structured (JSON) body is Onedata's own error and reaches the agent unchanged;
-    only when a node list is configured are the three rules at `redact_endpoints`
-    applied to it. Anything else (an HTML page from a gateway, plain text, bytes) is
-    replaced by `http_<status>` and the service name in both modes, because such a
-    page may name the upstream node.
+    A structured (JSON) body is Onedata's own error and reaches the agent with the rules at
+    `redact_endpoints` applied to it. Anything else (an HTML page from a gateway, plain text,
+    bytes) is replaced by `http_<status>` and the service name, because such a page may name
+    the upstream node. The path's overlong segments are cut short and the whole message is
+    bounded (`MAX_ERROR_CHARS`).
     """
     if isinstance(body, dict | list):
         detail = redact_json_text(_format_body_for_log(body), config)
     else:
         detail = f"http_{status} (service: {config.service})"
-    return f"{label}: {method} {path} (status={status}) - {detail}"
+    return bound_message(f"{label}: {method} {shorten_path(path)} (status={status}) - {detail}")
 
 
 def decode_response_body(response: httpx.Response) -> Any:
