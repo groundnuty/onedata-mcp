@@ -96,8 +96,10 @@ async def get_qos_requirement(qos_id: str) -> dict[str, Any]:
           "status": "fulfilled|pending|impossible"
         }
     """
+    _check_qos_id(qos_id)
     config = get_oneprovider_config()
-    response = await request(config, "GET", f"/qos_requirements/{qos_id}")
+    # Percent-encoded, as in remove_qos_requirement: a `?` or `#` would otherwise cut the path.
+    response = await request(config, "GET", f"/qos_requirements/{quote(qos_id, safe='')}")
     return response["body"]
 
 
