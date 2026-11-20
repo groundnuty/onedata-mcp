@@ -306,9 +306,9 @@ def test_the_judge_section_defaults_to_sonnet_at_medium_and_is_configurable(secr
     raw.pop("judge", None)
     judge = parse_config(raw).judge
     assert (judge.model, judge.effort, judge.concurrency) == ("claude-sonnet-5-5", "medium", 2)
-    raw["judge"] = {"model": "claude-opus-5-5", "effort": "high", "concurrency": 1}
+    raw["judge"] = {"model": "another-model", "effort": "high", "concurrency": 1}
     judge = parse_config(raw).judge
-    assert (judge.model, judge.effort, judge.concurrency) == ("claude-opus-5-5", "high", 1)
+    assert (judge.model, judge.effort, judge.concurrency) == ("another-model", "high", 1)
     raw["judge"] = {"effort": "huge"}
     with pytest.raises(ConfigError, match="judge.effort"):
         parse_config(raw)
