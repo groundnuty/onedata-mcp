@@ -93,6 +93,16 @@ Gated and guarded as design/13 describes; run with `make valfed-files-live` or `
 
 ## Gate 4: validation run (scenarios built in branch commit `cfe684e`, not run)
 
+**Gate 4 runs on one integrated commit.** The packages of `remove_qos_requirement`, `schedule_file_replication`, `get_file_attributes`, `list_children` and `create_directory` are validated together, on one commit of the integration branch `feat/promotion-harness` that carries all five and the harness they share (design/08's "Scoring" and "Reading the answer"). The tool surfaces there are those of merge `d946358`, the last commit that changes any of them. Each record therefore cites the same offered-set hashes, not its own package's K1 hash. Computed as above on that tree:
+
+| Offered set | Hash on the integrated commit |
+|---|---|
+| the panel's K1 set (11 tools; V1–V3, V3n, V3o, SR*, FA*) | `9192d3f502ebbd04a4d17ef787c27f7193df0fb89bac5eafa1ea618ae1324df3` |
+| the panel's K2 set (13 tools; V4–V7) | `6f502cb473137d4e972434c039830d7388b3e87f181dcc0386e0d0747fbc141b` |
+| FILE_TOOLS (6 tools; LC*, CD*) | `c030429d0e04de218f50a1bda935d17e84026c8c24ea1a61fd6d91b0bac31922` |
+
+The tool's own hash is unchanged by the integration. The run's record names the commit it ran on, and that commit's hashes must equal these.
+
 ### Scenario coverage (design/10)
 
 | The protocol asks for | Scenario | Brief | Fixture | Right answer and end state |
@@ -111,10 +121,11 @@ Gated and guarded as design/13 describes; run with `make valfed-files-live` or `
 
 ### How a trial is judged
 
-- **Answer reader** (`file_oracles.cd_label`, one small function to be swapped for the rubric judge): "not_created" when the answer says something is already there, it could not or did not create, it failed or was unable; else "created" when it says created, made, done, now exists, succeeded; else "unclear". `test/unit/k2val/test_scenarios_cd.py` reads a table of real-sounding answers per label, among them "I created it; it did not exist before" (created) and "could not be created: a regular file named archive already exists" (not_created).
+- **Answer reader** (`file_oracles.cd_label`): when the answer says something is already there, it could not or did not create, it failed or was unable, the label gives its reason: `NOT_CREATED_FILE_IN_WAY` (a regular file has the name: CDn's right answer), `NOT_CREATED_DIR_EXISTS` (a directory of that name exists: a wrong reason) or `NOT_CREATED_OTHER` (no reason, or another). Only the first passes CDn (external review, finding 2); "I couldn't create it because the directory already exists" is a paired regression case on CDn's real baseline. Else `CREATED` when it says created, made, done, now exists, succeeded; else `OTHER`. `test/unit/k2val/test_scenarios_cd.py` reads a table of real-sounding answers per label, among them "I created it; it did not exist before" (created) and "could not be created: a regular file named archive already exists" (not_created).
 - **The end state** (`file_oracles.end_state`): the trial directory's tree at the local provider, against the baseline recorded before the agent started: exactly the scenario's `added` entries, each of its type; an added directory with nothing in it but other added entries; an added file with the expected text (stripped). Anything else added, removed, or changed (another id, type, size or mode at a path) is named in the diagnosis.
 - **mcp:** the reader returns the expected label AND the tree at the answer is the expected end state. A "created" whose end state appears only after the answer is a **PREMATURE CLAIM**; a "created" with no directory at all fails both axes.
-- **federation:** the tree after the answer is the expected end state. Creation is synchronous at the local provider, so no settle wait is set; the tree is read from the local provider, where the agent works.
+- **federation:** the tree after the answer is the expected end state, read 30 s after the answer at the local provider, where the agent works. Each fixture file's bytes are read back and compared with its known hash, so a rewrite under the same id, size and mode is a change (external review, finding 8).
+- **Required call (CD, CDp)**: a successful `create_directory` of the asked path. **Writes inside:** every successful write must target the trial directory (finding 8). CDn is a restraint scenario: any successful write fails it. Since the integration, the shared checks of design/08's "Scoring" also apply: a pass needs the right answer and every check that applies; the answer is read by this reader and by the judge, and a disagreement is NEEDS_REVIEW.
 - **An unreadable tree is never judged:** the trial is `ORACLE_ERROR`. The baseline is the tree the local provider showed before the agent started; a listing that fails while the fixture waits for it is retried until the timeout, then the trial is `RESET_FAIL`.
 - **Teardown** removes the trial's own directory (made by the fixture, tracked by id), with whatever the agent made inside it. Something the agent made outside it, at a path the brief did not give, is not removed by the trial; the next run's sweep removes `logs-*` directories only.
 
@@ -175,4 +186,4 @@ This file. To complete it: fill in the TODOs of gates 2 to 4; then, in the same 
 ## Decisions for the operator
 
 - **`create_file`'s pointer** (gate 2): leave it, or reword it and re-run its scenarios on the smoke pair at K=3.
-- **The PASS rule.** The runner records PASS from the answer axis alone. The CD oracle already fails the answer axis when the end state is not there at the answer, so a false "created" is a FAIL today; the harness fix that requires both applicable axes will also fail a trial whose end state changes after the answer.
+- **The PASS rule.** Since the integration, a trial passes only when its answer is right and every check that applies passes (design/08, "Scoring"), so a trial whose end state changes after the answer fails too.

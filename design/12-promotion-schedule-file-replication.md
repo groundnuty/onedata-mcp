@@ -123,12 +123,23 @@ The test is skipped unless `ONEDATA_MCP_LIVE_TRANSFER=1`. It refuses any provide
 
 ## Gate 4: validation run (scenarios built in branch commits `056b3c2` and `580d47b`, not run)
 
+**Gate 4 runs on one integrated commit.** The packages of `remove_qos_requirement`, `schedule_file_replication`, `get_file_attributes`, `list_children` and `create_directory` are validated together, on one commit of the integration branch `feat/promotion-harness` that carries all five and the harness they share (design/08's "Scoring" and "Reading the answer"). The tool surfaces there are those of merge `d946358`, the last commit that changes any of them. Each record therefore cites the same offered-set hashes, not its own package's K1 hash. Computed as above on that tree:
+
+| Offered set | Hash on the integrated commit |
+|---|---|
+| the panel's K1 set (11 tools; V1–V3, V3n, V3o, SR*, FA*) | `9192d3f502ebbd04a4d17ef787c27f7193df0fb89bac5eafa1ea618ae1324df3` |
+| the panel's K2 set (13 tools; V4–V7) | `6f502cb473137d4e972434c039830d7388b3e87f181dcc0386e0d0747fbc141b` |
+| FILE_TOOLS (6 tools; LC*, CD*) | `c030429d0e04de218f50a1bda935d17e84026c8c24ea1a61fd6d91b0bac31922` |
+
+The tool's own hash is unchanged by the integration. The run's record names the commit it ran on, and that commit's hashes must equal these.
+
 ### Scenario coverage (design/10)
 
 | The protocol asks for | Scenario | Brief | Fixture | Right answer | Oracle |
 |---|---|---|---|---|---|
 | a task that needs it | **SR1** copy without a rule | "Make a copy of `<dir>/log_20200110.dat` at your site vistula-dc, without setting up any placement rule for it, and tell me when its data are fully there." | the file, 128 MiB, written at the owner only | the data are fully at vistula-dc, said once they are; no rule at any point | mcp: the answer reads SAYS_WHOLE; the local block map covered the file **at the answer** (else PREMATURE CLAIM); no `add_file_qos_requirement` succeeded and no requirement was on the file at the answer (else `placement_rule`). federation: after the settle, the local block map covers the file and it has no requirement |
 | "no, because" | **SR1n** copy to a site outside the space | SR1's, with "the site oder-dc" for "your site vistula-dc" | the file, 256 KiB, at the owner only | not possible, because oder-dc does not support the space (is not one of its providers); nothing copied | mcp: the answer reads SAYS_NOT_POSSIBLE (a reason is needed); no schedule and no rule succeeded; 0 local bytes and no requirement at the answer. A copy to vistula-dc "instead" fails. federation: after the whole settle window, 0 local bytes, no requirement, the owner still covers it |
+| id variant of the file argument | **SR1i** copy without a rule, file by id | SR1's, with "the file with the id `<file id>`" for the path | as SR1 | as SR1 | as SR1; required: a successful `schedule_file_replication` given that id and the local provider's id |
 | offered but not needed | **SR1o** ask whether copied | "Has `<dir>/log_20200110.dat` been copied to your site vistula-dc?" | as SR1n | no (its data are at nordic-marine-dc only); nothing copied | as SR1n, with the answer reading SAYS_NOT_COPIED. "No, so I copied it" fails |
 | id, name and path variants | SR1 (file by path, target by name), SR1n (a name that resolves to nothing) | | | | see below |
 | the federation's end state after a mutating tool's final answer | SR1, SR1n, SR1o | | | | SR1's claim against the block map at the answer, and its end state after the settle. SR1n and SR1o read the federation at the answer and again after waiting out the whole settle window (the new `quiet` settle), so a transfer scheduled just before the answer has time to show |
@@ -139,24 +150,27 @@ Each oracle's docstring in [`benchmark/k2val/sr_oracles.py`](../benchmark/k2val/
   - **Why not drop `add_file_qos_requirement` from SR1's set instead**, which the triage also proposed? The scenario would then require the tool by construction, with V2's neutral brief. But it would need a per-scenario tool set in the harness, and it would test less. The real ambiguity of this tool's surface is the choice between a one-off copy and a lasting placement rule, and that choice only exists when both are offered. Keeping the K1 set also keeps SR1 comparable with V2 and V3.
   - **Is the brief's "without setting up any placement rule" workflow advice?** No. It is a constraint on the outcome: it names no tool and prescribes no step. A user who wants a copy and no lasting obligation says exactly this. The brief says "any placement rule", not "any lasting placement rule": "lasting" would allow a rule removed later, and SR1 would then not require the tool.
 - **SR1n's state.** The validation federation has two providers, and both support every space, so a provider that is in the federation but does not support the space cannot be built. The brief names `oder-dc`, which no provider has. From the model's side it is the same thing: `oder-dc` is not among the space's providers. The other candidate, a file already whole at the site, was rejected. There a redundant schedule leaves the end state unchanged, so failing it would judge efficiency, not correctness, and the right answer ("it is already there") is not a "no".
-- **Variants.** The tool takes the target only as an id. The name form (SR1, SR1n) is the one with something to resolve, and the gate-1 hint answers a name passed as the id. Every successful call passes an id, so the id form is exercised in every SR1 pass. A scenario whose brief gives the provider id would only test that the model passes on a string it was handed, so it was not built. The same holds for the file id: the path form of `file_id_or_path` is SR1's, and the wrong forms (a relative path, a file name, a made-up id) are gate-1 error paths with unit tests.
-- **Fixtures.** The three scenarios share one file name, `log_20200110.dat`, written at the owner only (kind `s0`). The trial directory is opaque (`logs-<12 hex>`). So neither the file nor the directory tells a model which scenario it is in. SR1's file is `LARGE_FILE_SIZE` (128 MiB, to be calibrated by gate 3), so that a transfer is seen in progress. SR1n and SR1o use the standard 256 KiB, since any unwanted copy of it lands well within the settle window. Before the agent starts, the fixture waits until the local provider reports the file in its built state: 0 local bytes, the right size and no QoS requirement, read strictly. It records that baseline in the artefact (`files_baseline`).
+- **Required call (SR1, SR1i).** Besides the answer and the block map, a pass needs a successful `schedule_file_replication` of the file (by path or id; SR1i: by the id it was given) to the local provider's id (design/08, "Scoring").
+- **Variants.** The file argument has a path form (SR1) and an id form: **SR1i** gives the file by its id only, after the external review (Gemini, finding 7). The target is taken only as an id, so its id form needs no scenario of its own: every successful call passes one, and a brief that handed the model the provider id would only test that it passes on a string it was given. Recorded as inapplicable, per design/10's variant rule. The name form (SR1, SR1n) is the one with something to resolve, and the gate-1 hint answers a name passed as the id. The wrong forms (a relative path, a file name, a made-up id) are gate-1 error paths with unit tests.
+- **SR1n and the tool's own refusal.** A careful model resolves `oder-dc` against the space's providers first and never calls the tool, which is a right "no, because" (a restraint scenario: a reason, and nothing changed). SR1n therefore does not exercise the tool's refusal of an unknown target; that path is covered by gate 3's live test and the gate-1 unit tests (`test/unit/api/test_transfers.py`, `test/unit/modules/test_transfers_wrapper.py`).
+- **Fixtures.** The four scenarios share one file name, `log_20200110.dat`, written at the owner only (kind `s0`). The trial directory is opaque (`logs-<12 letters>`). So neither the file nor the directory tells a model which scenario it is in. SR1's file is `LARGE_FILE_SIZE` (128 MiB, to be calibrated by gate 3), so that a transfer is seen in progress. SR1n and SR1o use the standard 256 KiB, since any unwanted copy of it lands well within the settle window. Before the agent starts, the fixture waits until the local provider reports the file in its built state: 0 local bytes, the right size and no QoS requirement, read strictly. It records that baseline in the artefact (`fixture_baseline`, its `files`).
 - **Reading the answers.** Each scenario's answer is read by one function returning a label: `read_copy_answer` (SAYS_WHOLE / SAYS_NOT_YET / OTHER), `read_refusal` (SAYS_NOT_POSSIBLE / CLAIMS_A_COPY / OTHER) and `read_copied_question` (SAYS_NOT_COPIED / SAYS_COPIED / OTHER). An answer that says both is OTHER, which fails and goes to manual review. The tests pair each label with real-sounding answers, including negations, "nothing was …", "zero …" and mixed sentences (`test/unit/k2val/test_sr_oracles.py`). The readers are regular expressions, kept small on purpose: a rubric judge is to become the primary reader, with these as a cross-check. A misread answer is an oracle bug, to be fixed and rescored.
 - **Every leg records calls the same way.** The oracles count successful calls by bare tool name. The Claude configs and the CLI legs reach the tools through `mcp_http`'s recording middleware, not the in-process recorder; a test pins that a refused schedule is recorded there as `ok=False` under its bare name.
-- **Both axes count.** Today the runner scores a trial PASS from the mcp axis alone. A harness fix making both axes count is announced. Until it lands, read `oracle_federation_pass` beside the outcome. The SR oracles fill both axes strictly: an unreadable snapshot is never judged.
-- **The default range.** SR1, SR1n and SR1o are outside `V1..V7`, the default of `make k2val`, so name them.
+- **Both axes count.** A trial passes only when its answer is right and every check that applies passes (design/08, "Scoring"). SR1n and SR1o are restraint scenarios: any successful write call fails them, and the federation is compared with the start state at the answer and again 60 s later. An unreadable snapshot is ORACLE_ERROR, never judged.
+- **Two readers.** The readers above are one of each answer's two readings; the judge is the other, and a disagreement is NEEDS_REVIEW (design/08). The external review (Gemini, finding 1) found the readers rejecting right answers ("fully stored at vistula-dc with no placement rule", "was in progress, and is now fully stored") and counting the owner's replica as a copy; each is fixed and a paired test case.
+- **The default range.** SR1, SR1i, SR1n and SR1o are outside `V1..V7`, the default of `make k2val`, so name them.
 
 ### The run
 
 - Panel: the six standing configs, with `sonnet-medium` as the control and `haiku-low`, `glm`, `qwen36`, `qwencoder` and `deepseek`. Each config has its own space.
-- K = 8. That is 3 scenarios × 6 configs × 8 = 144 trials. 48 of them write and copy the large file.
+- K = 8. That is 4 scenarios × 6 configs × 8 = 192 trials. 96 of them (SR1, SR1i) write and copy the large file.
 - Beforehand: run gate 3 and act on it, then run `make valfed-check` and check the surface hash.
 
 ```
 make valfed-up && make valfed-reset
 SSL_CERT_FILE=$VALFED_HOME/tls/ca-bundle.pem \
   make k2val K2VAL_CONFIG=benchmark/k2val/k2val.valfed.toml \
-    K2VAL_SCENARIOS=SR1,SR1n,SR1o K2VAL_K=8 \
+    K2VAL_SCENARIOS=SR1,SR1i,SR1n,SR1o K2VAL_K=8 \
     K2VAL_MODELS=sonnet-medium,haiku-low,glm,qwen36,qwencoder,deepseek
 ```
 
@@ -164,20 +178,20 @@ The report lands in `research/k2val-<run id>.md`.
 
 ### Results: TODO
 
-| Config | SR1 | SR1n | SR1o |
-|---|---|---|---|
-| sonnet-medium (control) | TODO /8 | TODO /8 | TODO /8 |
-| haiku-low | TODO /8 | TODO /8 | TODO /8 |
-| glm | TODO /8 | TODO /8 | TODO /8 |
-| qwen36 | TODO /8 | TODO /8 | TODO /8 |
-| qwencoder | TODO /8 | TODO /8 | TODO /8 |
-| deepseek | TODO /8 | TODO /8 | TODO /8 |
+| Config | SR1 | SR1i | SR1n | SR1o |
+|---|---|---|---|---|
+| sonnet-medium (control) | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
+| haiku-low | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
+| glm | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
+| qwen36 | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
+| qwencoder | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
+| deepseek | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
 
 Run id, commit and surface hash: TODO.
 
 Classify every non-pass before anything counts. The classes are harness or oracle bug (fix and rescore), deployment artefact, tool-attributable, or model capability.
 
-- **Classifications:** TODO. The flags help: `premature_claim` (SR1), `placement_rule` (SR1), `unrequested_change` (SR1n, SR1o) and `snapshot_error` (unjudged).
+- **Classifications:** TODO. The flags help: `premature_claim` (SR1), `placement_rule` (SR1), `unrequested_change` (SR1n, SR1o), `required_call_missing` (SR1, SR1i), and NEEDS_REVIEW's `readers_disagree` / `judge_error` (classified first).
 - **Tool-attributable findings, each fixed and re-run or accepted with a reason:** TODO. Watch for three things:
   - a "done" read off a transfer status (the description warns against it);
   - a provider name passed as the id that the hint did not resolve;

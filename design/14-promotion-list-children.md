@@ -92,6 +92,16 @@ Gated and guarded as design/13 describes; run with `make valfed-files-live` or `
 
 ## Gate 4: validation run (scenarios built in branch commit `9694c3d`, not run)
 
+**Gate 4 runs on one integrated commit.** The packages of `remove_qos_requirement`, `schedule_file_replication`, `get_file_attributes`, `list_children` and `create_directory` are validated together, on one commit of the integration branch `feat/promotion-harness` that carries all five and the harness they share (design/08's "Scoring" and "Reading the answer"). The tool surfaces there are those of merge `d946358`, the last commit that changes any of them. Each record therefore cites the same offered-set hashes, not its own package's K1 hash. Computed as above on that tree:
+
+| Offered set | Hash on the integrated commit |
+|---|---|
+| the panel's K1 set (11 tools; V1–V3, V3n, V3o, SR*, FA*) | `9192d3f502ebbd04a4d17ef787c27f7193df0fb89bac5eafa1ea618ae1324df3` |
+| the panel's K2 set (13 tools; V4–V7) | `6f502cb473137d4e972434c039830d7388b3e87f181dcc0386e0d0747fbc141b` |
+| FILE_TOOLS (6 tools; LC*, CD*) | `c030429d0e04de218f50a1bda935d17e84026c8c24ea1a61fd6d91b0bac31922` |
+
+The tool's own hash is unchanged by the integration. The run's record names the commit it ran on, and that commit's hashes must equal these.
+
 ### Scenario coverage (design/10)
 
 | The protocol asks for | Scenario | Brief | Fixture | Right answer |
@@ -105,8 +115,9 @@ Gated and guarded as design/13 describes; run with `make valfed-files-live` or `
 - **Requires.** LC and LCp offer FILE_TOOLS. `list_files_recursively` lists regular files only, so it reveals `calib_runs` (through `calib_runs/log_…`) but never the two empty directories; `get_file_attributes` cannot list; `download_file` reads content. Probing names with `create_directory` would change the tree, which fails the trial. A full trial on the fake federation shows the recursive listing alone gives the wrong answer (`test_lc_the_recursive_file_listing_alone_misses_them_too`).
 - **LCn** keeps LC's brief, so a model that answers without listing fails one of them.
 - **LCo** is answered by one call of `list_files_recursively`; a top-level listing alone misses `log_20200103.dat`.
-- **LCp** is the variant that matters for this tool's arguments: `limit`, `isLast` and `nextPageToken`, and the token fix of gate 1. A model that reads one page answers calib_runs alone and fails. It relies on name order (gate 3 settles it).
-- **No id variant.** The id branch of `parent_id_or_path` is the same code as `get_file_attributes`', whose FAi covers it in a run; the encoding and the dot ids are unit-tested here. Add an LCi if the operator wants it run for this tool too.
+- **LCp** is the variant that matters for this tool's arguments: `limit`, `isLast` and `nextPageToken`, and the token fix of gate 1. After the external review (finding 1) it holds 113 entries: 110 empty files `acq_0001.dat`…`acq_0110.dat`, then LC's three subdirectories, made last. Before the first turn the fixture lists the directory at the local provider with `list_children`'s largest limit (100) and refuses to start (RESET_FAIL) unless the page is not the last and holds none of the three: the answer needs a second page whatever order 25.0 lists in. A model that reads one page, even at limit 100, sees no subdirectory and fails.
+- **LCi**, an id variant added after the external review (finding 9, reversing the earlier "no id variant"): "Which subdirectories does the directory with the id `<id>` have?", LC's fixture, the directory given by its id only. It requires `list_children` called with that id.
+- **Required call (LC, LCn, LCp, LCi).** A pass needs successful `list_children` calls on the directory that, together, show every one of its top-level entries: a listing read to its end.
 
 ### How a trial is judged
 
@@ -114,30 +125,30 @@ Gated and guarded as design/13 describes; run with `make valfed-files-live` or `
 - **mcp:** the reader returns the expected set, AND the tree at the answer equals the baseline (no entry added, removed, or changed in id, type, size or mode).
 - **federation:** the tree after the answer equals the baseline.
 - **An unreadable tree is never judged:** a failed or malformed listing (no `children` list; not last with no token) raises, and the trial is `ORACLE_ERROR`, a harness outcome.
-- **Known limits of the readers**, left to the judge: a subdirectory name mentioned in a negation ("there is no raw_frames") counts as claimed; a hallucinated extra subdirectory is not seen.
+- **Extra names are kept** (external review, finding 3): the readers also return a name the answer lists that is not in the fixture (an invented `archive`, a `notes.txt`), so the set is wrong and the trial fails. A subdirectory name mentioned in a negation ("there is no raw_frames") still counts as claimed; the judge reads it otherwise, and the trial is NEEDS_REVIEW. Since the integration, the shared checks of design/08's "Scoring" also apply: a pass needs the right answer and every check that applies; the answer is read by this reader and by the judge, and a disagreement is NEEDS_REVIEW.
 
 ### The run
 
-- Panel: the six standing configs, `sonnet-medium` the control. K = 8: 4 scenarios × 6 configs × 8 = 192 trials.
+- Panel: the six standing configs, `sonnet-medium` the control. K = 8: 5 scenarios × 6 configs × 8 = 240 trials.
 
 ```
 make valfed-up && make valfed-reset
 SSL_CERT_FILE=$VALFED_HOME/tls/ca-bundle.pem \
   make k2val K2VAL_CONFIG=benchmark/k2val/k2val.valfed.toml \
-    K2VAL_SCENARIOS=LC,LCn,LCo,LCp K2VAL_K=8 \
+    K2VAL_SCENARIOS=LC,LCn,LCo,LCp,LCi K2VAL_K=8 \
     K2VAL_MODELS=sonnet-medium,haiku-low,glm,qwen36,qwencoder,deepseek
 ```
 
 ### Results: TODO
 
-| Config | LC | LCn | LCo | LCp |
-|---|---|---|---|---|
-| sonnet-medium (control) | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
-| haiku-low | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
-| glm | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
-| qwen36 | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
-| qwencoder | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
-| deepseek | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
+| Config | LC | LCn | LCo | LCp | LCi |
+|---|---|---|---|---|---|
+| sonnet-medium (control) | TODO /8 | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
+| haiku-low | TODO /8 | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
+| glm | TODO /8 | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
+| qwen36 | TODO /8 | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
+| qwencoder | TODO /8 | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
+| deepseek | TODO /8 | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
 
 Run id, commit and surface hash: TODO. Classify every non-pass before anything counts.
 

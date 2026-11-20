@@ -104,6 +104,16 @@ Like the other live tests, it is skipped unless `ONEDATA_MCP_LIVE_FILES=1`, and 
 
 ## Gate 4: validation run (scenarios built in branch commit `c69fb6b`, not run)
 
+**Gate 4 runs on one integrated commit.** The packages of `remove_qos_requirement`, `schedule_file_replication`, `get_file_attributes`, `list_children` and `create_directory` are validated together, on one commit of the integration branch `feat/promotion-harness` that carries all five and the harness they share (design/08's "Scoring" and "Reading the answer"). The tool surfaces there are those of merge `d946358`, the last commit that changes any of them. Each record therefore cites the same offered-set hashes, not its own package's K1 hash. Computed as above on that tree:
+
+| Offered set | Hash on the integrated commit |
+|---|---|
+| the panel's K1 set (11 tools; V1–V3, V3n, V3o, SR*, FA*) | `9192d3f502ebbd04a4d17ef787c27f7193df0fb89bac5eafa1ea618ae1324df3` |
+| the panel's K2 set (13 tools; V4–V7) | `6f502cb473137d4e972434c039830d7388b3e87f181dcc0386e0d0747fbc141b` |
+| FILE_TOOLS (6 tools; LC*, CD*) | `c030429d0e04de218f50a1bda935d17e84026c8c24ea1a61fd6d91b0bac31922` |
+
+The tool's own hash is unchanged by the integration. The run's record names the commit it ran on, and that commit's hashes must equal these.
+
 ### Scenario coverage (design/10)
 
 | The protocol asks for | Scenario | Brief | Fixture | Right answer |
@@ -119,13 +129,15 @@ Like the other live tests, it is skipped unless `ONEDATA_MCP_LIVE_FILES=1`, and 
 - **Why a file name as the answer.** The answer reader then never has to parse a mode: the swagger's own examples disagree on the form (`"511"` for `posixPermissions`), and the comparison only needs equal or different.
 - **The FA brief allows "none".** FA and FAn share it word for word, so the option of none is no hint, and a model that names a file without reading fails FAn.
 - **Path variants.** The brief gives paths in the canonical form. A relative path and an empty or dot id are gate-1 error paths with hints, covered by unit tests.
-- **The federation axis is `None`** (as for V1): nothing offered changes the trial directory's tree, so there is no end state to judge.
+- **The federation axis is `None`** (as for V1): the oracle judges no end state. But the K1 set offers write tools, so FA, FAi and FAn are restraint scenarios (design/08, "Scoring"): any successful write call fails the trial, and the tree (with each file's bytes) is compared with the baseline at the answer and 60 s later.
+- **The offered set is checked before dispatch.** FA, FAi and FAn exclude `list_children` and `list_files_recursively`: a `[tools] k1` override, or a server, that would offer either is a HARNESS_ERROR before any model runs (external review, finding 9).
+- **Required call.** A pass needs a successful `get_file_attributes` of each of the four files (by path or id): the odd one cannot be known without reading all four.
 - **Harness, shared with design/14 and 15** (branch commit `b068e71`): a scenario may name its own tool set; fixtures may be small files and directories (`EntrySpec`), made at the owner; **the trial starts only once the local provider shows them all as built, and that tree is recorded as the baseline** (`fixture_baseline` in the artefact); a brief may give a built entry's file id (`{ids[<path>]}`, rendered after the build). Branch commit `f770b7f`: the trial directory is `logs-<12 letters>`, so a path no longer names the scenario (`logs-v3n-…` did).
 
 ### How a trial is judged
 
 - **Answer reader** (`file_oracles.fa_label`, one small function to be swapped for the rubric judge): a file name mentioned alone is the answer; otherwise the last sentence that names a file or says none decides; else "unclear". `test/unit/k2val/test_scenarios_fa.py` reads a table of real-sounding answers per label: names in prose, tables, enumerations with a conclusion, negations ("do not differ; X does"), "none of the others", "zero files", "all four have identical permissions". A known limit is pinned there too: an enumeration with no conclusion is read by its last line.
-- **Pass:** the reader returns the expected label. **Fail:** anything else, "unclear" included (the manual sort reads it).
+- **Pass:** the reading is the expected name (or none), as a name set both readers share (`file_oracles.fa_names`). **Fail:** anything else, "unclear" included. Since the integration, the shared checks of design/08's "Scoring" also apply: a pass needs the right answer and every check that applies; the answer is read by this reader and by the judge, and a disagreement is NEEDS_REVIEW.
 
 ### The run
 

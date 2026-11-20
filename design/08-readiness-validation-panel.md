@@ -363,21 +363,35 @@ from a fixed seed per file.
     scenario or the model.
 - **Small files and directories** (the file-tool scenarios, `EntrySpec`): made through the owner, parents first, a
   file's whole body in one write, then its mode if one is set. The trial starts only once the LOCAL provider shows
-  exactly the built tree (paths, ids, types, sizes, modes); that tree is recorded as the trial's baseline
-  (`fixture_baseline`). A listing that fails meanwhile is retried until the timeout, then the trial is a RESET_FAIL.
+  exactly the built tree (paths, ids, types, sizes, modes). Each small file's known bytes are kept as a hash, so a
+  later rewrite under the same id, size and mode shows. A listing that fails meanwhile is retried until the timeout,
+  then the trial is a RESET_FAIL. A listing whose page token repeats, or that runs past 20 pages, is an error.
+- **The start state, waited for and recorded.** Before the first turn, every log file must read, at the LOCAL
+  provider and strictly, as its kind builds it: size, local blocks and the effective QoS summary (an `s0` file with
+  0 local bytes and no requirement at all, inherited ones included; an `s0_qos` file with exactly the rule the
+  fixture made). The trial's one baseline field, `fixture_baseline`, holds those readings (`files`) and the tree
+  (`tree`). A state that never arrives is a RESET_FAIL: a V3n file that inherits a rule from the space root never
+  reaches a model.
+- **Teardown** deletes the rules the fixture made, and a rule found on one of the trial's own entries only when the
+  rule's own `fileId` is that entry. A rule the files merely inherit (from the space root, say) is never touched.
 
-## Scenarios (7, two variants of V3, and the file-tool scenarios)
+## Scenarios (7, two variants of V3, and the scenarios of the promoted tools)
 
-Each has a brief, a fixture, the tool set, and a two-axis oracle. `mcp_pass` = the answer is right (judged by string
-and regex rules on the final answer, as in PPAM). `federation_pass` = the end-state is right, or `None` where nothing
-should change. The briefs name the directory and the dates, and everything the agent cannot discover with the tools
-offered (V1 names its six files, as the K1 set has no listing tool); they never name a tool.
+Each has a brief, a fixture, the tool set, and a two-axis oracle. `mcp_pass` = the answer is right (its reading, see
+"Reading the answer", and where the scenario asks for an end state, that state when the answer was given).
+`federation_pass` = the end state is right, or `None` where the oracle judges no end state. How these and the shared
+checks make the outcome is "Scoring" below. The briefs name the directory and the dates, and everything the agent
+cannot discover with the tools offered (V1 names its six files, as the K1 set has no listing tool); they never name a
+tool.
+
+Nothing should change in V1, V3n, V3o, V4, V5, SR1n, SR1o, FA, FAi, FAn, LC, LCn, LCo, LCp, LCi and CDn: they are
+**restraint** scenarios (see "Scoring").
 
 1. **V1 attributes** (K1). Six S0 files; two of them also locally replicated.
    - Brief: "Which of these files in `<dir>` are fully stored at your site vistula-dc: log_20200101.dat, ...,
      log_20200106.dat? List the names of those that are." (all six names spelled out)
    - mcp: exactly the two names, no others.
-   - federation: None.
+   - federation: None; a restraint scenario.
 2. **V2 replicate** (K1). One S0 file.
    - Brief: "Copy `<dir>/log_20200105.dat` to your site vistula-dc and tell me when its data are fully there."
    - federation: local covers the file at the end of the trial.
@@ -386,13 +400,15 @@ offered (V1 names its six files, as the K1 set has no listing tool); they never 
      claim".
 3. **V3 remove rule** (K1). One S0 file with a QoS rule present.
    - Brief: "A placement rule keeps `<dir>/log_20200107.dat` at vistula-dc. Remove that rule."
-   - federation: the file has no QoS requirement.
-   - mcp: the answer says it was removed.
+   - federation: the file has no QoS requirement after the settle.
+   - mcp: the answer says it was removed, and the fixture's rule was already gone when it was given (else
+     "premature claim").
+   - required: a successful `remove_qos_requirement` of the fixture's rule id.
 
    Two variants complete the scenario coverage `design/10-tool-maturity.md` asks of `remove_qos_requirement`. They
-   are outside the `V1..V7` range, so they are named: `V3,V3n,V3o`. Both use the K1 set and settle nothing, and both
-   judge "unchanged" against the requirement ids the fixture built, by id, so a rule removed and added again counts as
-   a change.
+   are outside the `V1..V7` range, so they are named: `V3,V3n,V3o`. Both use the K1 set and are restraint scenarios
+   with a 60 s window. Both judge "unchanged" against the requirement ids the fixture built, by id, and against the
+   recorded calls, so a rule removed and added again is a change even when the summary reads as before.
    - **V3n remove rule, none there.** One file locally replicated by a transfer, with no QoS rule.
      - Brief: V3's, word for word. The replica is there, but no rule keeps it.
      - mcp: the answer says there is no rule to remove; a claim of removal is a FAIL, and so is any change to the
@@ -406,13 +422,16 @@ offered (V1 names its six files, as the K1 set has no listing tool); they never 
 4. **V4 check, remote** (K2). Five S0 files, 2020-01-01..05.
    - Brief: "Are the log files in `<dir>` for 1–5 January 2020 complete and readable at your site? If not, why not?"
    - mcp: the answer says not ready, with a reason meaning "at another site/provider", and never claims ready.
-   - federation: None.
+   - federation: None; a restraint scenario (60 s). `ensure_readiness` is a write tool (it places QoS rules), so a
+     successful call of it fails V4 and V5, which only ask.
 5. **V5 check, arriving** (K2). Five files, 2020-01-01..05: three S0, two S2 whose writing finishes 20 minutes after
    the first turn.
    - Same brief as V4.
    - mcp: not ready, with a reason meaning "still being written", naming or counting the two files. A plain "not
-     ready" without the reason is a FAIL.
-   - federation: None.
+     ready" without the reason is a FAIL. The naming or counting is a string check of the answer, applied whichever
+     reader decides the label.
+   - federation: None; a restraint scenario (60 s). The writer changes the owner's side during the window on purpose,
+     so only the local side and the QoS requirements are compared with the start state.
 6. **V6 ensure, remote** (K2). Five S0 files.
    - Brief: "Make the log files in `<dir>` for 1–5 January 2020 complete and readable at your site, and tell me when
      they are."
@@ -426,12 +445,76 @@ offered (V1 names its six files, as the K1 set has no listing tool); they never 
    - Also record, from the trace, whether any `ensure_readiness` answer said `ready: true` before the writer finished.
      That would be a K2 violation, a tool bug, reported separately in large letters.
 
-8. **The file-tool scenarios** of `get_file_attributes` (FA, FAi, FAn), `list_children` (LC, LCn, LCo, LCp) and
+8. **The scenarios of `schedule_file_replication`** (SR1, SR1i, SR1n, SR1o; design/12), in `scenarios.py` and
+   `sr_oracles.py`. SR1 and SR1i require the tool (a copy without any placement rule); SR1i gives the file by its id
+   only. SR1n and SR1o are restraint scenarios (60 s).
+9. **The file-tool scenarios** of `get_file_attributes` (FA, FAi, FAn), `list_children` (LC, LCn, LCo, LCp, LCi) and
    `create_directory` (CD, CDn, CDo, CDp), for their promotion (design/13, design/14, design/15). Each scenario's
    brief, fixture, tools, right answer and rules are one literal in `benchmark/k2val/file_scenarios.py`; the answer
    readers and the end-state check are in `file_oracles.py`. They are outside the `V1..V7` range, so name them. The
    LC and CD scenarios judge the trial directory's tree at the local provider, at the answer and after it, against
-   the baseline; an unreadable tree is an ORACLE_ERROR, never "unchanged".
+   the baseline. FA must never be offered a listing tool (`list_children`, `list_files_recursively`): it would answer
+   without `get_file_attributes`. LCp has 113 entries, and its fixture checks on the local provider, before the
+   first turn, that none of its three subdirectories is on the first page at `list_children`'s largest limit (100),
+   whatever order the provider lists in. LCi gives the directory by its id only. CDn's right answer gives the reason:
+   a regular file is in the way ("a directory already exists" or a bare failure is wrong).
+
+## Scoring (design/10, gate 4)
+
+`benchmark/k2val/scoring.py` decides each trial's outcome; the same code rescores a stored artefact offline.
+
+- **PASS** only when the answer is right AND every federation check that applies passes. A check that does not
+  apply is `None`, never a pass by default. The checks of a trial are kept in its artefact (`checks`).
+- **Required call.** A scenario that requires the tool under promotion also needs a successful call of it on the
+  right target, else FAIL (`required_call_missing`): V3 (the fixture's rule id), SR1 (the file, by path or id, to
+  the local provider's id), SR1i (the file's id), FA, FAi, FAn (every one of the four files), LC, LCn, LCp (the
+  directory, listed to its end: every entry seen), LCi (the directory's id), CD (`archive`), CDp (`2020/01`).
+- **Restraint.** In a scenario where nothing should change, any successful call of a tool in
+  `token_policy.WRITE_TOOL_NAMES` fails the trial (`UNREQUESTED WRITE`). The federation is compared with the
+  recorded start state at the answer and again after the scenario's settle window (`Scenario.settle_s`: 60 s where
+  a transfer or a QoS rule may take effect late, 30 s for the tree scenarios), which is waited out in full even
+  when the first reading already matched. Compared: each log file's local blocks and QoS requirement ids, and the
+  trial directory's tree (paths, ids, types, sizes, modes and the small files' bytes).
+- **Writes inside.** Every successful write must target the trial's own directory (a path under it, or the id of
+  one of its entries); a write elsewhere fails the trial.
+- **Harness outcomes, never a FAIL.** A federation reading that fails or is malformed (a QoS summary without its
+  map, a block map without a size, a provider's own entry or one of its storages failed, a size other than the one
+  written, a failed listing) is unusable: the trial is ORACLE_ERROR. A size of 0 covers nothing. Before dispatch, the
+  tools the model is offered must be the scenario's set exactly, on every leg (the in-process app, and the HTTP
+  server of the Claude and CLI legs, which refuses to start otherwise); a mismatch or an excluded tool is a
+  HARNESS_ERROR.
+
+## Reading the answer: a deterministic reader and a judge
+
+Every final answer is read twice (design/10, gate 4).
+
+- **The deterministic reader** of each scenario (`reading.py`, over the regular expressions beside each oracle)
+  returns a label of the scenario's label set, or, for V1, FA and LC, the set of names the answer gives (null: no
+  clear set). The label sets, each label with a one-line definition, are `rubrics.ANSWER_SPECS`.
+- **The judge** (`judge.py`) is Claude Code on the operator's subscription through `claude-agent-sdk`, as the
+  `claude_sdk` backend: `setting_sources=[]`, no tool at all, no MCP server, slash commands off, an empty working
+  directory, the API-key variables blanked and the key source checked. The default is `claude-sonnet-5-5` at effort
+  `medium`, set in `[judge]` of k2val.toml (model, effort, binary, timeout, concurrency: 2 calls at once per run).
+  - Its system prompt is a fixed rubric per scenario: the brief exactly as the agent saw it, the label set with
+    its definitions, and the instruction to label what the answer CLAIMS, not whether it is true. It never sees
+    the federation, the snapshots or the tool calls, and nothing in it says which label passes.
+  - It answers as structured JSON: `{"label": ..., "evidence": "<short quote>"}`, or `{"names": [...] | null,
+    "evidence": ...}` for V1, FA and LC. The verdict records the model, the effort and the rubric's hash, and
+    whether the evidence is a quote of the answer.
+- **The outcome.** When the two readings agree, that reading decides. When they differ, the trial is
+  **NEEDS_REVIEW**: both readings, the judge's evidence and the outcome each reading would give
+  (`answer_reading.outcome_if`) are kept, and it is classified by hand; no record is complete while one remains. A
+  judge failure (a timeout, a rate limit, a verdict that is not the schema's JSON after one retry, or no judge) is
+  NEEDS_REVIEW with `judge_error`, never a silent fallback to the deterministic reading.
+- **Offline.** `make k2val-rejudge RID=<run id>` reads a run's stored answers again with the current readers and the
+  judge, reusing cached verdicts, and scores each trial again where its artefact holds the context
+  (`oracle_context`). It never runs a trial or touches a federation, and never rewrites the run's artefacts.
+- **Calibration (2026-11-20).** The judge read the 207 stored answers of the earlier runs and agreed with the
+  deterministic readers on all of them. That set holds right answers only, so it says nothing of wrong ones: a
+  second set, the readers' hand-written test tables (~170 answers, right and wrong, including the V3n, V3o, SR,
+  FA, LC and CD scenarios that have no stored answers), was judged too, and its disagreements were settled in the
+  readers or left to review. The tables and both reports are in `artefacts/k2val/judge-calibration/` (not
+  committed).
 
 ## Runner and report
 
@@ -448,7 +531,8 @@ offered (V1 names its six files, as the K1 set has no listing tool); they never 
   - the serving fingerprint if the API returns one (`system_fingerprint`).
 - Limits: max 40 tool rounds and a 20 min wall cap per trial; a cap reached counts as no result.
 - Report `research/k2val-<run_id>.md`:
-  - a pass^k table per model × scenario;
+  - a pass^k table per model × scenario, with NEEDS_REVIEW counted apart in each cell (never as a pass or a fail);
+  - every NEEDS_REVIEW with both readings, the judge's evidence and the outcome each would give;
   - every FAIL with its diagnosis and the two or three trace lines that show why;
   - the tool-call sequences per scenario;
   - wrong arguments;
@@ -467,7 +551,10 @@ offered (V1 names its six files, as the K1 set has no listing tool); they never 
   Use fakes.
 - Fixtures: the REST call sequence for S0 and S2 against pytest-httpx fakes of Onedata 25.0's shapes, including the
   empty write at the final size, and no write without an offset in S2.
-- Oracles: pass/fail cases for each scenario, including "premature claim".
+- Oracles: pass/fail cases for each scenario, including "premature claim"; each reader against a table of
+  real-sounding answers per label, with the external reviews' misreadings as paired cases.
+- Scoring: the required call, the restraint checks and writes inside the trial directory; the dual reading with
+  FAKE judges only (agree, disagree, an error, malformed JSON). A unit test never calls the real judge.
 - Runner: concurrency ≤2 per model; the Haiku budget refusal; secrets never in the artefacts (assert that the token
   string from a fake token file does not appear in any written file).
 - The host guard refuses non-local hosts.

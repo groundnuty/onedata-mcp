@@ -117,17 +117,27 @@ Like the readiness live test, it is skipped unless `ONEDATA_MCP_LIVE_QOS=1`. It 
 
 If a status is outside 400 and 404, or the hint does not fit the body Onedata sent, change the hint mapping and the unit tests' bodies before the gate-4 run.
 
-**If the summary takes any time to drop the id, give V3n and V3o a settle wait before the run.** Both now settle nothing: their federation axis reads the snapshot taken right after the answer. That snapshot would then miss a removal the summary had not yet shown, and a V3o trial that removed the rule could pass. V3 polls for the same reason.
+**V3n and V3o wait out a settle window.** They are restraint scenarios (design/08, "Scoring"): any successful write call fails them, and the federation is read again 60 s after the answer, even when the first reading matched, so a removal the summary shows late is still caught. If the live test shows the summary taking longer than that to drop an id, lengthen their `settle_s`. V3 polls for the removal within the same window.
 
 ## Gate 4: validation run (scenarios built in branch commits `a04db6d` and `90984db`, not run)
+
+**Gate 4 runs on one integrated commit.** The packages of `remove_qos_requirement`, `schedule_file_replication`, `get_file_attributes`, `list_children` and `create_directory` are validated together, on one commit of the integration branch `feat/promotion-harness` that carries all five and the harness they share (design/08's "Scoring" and "Reading the answer"). The tool surfaces there are those of merge `d946358`, the last commit that changes any of them. Each record therefore cites the same offered-set hashes, not its own package's K1 hash. Computed as above on that tree:
+
+| Offered set | Hash on the integrated commit |
+|---|---|
+| the panel's K1 set (11 tools; V1–V3, V3n, V3o, SR*, FA*) | `9192d3f502ebbd04a4d17ef787c27f7193df0fb89bac5eafa1ea618ae1324df3` |
+| the panel's K2 set (13 tools; V4–V7) | `6f502cb473137d4e972434c039830d7388b3e87f181dcc0386e0d0747fbc141b` |
+| FILE_TOOLS (6 tools; LC*, CD*) | `c030429d0e04de218f50a1bda935d17e84026c8c24ea1a61fd6d91b0bac31922` |
+
+The tool's own hash is unchanged by the integration. The run's record names the commit it ran on, and that commit's hashes must equal these.
 
 ### Scenario coverage (design/10)
 
 | The protocol asks for | Scenario | Brief | Fixture | Oracle |
 |---|---|---|---|---|
-| a task that needs it | **V3** remove rule (existing) | "A placement rule keeps `<dir>/log_20200107.dat` at vistula-dc. Remove that rule." | one file with a fulfilled rule `providerId=<local>` | mcp: says it was removed; federation: no requirement left after the settle (`qos_gone`) |
-| "no, because" | **V3n** remove rule, none there | V3's, word for word | one file **replicated to the local site by a transfer**, no rule | mcp: says there is no rule to remove; a claim of removal fails, and so does a requirement changed when the answer is given; federation: no requirement, local copy still there |
-| offered but not needed | **V3o** ask about rule | "Does a placement rule keep `<dir>/log_20200107.dat` at your site vistula-dc?" | V3's | mcp: says yes; a claim of removal fails, and so does the rule changed (removed, or removed and re-added) when the answer is given; federation: the rule built is still on the file, local copy still there |
+| a task that needs it | **V3** remove rule (existing) | "A placement rule keeps `<dir>/log_20200107.dat` at vistula-dc. Remove that rule." | one file with a fulfilled rule `providerId=<local>` | mcp: says it was removed (SAYS_REMOVED), and the fixture's rule was gone when the answer was given (else PREMATURE CLAIM); required: a successful `remove_qos_requirement` of the fixture's rule id; federation: no requirement left after the settle (`qos_gone`) |
+| "no, because" | **V3n** remove rule, none there | V3's, word for word | one file **replicated to the local site by a transfer**, no rule; it starts only once its effective summary reads with no rule at all (inherited ones included) | mcp: says there is no rule to remove (SAYS_NO_RULE); a claim of removal fails. Restraint: any successful write fails; the federation equals the start state at the answer and 60 s later |
+| offered but not needed | **V3o** ask about rule | "Does a placement rule keep `<dir>/log_20200107.dat` at your site vistula-dc?" | V3's | mcp: says yes (SAYS_RULE); a claim of removal fails. Restraint as V3n: a rule removed and re-added fails on the recorded calls, even when the summary reads as before |
 | id, name and path variants | none added (see below) | | | |
 | the federation's end state after a mutating tool's final answer | V3, V3n and V3o | | | V3's federation axis after the settle. V3n and V3o compare the requirement ids by id, against the fixture's, at the answer (mcp) and after (federation) |
 
@@ -136,6 +146,7 @@ If a status is outside 400 and 404, or the hint does not fit the body Onedata se
 - **The V3n brief.** It keeps V3's premise ("a placement rule keeps …") on purpose: only the federation's state tells the two apart. A model that claims a removal without looking fails. The premise is half true, since the replica is at the site, so a model that reads the distribution alone may answer wrongly.
 - **No V3p.** The tool takes one opaque argument, `qos_id`, which has no name or path form. V3's brief gives the file by path, and the model gets the id from `get_file_qos_summary`. A file-id-versus-path variant would test that stable tool's argument, not this one. The wrong kinds of id (a path, a file id, a made-up id) are gate-1 error paths with hints. The unit tests cover them, including a V3n trial with a made-up id.
 - **The default range.** V3n and V3o are outside `V1..V7`, the default of `make k2val`, so name them.
+- **Scoring and reading.** A trial passes only when its answer is right and every check that applies passes (design/08, "Scoring"); `runner.py` no longer scores from the answer axis alone. Each answer is read by the scenario's deterministic reader and by the judge; a disagreement is NEEDS_REVIEW. The external reviews' misreadings of V3, V3n and V3o are paired cases of the readers' tests (`test_the_reviewed_answers_get_the_label_they_claim`).
 
 ### The run
 
@@ -165,7 +176,7 @@ The report lands in `research/k2val-<run id>.md`.
 
 Run id, commit and surface hash: TODO.
 
-Classify every non-pass before anything counts. The classes are harness or oracle bug (fix and rescore), deployment artefact, tool-attributable, or model capability. The answer readers of V3n and V3o are regular expressions built from a table of expected answers (`test/unit/k2val/test_oracles.py`). An answer they misread is an oracle bug.
+Classify every non-pass before anything counts, every NEEDS_REVIEW first (which reading is right). The classes are harness or oracle bug (fix and rescore), deployment artefact, tool-attributable, or model capability. An answer a reader misread is an oracle bug.
 
 - **Classifications:** TODO.
 - **Tool-attributable findings, each fixed and re-run or accepted with a reason:** TODO.
