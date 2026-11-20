@@ -17,56 +17,62 @@ The protocol is [`10-tool-maturity.md`](10-tool-maturity.md). The first package,
 
 The listing is the output of `make -s tools-manifest` with `ONEDATA_MCP_TOOLS` set to the selection, hashed with sha256, as in design/11. Without `-s`, make prints the recipe line too, and the hash differs.
 
-| Selection | Before (master `4047a56`) | Promoted surface (since branch commit `d00354e`) |
+| Selection | Before (master `4047a56`) | Promoted surface (since branch commit `e1fcd00`) |
 |---|---|---|
-| `schedule_file_replication` alone | `795eed414dd20fab858906a6eba31e736d6c2ee157554138ee0dcf157a0b5eb9` | `7537ac68f392dd156d5e684f7750cb9c02ed527de3db1e9c7b889f3b2780fa9e` |
-| the panel's K1 set (11 tools) | `dc1d10dcce1a81e8b15c273adb99d007db9a6fdd169ce366ed43b5a38d49cd2e` (= design/11's promoted K1) | `0df801b5e4548415a267768a1f40532bf7d21d7d9e5ee7a49666ad786838e1ab` |
+| `schedule_file_replication` alone | `795eed414dd20fab858906a6eba31e736d6c2ee157554138ee0dcf157a0b5eb9` | `98ee99077b84235a4e5c48c883ec8b5e5f57738af76dad7b5b44299ebe5c2489` |
+| the panel's K1 set (11 tools) | `dc1d10dcce1a81e8b15c273adb99d007db9a6fdd169ce366ed43b5a38d49cd2e` (= design/11's promoted K1) | `c5cf48f3c1549fafefa7917dfd62b7cee931800adc77099f9a784890a9ab72f2` |
 
-- `d00354e` is the last commit that changes the surface; later commits leave it alone.
+- `e1fcd00` is the last commit that changes the surface; later commits leave it alone. It rewords one sentence of `d00354e`'s description after the external review (finding 8): the hashes of `d00354e`'s surface, `7537ac68…` alone and `0df801b5…` over K1, are superseded.
 - The `tools/list` diff over the K1 set is this one line. Name, input schema (the field descriptions included) and annotations are unchanged:
 
   ```
   -    "description": "Schedule a replication transfer of a file to a target provider.\n\nCopies the file's data to `target_provider_id` and returns the\nscheduled transfer's id; poll it with `get_transfer`, or watch the\nspace transfer log with `list_space_transfers`. Replication only —\ndoes not evict or migrate.\n\nThe target provider must support the file's space; if it does not, the\ncall fails with a structured error explaining why the placement cannot\nbe scheduled.",
-  +    "description": "Schedule a replication transfer of a file to a target provider.\n\nCopies the file's data to `target_provider_id`. Returns\n`{\"transferId\": \"<id>\"}` as soon as the transfer is scheduled.\nScheduled does not mean copied: no data has moved yet, and the data\narrive later. A transfer's status can read completed before the\ncopied blocks show at the target, so judge whether the copy is whole\nfrom the target provider's blocks of the file, not from the transfer's\nstatus.\n\nReplication only — does not evict or migrate. The copy is one-off:\nnothing keeps the data at the target afterwards.\n\nThe target must be a provider that supports the file's space, given by\nits provider id, not its name; otherwise the call fails.",
+  +    "description": "Schedule a replication transfer of a file to a target provider.\n\nCopies the file's data to `target_provider_id`. Returns\n`{\"transferId\": \"<id>\"}` as soon as the transfer is scheduled.\nScheduled does not mean copied: no data has moved yet, and the data\narrive later. A transfer's status can read completed before the\ncopied blocks show at the target, so re-check the target provider's\nblocks of the file until they cover all of it, and judge the copy by\nthose blocks, not by the transfer's status.\n\nReplication only — does not evict or migrate. The copy is one-off:\nnothing keeps the data at the target afterwards.\n\nThe target must be a provider that supports the file's space, given by\nits provider id, not its name; otherwise the call fails.",
   ```
 
 - **Earlier evidence is supporting only.** The triage of the experimental tools (2026-11-20) reported 28 V2 trials, all passing, with 0 errors. Those were eight API configs at K=3 and two CLI agents. The figure is reported here, not recounted. V2 does not require the tool, since `add_file_qos_requirement` in the same set also copies the file, and that run used the old description.
 
 **Before the gate-4 run**, check that the surface has not moved:
 
-    ONEDATA_MCP_TOOLS=schedule_file_replication make -s tools-manifest | sha256sum   # expect 7537ac68...
+    ONEDATA_MCP_TOOLS=schedule_file_replication make -s tools-manifest | sha256sum   # expect 98ee9907...
 
-## Gate 1: implementation (done, branch commit `59641e5`)
+## Gate 1: implementation (done, branch commits `59641e5` and `e1fcd00`)
 
 Every error path a model can trigger, and what the model now reads. The tests are in `test/unit/api/test_transfers.py`, plus `test/unit/modules/test_transfers_wrapper.py` for the text as it arrives through the MCP client (no host in it).
 
 | Path | Before | Now |
 |---|---|---|
 | A relative path (`space/dir/file`) | Sent to Onedata as a file id | Refused before any request: "Paths must start with '/': use /<space_name>/<path_to_file> (got …)", the text the file tools give |
+| A path without its space (`/log.dat`, `/`, `/space`) | Looked up, then `Path "…" not found` | Refused before any request: "A path must name the space first: use /<space_name>/<path_to_file> (got …)" |
 | An empty value, `.` or `..` (either argument), or a `/` in the target | Sent as is | Refused before any request, with the form that works |
+| Surrounding whitespace in either argument | Sent as is (a path then failed the `/` check) | Stripped before the checks, and the stripped values are sent |
 | An unknown path (the lookup answers `enoent`) | `Path "…" not found` | Unchanged. No transfer is posted. |
-| An unknown file id, or a file name passed as one (404 `notFound`/`enoent`, or 400 whose `details.key` names the file field) | Onedata's message only | "No file is known by '…': give the file's id, or a path starting with '/': /<space_name>/<path_to_file>. A file name alone is neither." Onedata's message follows. |
-| A target that does not support the space, by id (400 `spaceNotSupportedBy`, or `details.key` naming the provider field) | Onedata's message only | "Cannot replicate to '…': it is not a provider that supports the space of '…'. The providers that support the file's space are: vistula-dc (id '…'), nordic-marine-dc (id '…')." |
-| The target given by its **name** | Onedata's message only | The same, opening with "'vistula-dc' is a provider's name; its id is '…'." |
+| A permission error of the path lookup (403, `eacces`) | Onedata's message only | The permission hint below. Other lookup errors pass unchanged. |
+| An unknown file id, or a file name passed as one (404 `notFound`/`enoent` for a file given as an id, or a 400/404 whose `details.key` names the file field) | Onedata's message only | "No file is known by '…': give the file's id, or a path starting with '/': /<space_name>/<path_to_file>. A file name alone is neither." Onedata's message follows. |
+| A not-found after a path resolved (no file key) | Onedata's message only | "Onedata found nothing for the replication of … to …. The path resolved to a file, so check the target: it must be a provider id." with the providers. The file is not blamed. |
+| The target given by the **name** of a provider of the space (any 400 or 404 except one naming the file field) | Onedata's message only | Opens with what to do: "Pass its id '…', not its name: 'vistula-dc' is the name of a provider that supports the space of '…'. The providers that support the file's space are: …" It never says that provider does not support the space. |
+| A target id outside the space (400 `spaceNotSupportedBy`) | Onedata's message only | "Cannot replicate to '…': no provider with that id supports the space of '…'." with the providers when they can be listed, else "Give the id (not the name) of a provider that supports the file's space." True of a name too, when the providers cannot be listed. |
+| `details.key` names the provider field (not `spaceNotSupportedBy`) | Onedata's message only | "Cannot replicate to '…': it is not a valid provider id for the space of '…'." with the providers or the plain sentence. No claim about support. |
 | A bare 400 | Onedata's message only | "Onedata rejected the replication of … to …. Check both arguments: …", with the providers. It does not blame one argument, since a bare 400 does not say which one. |
-| Permission (403, `forbidden`, `eacces`, `eperm`) | Onedata's message only | Says the token may not schedule replications here (`space_schedule_replication`), may not read the file, or is read-only, and that calling again will not help |
+| Permission (403, `forbidden`, `eacces`, `eperm`), of the POST or of the path lookup | Onedata's message only | Says the token may not schedule replications here (`space_schedule_replication`), may not read the file, or is read-only, and that calling again will not help |
 | A replication of the file already running | — | Onedata does not distinguish it: the swagger lists no status for it. A second schedule is sent as is, which a unit test pins. The live test prints what 25.0 answers. |
 | 5xx, transport errors | Unchanged | Unchanged. Nothing for the caller to fix. |
 | Success (201) | `{"transferId"}` | Unchanged. The description now says so (gate 2). |
 
-- **The providers in a hint** come from one `GET /spaces/{sid}`, made only on these error paths. The space id is taken from the error's `details.spaceId`, or decoded from the file id: a 25.0 file id is the hex form of `guid#<uuid>#<space id>`, and the swagger's own example decodes so. If neither gives an id, or the listing fails, the hint says "Give the id (not the name) of a provider that supports the file's space" and Onedata's original error still follows.
+- **The providers in a hint** come from one `GET /spaces/{sid}`, made only on these error paths (not when Onedata names the file field). The space id is taken from the error's `details.spaceId`, else decoded from the file id (a 25.0 file id is the hex form of `guid#<uuid>#<space id>`, and the swagger's own example decodes so), else, for a path, by resolving its leading space name. If none gives an id, or the listing fails, the hint says "Give the id (not the name) of a provider that supports the file's space" and Onedata's original error still follows.
+- **Stripping** is a small behaviour change: a file name that really begins or ends with whitespace can no longer be given by path. Such names are rare, and a model's stray space is the likelier case.
 - **URL-encoding.** No id goes into a URL path here, and the tests pin that. The file id and the provider id travel in the POST body. A path goes whole and percent-encoded into `/lookup-file-id/<path>`. The space id of the hint must match an id alphabet and is percent-encoded. The first package's unencoded-id defect has no counterpart in this tool.
 - **Found, not fixed:** `get_transfer`, a stable tool, puts `transfer_id` unencoded into `/transfers/{tid}`. The file tools also put a file id unencoded into `/data/{id}/…`. This is the class the first package fixed for the QoS ids. A fix would need gates 1 and 3 for those tools.
 - **Unverified bodies.** The hints are keyed on the HTTP status, with the error id, errno and `details.key` as a fallback. The real 25.0 bodies are **unverified**: the unit tests use plausible shapes, and the live test prints the real ones.
 - **Error texts and tools.** A hint names no other tool: it lists the providers itself. The description names none either.
 
-## Gate 2: surface review (done except `make conformance`, branch commit `d00354e`)
+## Gate 2: surface review (done except `make conformance`, branch commits `d00354e` and `e1fcd00`)
 
 Checked against the protocol's rules. `test_the_description_follows_the_surface_rules` covers the first four.
 
 - **Names no tool that may not be offered alongside it.** **Defect, fixed:** the description sent the model to `get_transfer` and `list_space_transfers`. It now names no tool.
 - **Says what it returns.** It now gives `{"transferId": "<id>"}`, returned as soon as the transfer is scheduled.
-- **What "scheduled" does not mean.** **Defect, fixed:** "poll it with `get_transfer`" invited reading the transfer's status as the end of the job. The description now says that scheduled does not mean copied, and that no data has moved yet. It also says that a transfer's status *can* read completed before the copied blocks show at the target, so the copy is judged by the target's blocks. The wording is "can", after design/07 (onedata-mcp#17). The order on 25.0 is unverified here, and gate 3 prints it.
+- **What "scheduled" does not mean.** **Defect, fixed:** "poll it with `get_transfer`" invited reading the transfer's status as the end of the job. The description now says that scheduled does not mean copied, and that no data has moved yet. It also says that a transfer's status *can* read completed before the copied blocks show at the target, so the target's blocks are re-checked until they cover the file and the copy is judged by them. ("Re-check … until" was added after the external review: without it, a model reading the blocks once right after scheduling could stop at "in progress".) The wording is "can", after design/07 (onedata-mcp#17). The order on 25.0 is unverified here, and gate 3 prints it.
 - **A copy, not a rule.** The old text did not say whether anything keeps the copy, and that is what sets this tool apart from adding a QoS requirement. It now says the copy is one-off: nothing keeps the data at the target afterwards. SR1 turns on this distinction.
 - **Id, not name.** The text now says the target is given by its provider id, not its name. Briefs and users name sites. The field said "Provider id", but nothing warned off a name. The error now answers a name too (gate 1).
 - **Cites no document the model cannot read:** yes.
@@ -74,16 +80,20 @@ Checked against the protocol's rules. `test_the_description_follows_the_surface_
 - **Errors tell the caller how to fix the call:** done in gate 1.
 - **`make conformance`: TODO.** It needs `npx` and a local port, and was not run here.
 
-## Gate 3: live check (built in branch commit `b3f714d`, not run)
+## Gate 3: live check (built in branch commits `b3f714d` and `429bec1`, not run)
 
 [`test/live/test_transfer_live.py`](../test/live/test_transfer_live.py) calls the tools through an in-process MCP client, as a model would. Its probe files are written through a **second** provider (the federation's `owner`), so a replication to the local provider has data to copy. It covers:
 
-1. A replication to the local provider, once for the panel's standard 256 KiB file and once for SR1's large file (`LARGE_FILE_SIZE`, 128 MiB). It waits until the **local provider's own block map** shows the file whole, never trusting the transfer's status. It prints:
-   - the time from schedule to whole;
-   - the transfer's statuses as they change, and whether one read completed before the blocks were whole;
-   - what a second schedule of the same file answers while the first runs.
-2. An unknown target provider (32 random hex digits) fails with the provider hint, not the permission hint, and copies nothing: the local provider still holds 0 bytes 20 s later. It prints the error text.
-3. The local provider's **name** passed as the id is answered with its id.
+1. A replication to the local provider, once for the panel's standard 256 KiB file and once for SR1's large file (`LARGE_FILE_SIZE`, 128 MiB). It waits until the **local provider's own block map** shows the file whole, never trusting the transfer's status. Each poll reads the transfer's status (`transferState` first), then the block map. It prints:
+   - the time from schedule to whole, and the throughput;
+   - how long the file was seen partly copied (from which poll, at which byte counts);
+   - the first poll whose status read completed;
+   - whether any poll read completed while the block map, read after it on the same poll, did **not** yet cover the file. Only that counts as "completed before whole".
+2. A second schedule of a file being copied, in its own test: what 25.0 answers, and that the file still ends up whole.
+3. An unknown target provider (32 random hex digits) fails with a provider hint, not the permission hint and not the file, and copies nothing: the local provider still holds 0 bytes 20 s later. It prints the error text.
+4. The local provider's **name** passed as the id is answered "Pass its id …". The name comes from the space's providers (`list_space_providers`), the source the hint reads.
+
+Each probe file is registered for cleanup the moment it is created, before any write, so a failed write or wait leaves nothing in `omcp-live`. `test/unit/test_transfer_live_timeline.py` checks the poll bookkeeping without a federation.
 
 The test is skipped unless `ONEDATA_MCP_LIVE_TRANSFER=1`. It refuses any provider, source or zone host that is not `127.0.0.1`, `localhost` or `*.datahub.test`. Here it was only collected, and skipped without the flag. `make valfed-check`, the no-model fixture check, now also builds and tears down SR1's large file.
 
@@ -97,8 +107,8 @@ The test is skipped unless `ONEDATA_MCP_LIVE_TRANSFER=1`. It refuses any provide
 
 **Results: TODO.** Record here:
 
-- the time to whole for 256 KiB and for 128 MiB;
-- whether a status read completed before the blocks were whole;
+- the time to whole and the throughput for 256 KiB and for 128 MiB, and how long each was seen partly copied;
+- whether a poll read completed while not yet whole;
 - the second schedule's answer;
 - the unknown target's error text: its status, error id and details, and whether they carry `spaceId`;
 - the name-as-id error text.
@@ -106,8 +116,8 @@ The test is skipped unless `ONEDATA_MCP_LIVE_TRANSFER=1`. It refuses any provide
 **Act on them before the gate-4 run:**
 
 - If the unknown target is not answered 400 `spaceNotSupportedBy`, or the bodies differ, change the hint mapping and the unit tests' bodies (and the fake's).
-- If the name hint fails, the space id cannot be read from 25.0's file ids or details. Find another source for it, or fall back to the plain sentence and change the test.
-- **If 128 MiB is whole in under about 15 s, raise `LARGE_FILE_SIZE`** (`benchmark/k2val/fixtures.py`). A model's turn after scheduling takes several seconds, and a transfer that ends sooner hides a premature "done". The bound is the space quota: 2 GiB per provider per space, with two trials of a config at once, so at most about 768 MiB. Writing it 48 times per config also loads the shared host. The operator sets the value.
+- If the name hint fails, none of the three sources gave the space id (the error details, the file id, the path's space name). Find another, or fall back to the plain sentence and change the test.
+- **Calibrate SR1's file size on the first live run, under panel-like load.** The live test times one transfer on an idle federation; a K=8 run puts up to 12 trials on the two CPU-capped providers at once, so the idle figure is a lower bound on what a model sees. **If 128 MiB is whole in under about 15 s, raise `LARGE_FILE_SIZE`** (`benchmark/k2val/fixtures.py`). A model's turn after scheduling takes several seconds, and a transfer that ends sooner hides a premature "done". The bound is the space quota: 2 GiB per provider per space, with two trials of a config at once, so at most about 768 MiB. Writing it 48 times per config also loads the shared host. The operator sets the value.
 - If a status never reads completed before the blocks, the description's "can" is still true but unseen here. Say so in this record.
 - If writing the large file's parts times out (the REST client's default timeout is 5 s per operation; a part is `PART`, 4 MiB), lower `PART`. The fixture check (`make valfed-check`) and the live test write the same parts.
 
@@ -192,10 +202,27 @@ Branch commit `9f741b5` fixes four harness faults that an external review of the
 - teardown deleted every requirement in a file's *effective* summary, which includes rules inherited from the space root; it now deletes the rules the fixture made, and a rule only when its own `fileId` is one of the trial's entries;
 - the trial directory named the scenario (`logs-<trial id>`); it is now opaque.
 
+## External review
+
+One frontier model (Gemini, gemini-4-argon-high) reviewed the package as of branch commit `22043ec`. The coordinator verified finding 2. Each finding and what was done:
+
+| # | Severity | Finding | Status |
+|---|---|---|---|
+| 1 | blocking | The SR answer readers misread right answers: "with no placement rule" negates SR1's claim; a narrated "was in progress" reads as not yet; a clause about the copy that is already at `nordic-marine-dc` reads as a copy (SR1n) or as "yes, copied" (SR1o) | harness: resolved in the integration branch |
+| 2 | blocking | A provider's name passed as the id got "it is not a provider that supports the space", false and contradicted by the next sentence; with the provider key and no provider list, non-support was asserted | fixed here (`e1fcd00`): the hint opens "Pass its id …, not its name"; the provider key alone gives "not a valid provider id for the space", with no claim about support; `spaceNotSupportedBy` gives "no provider with that id supports the space" |
+| 3 | blocking | Gate 3 not run; the live test's "completed before whole" was biased (status timed before two calls, blocks after); the duplicate schedule disturbed the timed transfer; `replicationStatus` shadowed `transferState`; `LARGE_FILE_SIZE` uncalibrated, and an idle run understates a 12-trial load | live-test logic fixed here (`429bec1`): one poll reads the status, then the blocks, and only completed-and-not-covered counts; the duplicate schedule has its own test; `transferState` first; the timings for calibration are printed. The run and the calibration itself happen on the first live run, under panel-like load (gate 3) |
+| 4 | major | The path lookup's errors bypassed the hints (a 403 got none); `/log.dat` passed the checks; a 404 after a path resolved blamed the file; the providers were not found from a path's space name | fixed here (`e1fcd00`): `/<space>/<name>` required; the lookup's permission errors get the permission hint; a 404 after a resolved path points at the target unless the key names the file field; the providers fall back to the path's space name |
+| 5 | major | The block-map parsing reads a failed storage backend as 0 bytes, and a size of 0 as covered | harness: resolved in the integration branch |
+| 6 | major | The live test leaked a probe file when a write or wait failed (registered too late), and read the local provider's name from the distribution | fixed here (`429bec1`): registered right after it is created; the name comes from the space's providers |
+| 7 | major | SR1n gives a site name, so a model that follows the description refuses after listing the providers and never calls the tool there; no scenario gives an id | harness: resolved in the integration branch |
+| 8 | minor | The description no longer said to re-check the blocks until whole; the arguments were not stripped | fixed here (`e1fcd00`): "re-check the target provider's blocks of the file until they cover all of it", naming no tool; both arguments stripped before the checks and the request. The surface hash above is recomputed |
+
+The harness findings (1, 5, 7) concern `benchmark/k2val/` and `test/unit/k2val/`, which this branch no longer changes; the gate-4 text above describes the scenarios as built here, before those fixes.
+
 ## Decisions for the operator
 
 1. **`destructiveHint: true`.** A replication only adds a replica. By the MCP definition it is additive, so the hint would be `false`. It is left `true`, as on `add_file_qos_requirement`, which is stable and also additive. Changing it changes the annotations, and clients may then run the tool without asking. Your call.
 2. **`LARGE_FILE_SIZE`.** The default is 128 MiB, to be checked against gate 3's time to whole, the space quota and the shared host's load (see gate 3).
-3. **No id-form scenario.** The reason is under gate 4. Building one (SR1i: the target given by its id in the brief) would need the brief rendered with the local provider's id, and 48 more trials.
+3. **No id-form scenario.** The reason is under gate 4; finding 7 of the external review reopens it, and it goes to the integration branch. Building one (SR1i: the target given by its id in the brief) would need the brief rendered with the local provider's id, and 48 more trials.
 4. **Teardown deletes a little more than "only what the fixture made".** Branch commit `9f741b5` deletes the rules the fixture made and also any rule whose own `fileId` is one of the trial's entries, such as a rule an agent set on the trial's file. It never deletes a rule a file only inherits, from the space root or anywhere above the trial. The extra deletions stay inside the trial's own directory, and they keep a rule from outliving its file if Onedata does not drop it with the file. If you want strictly "only tracked", drop the provenance-checked loop in `FixtureBuilder.purge_dir`; the sweep then leaves agents' rules on leftover files.
 5. **Accepting provider names.** The tool could resolve a name to its id, as `space_id` accepts a space name. That would change the schema's meaning. It is not done: a name now gets an error with the id in it.
