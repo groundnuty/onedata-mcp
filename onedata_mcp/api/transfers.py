@@ -22,6 +22,7 @@ from typing import Any, Literal
 from urllib.parse import quote
 
 from onedata_mcp.api.files import _normalize_path_to_file_id
+from onedata_mcp.api.spaces import resolve_space_id_or_name
 from onedata_mcp.config import get_oneprovider_config
 from onedata_mcp.utils import OnedataApiError, redact_endpoints, request
 
@@ -158,9 +159,11 @@ async def create_transfer(
 # The swagger (paths/transfers.yaml, POST) lists 201, 400, 403, 404 and 500, each failure with
 # the generic Error body; the 25.0 error ids are not pinned there. A bare 400 does not say which
 # argument was wrong, so a hint blames the provider only when Onedata's answer does (the error
-# id `spaceNotSupportedBy`, or `details.key` naming the provider field). Onedata does not refuse
-# a second replication of a file that is already being copied: no status in the swagger says
-# so, and nothing here pretends otherwise.
+# id `spaceNotSupportedBy`, or `details.key` naming the provider field), and blames the file only
+# when it was given as an id (a path has already resolved to a file by then) or the key names
+# the file field. A target that is the NAME of one of the space's providers is answered with
+# that provider's id, first. Onedata does not refuse a second replication of a file that is
+# already being copied: no status in the swagger says so, and nothing here pretends otherwise.
 # ---------------------------------------------------------------------------
 
 _SHOWN_MAX = 80
@@ -177,36 +180,40 @@ def _shown(value: str) -> str:
     return repr(value[:_SHOWN_MAX]) + "..."
 
 
-def _check_replication_args(file_id_or_path: str, target_provider_id: str) -> None:
-    """Refuse, before any request, a value that cannot name a file or a provider.
+def _check_replication_args(file_arg: str, target: str) -> None:
+    """Refuse, before any request, a value that cannot name a file or a provider. Both values
+    are already stripped of surrounding whitespace.
 
     A value with a `/` that does not start with one is a relative path (Onedata would read it
-    as a malformed file id); `.` and `..` name nothing. Ids are otherwise opaque, so nothing
-    stricter is checked: a provider NAME passes here and is answered by Onedata, with the hint
-    below.
+    as a malformed file id). A path must name a space and an entry in it, `/<space>/<name>` at
+    least: `/log.dat` is missing its space. `.` and `..` name nothing. Ids are otherwise opaque,
+    so nothing stricter is checked: a provider NAME passes here and is answered with its id
+    after Onedata refuses it.
     """
-    file_arg = file_id_or_path.strip()
     if not file_arg:
         raise ValueError(f"file_id_or_path is empty: give a file id, or {_PATH_FORM}.")
-    if "/" in file_id_or_path and not file_id_or_path.startswith("/"):
+    if "/" in file_arg and not file_arg.startswith("/"):
         raise ValueError(
-            "Paths must start with '/': use /<space_name>/<path_to_file> "
-            f"(got {_shown(file_id_or_path)})."
+            f"Paths must start with '/': use /<space_name>/<path_to_file> (got {_shown(file_arg)})."
+        )
+    if file_arg.startswith("/") and len([part for part in file_arg.split("/") if part]) < 2:
+        raise ValueError(
+            "A path must name the space first: use /<space_name>/<path_to_file> "
+            f"(got {_shown(file_arg)})."
         )
     if file_arg in {".", ".."}:
         raise ValueError(
-            f"file_id_or_path {_shown(file_id_or_path)} is not a file id or a path: give a file "
-            f"id, or {_PATH_FORM}."
+            f"file_id_or_path {_shown(file_arg)} is not a file id or a path: give a file id, or "
+            f"{_PATH_FORM}."
         )
-    target = target_provider_id.strip()
     if not target:
         raise ValueError(
             "target_provider_id is empty: give the id of a provider that supports the file's space."
         )
-    if "/" in target_provider_id or target in {".", ".."}:
+    if "/" in target or target in {".", ".."}:
         raise ValueError(
-            f"target_provider_id {_shown(target_provider_id)} is not a provider id: give the id "
-            "of a provider that supports the file's space."
+            f"target_provider_id {_shown(target)} is not a provider id: give the id of a provider "
+            "that supports the file's space."
         )
 
 
@@ -234,18 +241,35 @@ def _space_id_of_file_id(file_id: str) -> str | None:
     return space_id if _ID_RE.fullmatch(space_id) else None
 
 
-async def _space_providers(file_id: str, error: OnedataApiError) -> list[tuple[str, str]] | None:
-    """(name, id) of the providers supporting the file's space, or None if not found.
-
-    Only on the error path: the space comes from Onedata's error details or from the file id,
-    and one `GET /spaces/{sid}` (the id percent-encoded) lists its providers. Any failure here
-    gives None, so the hint falls back to plain words.
-    """
+async def _space_id_for(file_arg: str, file_id: str, error: OnedataApiError) -> str | None:
+    """The file's space id, for the hint: from Onedata's error details, else from the file id,
+    else (for a path) by resolving its leading space segment. None if none of them gives one."""
     error_obj = error.body.get("error")
     details = error_obj.get("details") if isinstance(error_obj, dict) else None
     space_id = details.get("spaceId") if isinstance(details, dict) else None
-    if not isinstance(space_id, str) or not _ID_RE.fullmatch(space_id):
-        space_id = _space_id_of_file_id(file_id)
+    if isinstance(space_id, str) and _ID_RE.fullmatch(space_id):
+        return space_id
+    if space_id := _space_id_of_file_id(file_id):
+        return space_id
+    if file_arg.startswith("/"):
+        try:
+            space_id = await resolve_space_id_or_name(file_arg.split("/")[1])
+        except Exception:  # noqa: BLE001 - the hint is best-effort; the original error is raised
+            return None
+        return space_id if isinstance(space_id, str) and _ID_RE.fullmatch(space_id) else None
+    return None
+
+
+async def _space_providers(
+    file_arg: str, file_id: str, error: OnedataApiError
+) -> list[tuple[str, str]] | None:
+    """(name, id) of the providers supporting the file's space, or None if not found.
+
+    Only on the error path: the space comes from `_space_id_for`, and one `GET /spaces/{sid}`
+    (the id percent-encoded) lists its providers. Any failure here gives None, so the hint
+    falls back to plain words.
+    """
+    space_id = await _space_id_for(file_arg, file_id, error)
     if not space_id:
         return None
     config = get_oneprovider_config()
@@ -266,16 +290,17 @@ async def _space_providers(file_id: str, error: OnedataApiError) -> list[tuple[s
     return out or None
 
 
-def _providers_sentence(providers: list[tuple[str, str]] | None, target: str) -> str:
-    """Which ids are valid targets; and, for a provider NAME given as the id, its id."""
+def _providers_sentence(providers: list[tuple[str, str]] | None) -> str:
+    """Which ids are valid targets."""
     if not providers:
         return "Give the id (not the name) of a provider that supports the file's space."
     listed = ", ".join(f"{name} (id {pid!r})" for name, pid in providers)
-    sentence = f"The providers that support the file's space are: {listed}."
-    named = [pid for name, pid in providers if name == target.strip()]
-    if named:
-        sentence = f"{_shown(target)} is a provider's name; its id is {named[0]!r}. " + sentence
-    return sentence
+    return f"The providers that support the file's space are: {listed}."
+
+
+def _id_of_name(providers: list[tuple[str, str]] | None, target: str) -> str | None:
+    """The id of the space's provider whose NAME the target is, if it is one."""
+    return next((pid for name, pid in providers or () if name == target), None)
 
 
 def _error_parts(error: OnedataApiError) -> tuple[int | None, str | None, str | None, Any]:
@@ -286,41 +311,82 @@ def _error_parts(error: OnedataApiError) -> tuple[int | None, str | None, str | 
     return response.get("status_code"), error.error_id, error.errno, key
 
 
-async def _replication_error_hint(
-    error: OnedataApiError, file_id_or_path: str, file_id: str, target: str
-) -> str | None:
-    """What the caller can do about a failed schedule, or None to pass the error on unchanged.
-
-    Keyed on the status the swagger lists (400, 403, 404), and on the error id, errno and
-    `details.key` where Onedata gives them. 5xx and anything else pass unchanged.
-    """
-    status, error_id, errno, key = _error_parts(error)
-    shown_file = _shown(file_id_or_path)
+def _permission_hint(shown_file: str, error: OnedataApiError) -> str | None:
+    status, error_id, errno, _ = _error_parts(error)
     if status == 403 or error_id == "forbidden" or errno in {"eacces", "eperm"}:
         return (
             f"Not allowed to schedule a replication of {shown_file}: the token may not schedule "
             "replications in this space (the space privilege space_schedule_replication), may "
             "not read the file, or is read-only. Calling again will not help."
         )
-    if error_id == "spaceNotSupportedBy" or key in _PROVIDER_FIELDS:
-        providers = await _space_providers(file_id, error)
+    return None
+
+
+async def _replication_error_hint(
+    error: OnedataApiError, file_arg: str, file_id: str, target: str
+) -> str | None:
+    """What the caller can do about a failed schedule, or None to pass the error on unchanged.
+
+    Keyed on the status the swagger lists (400, 403, 404), and on the error id, errno and
+    `details.key` where Onedata gives them. 5xx and anything else pass unchanged. In order:
+
+    - permission;
+    - a target that is the name of one of the space's providers: "Pass its id ...", whatever
+      Onedata said about it (it never says the provider does not support the space), unless
+      Onedata names the file field;
+    - Onedata says the space is not supported by that id: no provider with that id supports
+      the space (true of a name, too, when the providers could not be listed);
+    - `details.key` names the provider field: not a valid provider id for the space (no claim
+      about support);
+    - the file: blamed when the key names the file field, or on a not-found when the file was
+      given as an id; a path has already resolved to a file, so its not-found points at the
+      target;
+    - a bare 400: check both arguments.
+    """
+    status, error_id, errno, key = _error_parts(error)
+    shown_file, shown_target = _shown(file_arg), _shown(target)
+    if hint := _permission_hint(shown_file, error):
+        return hint
+    not_found = status == 404 or error_id == "notFound" or errno == "enoent"
+    from_path = file_arg.startswith("/")
+    file_blamed = key in _FILE_FIELDS or (not_found and not from_path)
+    provider_blamed = error_id == "spaceNotSupportedBy" or key in _PROVIDER_FIELDS
+    if not (provider_blamed or file_blamed or not_found or status == 400):
+        return None
+    # The providers, to recognise a target that is a provider's name, which is wrong whatever
+    # else is; not fetched when Onedata names the file field.
+    providers = None if key in _FILE_FIELDS else await _space_providers(file_arg, file_id, error)
+    if (pid := _id_of_name(providers, target)) is not None:
         return (
-            f"Cannot replicate to {_shown(target)}: it is not a provider that supports the "
-            f"space of {shown_file}. {_providers_sentence(providers, target)}"
+            f"Pass its id {pid!r}, not its name: {shown_target} is the name of a provider that "
+            f"supports the space of {shown_file}. {_providers_sentence(providers)}"
         )
-    if key in _FILE_FIELDS or status == 404 or error_id == "notFound" or errno == "enoent":
+    if error_id == "spaceNotSupportedBy":
+        return (
+            f"Cannot replicate to {shown_target}: no provider with that id supports the space of "
+            f"{shown_file}. {_providers_sentence(providers)}"
+        )
+    if key in _PROVIDER_FIELDS:
+        return (
+            f"Cannot replicate to {shown_target}: it is not a valid provider id for the space of "
+            f"{shown_file}. {_providers_sentence(providers)}"
+        )
+    if file_blamed:
         return (
             f"No file is known by {shown_file}: give the file's id, or {_PATH_FORM}. "
             "A file name alone is neither."
         )
-    if status == 400:
-        providers = await _space_providers(file_id, error)
+    if not_found:  # a path that resolved: the file is known, so look at the target
         return (
-            f"Onedata rejected the replication of {shown_file} to {_shown(target)}. Check both "
-            f"arguments: the file is a file id, or {_PATH_FORM}; the target is a provider id. "
-            f"{_providers_sentence(providers, target)}"
+            f"Onedata found nothing for the replication of {shown_file} to {shown_target}. The "
+            f"path resolved to a file, so check the target: it must be a provider id. "
+            f"{_providers_sentence(providers)}"
         )
-    return None
+    return (
+        f"Onedata rejected the replication of {shown_file} to {shown_target}. Check both "
+        f"arguments: the file is a file id, or {_PATH_FORM}; the target is a provider id. "
+        f"{_providers_sentence(providers)}"
+    )
 
 
 async def schedule_file_replication(
@@ -338,8 +404,10 @@ async def schedule_file_replication(
     in the JSON body, and a path is percent-encoded whole into the lookup
     (``/lookup-file-id/<path>``). A value that cannot name a file or a provider is
     refused before any request; a failure the caller can act on (unknown file,
-    a target that does not support the space or is a name, no permission) is
-    raised with what to do about it, followed by Onedata's own message.
+    a target that does not support the space or is a name, no permission, the
+    path lookup included) is raised with what to do about it, followed by
+    Onedata's own message. Both arguments are stripped of surrounding whitespace
+    first, and the stripped values are sent.
 
     Args:
         file_id_or_path: ``/<space>/<path>`` or an opaque file id.
@@ -348,14 +416,19 @@ async def schedule_file_replication(
 
     Returns: ``{"transferId": "<id>"}``.
     """
-    _check_replication_args(file_id_or_path, target_provider_id)
-    file_id = await _normalize_path_to_file_id(file_id_or_path)
+    file_arg, target = file_id_or_path.strip(), target_provider_id.strip()
+    _check_replication_args(file_arg, target)
     try:
-        return await create_transfer(
-            file_id, "replication", replicating_provider_id=target_provider_id
-        )
+        file_id = await _normalize_path_to_file_id(file_arg)
+    except OnedataApiError as error:  # the path lookup: only a permission error has a hint
+        hint = _permission_hint(_shown(file_arg), error)
+        if hint is None:
+            raise
+        raise OnedataApiError(f"{hint} [{error}]", response=error.response) from error
+    try:
+        return await create_transfer(file_id, "replication", replicating_provider_id=target)
     except OnedataApiError as error:
-        hint = await _replication_error_hint(error, file_id_or_path, file_id, target_provider_id)
+        hint = await _replication_error_hint(error, file_arg, file_id, target)
         if hint is None:
             raise
         raise OnedataApiError(f"{hint} [{error}]", response=error.response) from error
