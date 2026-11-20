@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 
 from benchmark._runtime_types import AgentTrace, OracleResult, RunContext
 from benchmark.k2val.recording import CallRecord
+from benchmark.k2val.rubrics import UNREAD
 from benchmark.k2val.scenarios import S2_DAYS
 from benchmark.k2val.snapshot import Snapshot, require_usable
 from benchmark.oracles._helpers import _EXCLUSION_SECTION_HEADERS, _is_strong_header
@@ -54,6 +55,13 @@ class K2Context:
     directory: str = ""
     dir_id: str = ""
     local_provider_id: str = ""
+    # The reading that decides (scoring.py: the deterministic reader's and the judge's, when
+    # they agree, or one of them for NEEDS_REVIEW's "outcome if"). UNREAD: the oracle reads the
+    # answer with its deterministic reader.
+    reading: object = UNREAD
+
+    def decided(self, read: Callable[[], object]) -> object:
+        return read() if self.reading is UNREAD else self.reading
 
 
 # ---------------------------------------------------------------------------

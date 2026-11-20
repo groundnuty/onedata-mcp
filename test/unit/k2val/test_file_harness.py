@@ -241,3 +241,75 @@ def test_end_state_wants_exactly_the_added_entries_of_their_type_and_text() -> N
 def test_no_baseline_is_never_judged() -> None:
     with pytest.raises(UnusableSnapshot, match="no baseline tree"):
         _baseline(ctx("X", snap(BASE), baseline=None))
+
+
+# --- the known bytes of the fixture's files (review: a rewrite under the same id is a change) ---
+
+
+@pytest.mark.asyncio
+async def test_the_baseline_and_the_snapshots_carry_each_small_files_hash(
+    api: FedApi, fed: FakeFed, clock: FakeClock
+) -> None:
+    import hashlib
+
+    built = await builder(api, clock).build(SPEC, "logs-t9")
+    assert built.baseline_tree["a.dat"]["sha256"] == hashlib.sha256(b"alpha\n").hexdigest()
+    assert "sha256" not in built.baseline_tree["sub"]
+
+    snap_ = await take_snapshot(api, built, clock)
+    assert snap_.tree["a.dat"]["sha256"] == built.baseline_tree["a.dat"]["sha256"]
+    assert tree_delta(built.baseline_tree, snap_.tree)["changed"] == []
+
+
+def test_content_changed_under_the_same_id_size_and_mode_is_a_change() -> None:
+    base = {"a.dat": {"fileId": "f1", "type": "REG", "size": 6, "mode": "600", "sha256": "x"}}
+    now = {"a.dat": {**base["a.dat"], "sha256": "y"}}
+    assert tree_delta(base, now)["changed"] == ["a.dat"]
+
+
+# --- the listing is bounded (review: a repeated token must not loop) -----------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("pages", "match"),
+    [
+        ([{"children": [{"name": "x"}], "isLast": False, "nextPageToken": "t1"}] * 3, "repeats"),
+        ([{"children": [], "isLast": False}], "no token"),
+        ([{"isLast": True}], "no 'children' list"),
+    ],
+)
+async def test_a_malformed_listing_raises_never_loops(
+    api: FedApi, monkeypatch: pytest.MonkeyPatch, pages: list, match: str
+) -> None:
+    from benchmark.k2val import federation
+    from onedata_mcp.utils import OnedataApiError
+
+    replies = iter(pages)
+
+    async def request(cfg, method, path, json_body=None, **kw):
+        return {"status_code": 200, "body": next(replies)}
+
+    monkeypatch.setattr(federation, "request", request)
+    with pytest.raises(OnedataApiError, match=match):
+        await api.tree("local", "d0")
+
+
+@pytest.mark.asyncio
+async def test_a_listing_of_too_many_pages_raises(
+    api: FedApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from benchmark.k2val import federation
+    from onedata_mcp.utils import OnedataApiError
+
+    n = iter(range(10_000))
+
+    async def request(cfg, method, path, json_body=None, **kw):
+        return {
+            "status_code": 200,
+            "body": {"children": [], "isLast": False, "nextPageToken": f"t{next(n)}"},
+        }
+
+    monkeypatch.setattr(federation, "request", request)
+    with pytest.raises(OnedataApiError, match=f"more than {federation.MAX_LISTING_PAGES} pages"):
+        await api.tree("local", "d0")

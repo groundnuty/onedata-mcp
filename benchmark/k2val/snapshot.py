@@ -18,6 +18,7 @@ runner records the trial as ORACLE_ERROR (a harness outcome), never as a FAIL.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import dataclass, field
 
 from benchmark.k2val.clock import Clock
@@ -165,14 +166,14 @@ async def _take_tree(fed: FedApi, fixture: BuiltFixture, snap: Snapshot) -> None
         tree = await fed.tree("local", fixture.dir_id)
         for entry in tree.values():
             size = entry.get("size")
-            new_small_file = (
-                entry.get("type") == "REG"
-                and entry.get("fileId") not in known
-                and isinstance(size, int)
-                and size <= SMALL_FILE
-            )
-            if new_small_file:
-                data = await fed.content("local", entry["fileId"])
+            small = entry.get("type") == "REG" and isinstance(size, int) and 0 < size <= SMALL_FILE
+            if not small:
+                continue
+            # Every small file's bytes are read: a fixture file must keep its known bytes
+            # (`sha256`), and a file the agent made must hold what was asked (`content`).
+            data = await fed.content("local", entry["fileId"])
+            entry["sha256"] = hashlib.sha256(data).hexdigest()
+            if entry.get("fileId") not in known:
                 entry["content"] = data.decode("utf-8", errors="replace")
     except Exception as e:  # noqa: BLE001 - recorded; the oracle refuses an unusable snapshot
         snap.tree_error = f"{type(e).__name__}: {e}"

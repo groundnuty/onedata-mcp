@@ -27,6 +27,8 @@ Role = Literal["owner", "local"]
 POLL_S = 2.0
 # what `FedApi.tree` asks of each entry (the file-tool scenarios, design/13-15)
 TREE_ATTRIBUTES = ("fileId", "name", "type", "size", "posixPermissions")
+# A listing of more pages than this is malformed (at 1000 entries a page, no trial comes near).
+MAX_LISTING_PAGES = 20
 
 
 class FixtureError(RuntimeError):
@@ -272,25 +274,44 @@ class FedApi:
             )
         return response.content
 
+    async def _page(
+        self, role: Role, dir_id: str, limit: int, token: str | None
+    ) -> tuple[list[dict[str, Any]], bool, str | None, dict]:
+        body: dict[str, Any] = {"attributes": list(TREE_ATTRIBUTES), "limit": limit}
+        if token:
+            body["token"] = token
+        r = await request(self._cfg[role], "GET", f"/data/{dir_id}/children", json_body=body)
+        page = r["body"]
+        if not isinstance(page, dict) or not isinstance(page.get("children"), list):
+            raise OnedataApiError(f"listing of {dir_id} has no 'children' list", response=r)
+        next_token = page.get("nextPageToken")
+        return page["children"], page.get("isLast") is True, next_token or None, r
+
     async def _listing(self, role: Role, dir_id: str) -> list[dict[str, Any]]:
         """Every entry of a directory, page by page. Strict: an answer without a `children`
-        list raises, so an unreadable listing is never taken for an empty directory."""
+        list raises, so an unreadable listing is never taken for an empty directory; so do a
+        non-final page without a token, a token seen before (a loop), and more than
+        MAX_LISTING_PAGES pages (a fixture or snapshot error, never a hang)."""
         out: list[dict[str, Any]] = []
         token: str | None = None
-        while True:
-            body: dict[str, Any] = {"attributes": list(TREE_ATTRIBUTES), "limit": 1000}
-            if token:
-                body["token"] = token
-            r = await request(self._cfg[role], "GET", f"/data/{dir_id}/children", json_body=body)
-            page = r["body"]
-            if not isinstance(page, dict) or not isinstance(page.get("children"), list):
-                raise OnedataApiError(f"listing of {dir_id} has no 'children' list", response=r)
-            out.extend(page["children"])
-            token = page.get("nextPageToken")
-            if page.get("isLast") is True:
+        seen: set[str] = set()
+        for _ in range(MAX_LISTING_PAGES):
+            children, last, token, r = await self._page(role, dir_id, 1000, token)
+            out.extend(children)
+            if last:
                 return out
             if not token:
                 raise OnedataApiError(f"listing of {dir_id}: not last, but no token", response=r)
+            if token in seen:
+                raise OnedataApiError(f"listing of {dir_id}: a page token repeats", response=r)
+            seen.add(token)
+        raise OnedataApiError(f"listing of {dir_id}: more than {MAX_LISTING_PAGES} pages")
+
+    async def first_page_names(self, role: Role, dir_id: str, limit: int) -> tuple[list[str], bool]:
+        """The names on a directory's first page at `limit`, and whether it is the last page
+        (LCp's check that its answer needs a second page)."""
+        children, last, _, _ = await self._page(role, dir_id, limit, None)
+        return [c.get("name") for c in children if isinstance(c, dict)], last
 
     async def tree(self, role: Role, dir_id: str, *, max_depth: int = 4) -> dict[str, dict]:
         """A directory's tree as `role` shows it: relative path -> {fileId, type, size, mode},

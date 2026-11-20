@@ -36,6 +36,8 @@ from benchmark.k2val.clock import Clock
 from benchmark.k2val.federation import FedApi, FixtureError
 
 FILE_SIZE = 256 * 1024
+# list_children's largest `limit` (onedata_mcp/modules/files.py): LCp's names must lie beyond it.
+PAGE_LIMIT_MAX = 100
 CHUNK = 64 * 1024
 # A file a transfer takes long enough over to be seen in transfer (design/12, gate 4). To be
 # calibrated by the live test's time to whole (test/live/test_transfer_live.py) before a run.
@@ -115,6 +117,10 @@ class FixtureSpec:
     writer_finish_s: float | None = None
     # the file-tool scenarios' small files and directories (design/13-15)
     entries: tuple[EntrySpec, ...] = ()
+    # Names that must NOT be on the trial directory's first page at the listing tool's largest
+    # limit (`PAGE_LIMIT_MAX`), as the local provider lists it: checked before the agent starts,
+    # so that an answer needs a second page whatever order the provider lists in (LCp).
+    beyond_first_page: tuple[str, ...] = ()
 
 
 @dataclass
@@ -390,7 +396,7 @@ class FixtureBuilder:
                 await self._wait_rule_fulfilled(bf, rule, local_id)
 
         if spec.entries:  # the file-tool scenarios (design/13-15)
-            await self._build_entries(fixture, spec.entries)
+            await self._build_entries(fixture, spec.entries, spec.beyond_first_page)
 
         s2 = [fixture.files[f.name] for f in spec.files if f.kind == "s2"]
         if s2 and spec.writer_finish_s is not None:
@@ -470,7 +476,9 @@ class FixtureBuilder:
 
     # --- the file-tool scenarios' entries (design/13-15) -----------------
 
-    async def _build_entries(self, fixture: BuiltFixture, entries: tuple[EntrySpec, ...]) -> None:
+    async def _build_entries(
+        self, fixture: BuiltFixture, entries: tuple[EntrySpec, ...], beyond: tuple[str, ...] = ()
+    ) -> None:
         """Make each entry through the owner, parents first; then wait until the local provider
         shows exactly the built tree, and record it as the baseline."""
         ids = {"": fixture.dir_id}
@@ -489,6 +497,18 @@ class FixtureBuilder:
             ids[entry.path] = file_id
             fixture.entries[entry.path] = file_id
         fixture.baseline_tree = await self._wait_local_tree(fixture, entries)
+        if beyond:
+            await self._check_beyond_first_page(fixture, beyond)
+
+    async def _check_beyond_first_page(self, fixture: BuiltFixture, names: tuple[str, ...]) -> None:
+        listed, last = await self.fed.first_page_names("local", fixture.dir_id, PAGE_LIMIT_MAX)
+        on_first = sorted(set(names) & set(listed))
+        if last or on_first:
+            raise FixtureError(
+                f"{fixture.dir_path}: at limit {PAGE_LIMIT_MAX} the local provider's first page "
+                + ("is the last" if last else f"already lists {on_first}")
+                + ": an answer would not need a second page"
+            )
 
     async def _wait_local_tree(
         self, fixture: BuiltFixture, entries: tuple[EntrySpec, ...]
@@ -523,6 +543,11 @@ class FixtureBuilder:
             what=f"the local provider shows the {len(expected)} entries built in "
             f"{fixture.dir_path} (types, sizes, modes)",
         )
+        # Each small file's known bytes, by hash: a later snapshot reads them back, so content
+        # changed under the same id, size and mode is still a change.
+        for path, entry in expected.items():
+            if entry.kind == "file" and entry.content:
+                tree[path]["sha256"] = hashlib.sha256(entry.content).hexdigest()
         return tree
 
     # --- reset ----------------------------------------------------------

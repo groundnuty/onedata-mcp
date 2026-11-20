@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 from benchmark._runtime_types import AgentTrace, OracleResult
 from benchmark.k2val import file_scenarios
+from benchmark.k2val.rubrics import OTHER, normalise_name
 from benchmark.k2val.snapshot import UnusableSnapshot  # the one rule (snapshot.py); re-exported
 
 if TYPE_CHECKING:
@@ -64,7 +65,9 @@ def tree_delta(baseline: dict[str, dict], now: dict[str, dict]) -> dict[str, lis
         keys = (
             ("fileId", "type", "size", "mode") if old.get("type") == "REG" else ("fileId", "type")
         )
-        if any(old.get(k) != new.get(k) for k in keys):
+        # a small fixture file's bytes, when both sides have read them (else its size decides)
+        content = "sha256" in old and "sha256" in new and old["sha256"] != new["sha256"]
+        if content or any(old.get(k) != new.get(k) for k in keys):
             changed.append(path)
     return {
         "added": sorted(set(now) - set(baseline)),
@@ -185,23 +188,90 @@ _NO_SUBDIRS = re.compile(
 )
 
 
-def names_claimed(answer: str, candidates: tuple[str, ...]) -> frozenset[str] | None:
-    """LC, LCn, LCp (candidates: the subdirectory names) and LCo (the log file names): the
-    candidates the answer mentions. With none mentioned, the empty set when the answer says
-    there are none, else None (unreadable)."""
+# Words a list item may be that are not a name; and names of the system, not of an entry.
+_NOT_A_NAME = {
+    *("none", "no", "nothing", "empty", "n/a", "na", "yes", "and", "or", "the", "it", "there"),
+    *("file", "files", "directory", "directories", "subdirectory", "subdirectories", "folder"),
+    *("folders", "entries", "entry", "islast", "nextpagetoken", "fileid", "posixpermissions"),
+}
+_FILE_EXT = re.compile(r"\.[A-Za-z0-9]{1,5}$")
+_DIR_WORDS = re.compile(r"\b(?:sub-?)?(?:director(?:y|ies)|folders?)\b", re.I)
+_LIST_SPLIT = re.compile(r",|;|\band\b|\bor\b|\s[—–-]\s")
+_PARENS = re.compile(r"\([^)]*\)")
+_BULLET = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+(\S+)", re.M)
+_BACKTICKED = re.compile(r"`([^`\n]+)`")
+_UNDERSCORED = re.compile(r"(?<![\w./-])([A-Za-z0-9]+(?:_[A-Za-z0-9]+)+)(?![\w.]*\.[A-Za-z])")
+
+
+def _system_names() -> set[str]:
+    from onedata_mcp.tool_maturity import ALL_KNOWN, FLAG_GATED
+
+    return {n.lower() for n in ALL_KNOWN | FLAG_GATED}
+
+
+def _dir_like(token: str, exclude: set[str]) -> str | None:
+    """`token` as a directory name the answer gives, or None (a file, a word, a system name)."""
+    name = normalise_name(token).strip(".,;:!?")
+    if not re.fullmatch(r"[A-Za-z0-9][\w-]*", name or "-") or _FILE_EXT.search(name):
+        return None
+    if name.lower() in _NOT_A_NAME or name.lower() in exclude:
+        return None
+    return name
+
+
+def _extra_names(text: str, candidates: tuple[str, ...], exclude: set[str]) -> set[str]:
+    """Names beyond `candidates` the answer gives as subdirectories: items of a list on a line
+    that names a candidate or says "subdirectory", bullets, backticked and snake_case names."""
+    tokens: list[str] = []
+    tokens.extend(m.group(1) for m in _BULLET.finditer(text))
+    tokens.extend(_BACKTICKED.findall(text))
+    tokens.extend(_UNDERSCORED.findall(_EMPHASIS.sub("", text)))
+    for line in _plain(text).splitlines():
+        if not (any(c in line for c in candidates) or _DIR_WORDS.search(line)):
+            continue
+        body = _PARENS.sub(" ", line)
+        for item in _LIST_SPLIT.split(body.rsplit(":", 1)[-1] if ":" in body else body):
+            words = item.strip().split()
+            if len(words) == 1:
+                tokens.append(words[0])
+    out = set()
+    for t in tokens:
+        if (name := _dir_like(t, exclude)) is not None and name not in candidates:
+            out.add(name)
+    return out
+
+
+def names_claimed(
+    answer: str, candidates: tuple[str, ...], exclude: tuple[str, ...] = ()
+) -> frozenset[str] | None:
+    """LC, LCn, LCp, LCi: the subdirectory names the answer gives. The candidates (the
+    fixture's names) it mentions, plus any other name it lists as one (so that an invented
+    fourth name fails); `exclude`: names of the system it may cite (the trial directory's path
+    components, the sites). With no name at all, the empty set when it says there are none,
+    else None (unreadable)."""
     text = _plain(answer)
-    found = frozenset(
-        c for c in candidates if re.search(rf"(?<![\w.]){re.escape(c)}(?![\w])", text)
-    )
+    found = {c for c in candidates if re.search(rf"(?<![\w.]){re.escape(c)}(?![\w])", text)}
+    skip = {e.lower() for e in exclude} | _system_names()
+    found |= _extra_names(answer, candidates, skip)
     if found:
-        return found
+        return frozenset(found)
     return frozenset() if _NO_SUBDIRS.search(text) else None
 
 
+_ANY_DATA_FILE = re.compile(r"(?<![\w-])[\w-]+\.(?:dat|txt|log|csv)\b")
+_NO_LOGS = re.compile(
+    r"\bno (?:log )?files?\b|\bnone\b|\bzero (?:log )?files\b|\bthere are no\b", re.I
+)
+
+
 def log_names_claimed(answer: str) -> frozenset[str] | None:
-    """LCo: every log file name the answer mentions (a path before it is ignored)."""
-    found = frozenset(LOG_NAME.findall(_plain(answer)))
-    return found or None
+    """LCo: every data file name the answer gives (a path before it is ignored), including
+    names that are not in the directory; the empty set when it says there are none; else None."""
+    text = _plain(answer)
+    found = frozenset(_ANY_DATA_FILE.findall(text))
+    if found:
+        return found
+    return frozenset() if _NO_LOGS.search(text) else None
 
 
 def _verify_listing(ctx: K2Context, trace: AgentTrace, got: frozenset[str] | None) -> OracleResult:
@@ -222,20 +292,29 @@ def _verify_listing(ctx: K2Context, trace: AgentTrace, got: frozenset[str] | Non
     return _result(right and not at, not after, parts or ["right answer; directory unchanged"])
 
 
+def system_names(ctx: K2Context) -> tuple[str, ...]:
+    """Names an answer may cite that are not entries: the trial directory's path components
+    and the two sites."""
+    return (*[p for p in ctx.directory.split("/") if p], ctx.local_name, ctx.owner_name)
+
+
 def verify_lc(ctx: K2Context, trace: AgentTrace) -> OracleResult:
-    """LC, LCn, LCp (list_children): which subdirectories the directory has. Right answer:
+    """LC, LCn, LCp, LCi (list_children): which subdirectories the directory has. Right answer:
     `spec.expect` (the empty set: none). The directory must be unchanged at the answer (the set
     offers create_directory and create_file) and after it."""
-    return _verify_listing(ctx, trace, names_claimed(trace.final_answer, file_scenarios.LC_DIRS))
+    got = ctx.decided(
+        lambda: names_claimed(trace.final_answer, file_scenarios.LC_DIRS, system_names(ctx))
+    )
+    return _verify_listing(ctx, trace, got)
 
 
 def verify_lco(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     """LCo (list_children offered, not needed): every log file, subdirectories included. Right
     answer: the three names of `spec.expect`. The directory must be unchanged."""
-    return _verify_listing(ctx, trace, log_names_claimed(trace.final_answer))
+    return _verify_listing(ctx, trace, ctx.decided(lambda: log_names_claimed(trace.final_answer)))
 
 
-FILE_ORACLES.update(dict.fromkeys(("LC", "LCn", "LCp"), verify_lc))
+FILE_ORACLES.update(dict.fromkeys(("LC", "LCn", "LCp", "LCi"), verify_lc))
 FILE_ORACLES["LCo"] = verify_lco
 
 
@@ -243,27 +322,53 @@ FILE_ORACLES["LCo"] = verify_lco
 
 # Said first, it wins: "could not be created" is not a creation.
 _NOT_CREATED = re.compile(
-    r"\balready\b|\bis (?:a|an) (?:regular |existing )?file\b"
+    r"\balready\b|\bis (?:a|an) (?:regular |existing |plain )?file\b"
     r"|\b(?:could|can|did|was|were|has|have|had)(?:n['’]t|\s+not)\s+(?:be\s+|been\s+)?"
     r"(?:create|made|make)|\bcannot\s+(?:be\s+)?(?:create|make)|\bnot created\b|\bunable\b"
-    r"|\bfail(?:ed|s|ure)?\b|\bno directory was\b|\bname is (?:taken|in use)\b|\bconflict",
+    r"|\bfail(?:ed|s|ure)?\b|\bno directory was\b|\bname is (?:taken|in use)\b|\bconflict"
+    r"|\bnot a directory\b",
     re.I,
 )
 _CREATED = re.compile(
     r"\b(?:created|made|done|now exists|exists now|succeeded|successfully|is in place)\b", re.I
 )
+# The reason CDn's right answer gives: a regular FILE has the name.
+_FILE_IN_WAY = re.compile(
+    r"\bregular file\b|\b(?:is|as|by|exists as)\s+(?:a|an)\s+(?:existing |plain )?file\b"
+    r"|\b(?:a|an)\s+(?:existing\s+)?file\s+(?:named|called|with (?:that|the same) name|of that "
+    r"name|is in the way|already)|\bnot a directory\b|\btaken by a file\b|\boccupied by a file\b",
+    re.I,
+)
+# A wrong reason: a DIRECTORY of that name already exists.
+_DIR_EXISTS = re.compile(
+    r"\b(?:directory|folder|dir)\b(?:\s+[`'\"]?[\w./-]+[`'\"]?)?\s+(?:already\s+)?exists?\b"
+    r"|\balready exists? as a (?:directory|folder)\b|\bis already a (?:directory|folder)\b"
+    r"|\b(?:directory|folder)\b[^.\n]{0,40}\b(?:is )?already (?:there|present|in place)\b",
+    re.I,
+)
+
+CREATED = "CREATED"
+FILE_IN_WAY = "NOT_CREATED_FILE_IN_WAY"
+DIR_EXISTS = "NOT_CREATED_DIR_EXISTS"
+NOT_CREATED_OTHER = "NOT_CREATED_OTHER"
 
 
 def cd_label(answer: str) -> str:
-    """CD, CDn, CDo, CDp: "not_created" when the answer says it could not or did not create
-    (or that something is already there), else "created" when it says created / made / done,
-    else "unclear"."""
+    """CD, CDn, CDo, CDp, as `rubrics.ANSWER_SPECS` defines the labels. When the answer says it
+    could not or did not create, or that something is already there: NOT_CREATED_FILE_IN_WAY if
+    it says a regular file has the name (CDn's right answer), NOT_CREATED_DIR_EXISTS if it says
+    a directory of that name exists (a wrong reason), else NOT_CREATED_OTHER. Otherwise CREATED
+    when it says created / made / done, else OTHER."""
     text = _plain(answer)
     if _NOT_CREATED.search(text):
-        return "not_created"
+        if _FILE_IN_WAY.search(text):
+            return FILE_IN_WAY
+        if _DIR_EXISTS.search(text):
+            return DIR_EXISTS
+        return NOT_CREATED_OTHER
     if _CREATED.search(text):
-        return "created"
-    return "unclear"
+        return CREATED
+    return OTHER
 
 
 def verify_cd(ctx: K2Context, trace: AgentTrace) -> OracleResult:
@@ -275,12 +380,12 @@ def verify_cd(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     baseline = _baseline(ctx)
     at = end_state(spec, baseline, _usable_tree(ctx.at_answer, "at the answer"))
     after = end_state(spec, baseline, _usable_tree(ctx.after_settle, "after the answer"))
-    got = cd_label(trace.final_answer)
+    got = ctx.decided(lambda: cd_label(trace.final_answer))
     parts = []
     if got != spec.expect:
         parts.append(f"answers {got}, not {spec.expect}")
     if at:
-        if got == "created" and not after:
+        if got == CREATED and not after:
             ctx.flags.append("premature_claim")
             parts.append("PREMATURE CLAIM: at the answer, " + "; ".join(at))
         else:

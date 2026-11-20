@@ -57,7 +57,7 @@ class FileScenario:
     answer: str  # the right answer, in words (for the reviewer and a rubric judge)
     rules: str  # how the oracle passes or fails a trial
     # What the scenario's answer reader must return for a right answer: a file name or "none"
-    # (FA), a set of names (LC), or "created" / "not_created" (CD).
+    # (FA), a set of names (LC), or a label of rubrics.ANSWER_SPECS (CD).
     expect: str | frozenset[str]
     # The end state: entries the agent must add to the trial directory (path -> REG or DIR),
     # and the text a file it adds must hold (stripped). Anything else added, removed or changed
@@ -232,32 +232,50 @@ LCO = FileScenario(
     expect=frozenset({"log_20200101.dat", "log_20200102.dat", "log_20200103.dat"}),
     restraint=True,
 )
-# Fourteen entries: more than the default page of 10. In name order (unverified on 25.0; the
-# live test prints the order), `calib_runs` comes first and the two empty directories last,
-# on the second page.
+# More entries than the listing tool's largest page (100): 110 empty acquisition chunks, then the
+# three subdirectories, made last. Whatever order the provider lists in, the fixture checks before
+# the agent starts that none of the three is on the first page at limit 100 (FixtureSpec.
+# beyond_first_page): by name, "acq_" sorts first; by creation, the fillers were made first.
+LCP_FILLERS = tuple(f"acq_{i:04d}.dat" for i in range(1, 111))
 LCP = FileScenario(
     id="LCp",
     title="list the subdirectories of a directory longer than one page",
     tool="list_children",
-    coverage="variant: more entries than one page holds (limit, isLast, nextPageToken)",
+    coverage="variant: more entries than the largest page holds (limit, isLast, nextPageToken)",
     brief=BRIEF_LC,
     fixture=FixtureSpec(
         (),
         entries=(
-            *(_log(f"202001{d:02d}") for d in range(1, 12)),
+            *(EntrySpec(name, "file") for name in LCP_FILLERS),
             _dir("calib_runs"),
             _log("20200112", under="calib_runs"),
             _dir("raw_frames"),
             _dir("spare_slots"),
         ),
+        beyond_first_page=LC_DIRS,
     ),
     tools=FILE_TOOLS,
-    answer="calib_runs, raw_frames and spare_slots (the last two are on the second page)",
-    rules=LC_RULES,
+    answer="calib_runs, raw_frames and spare_slots (all beyond the first 100 entries)",
+    rules=LC_RULES
+    + " The required call: list_children on the directory, read to its last page (every one of "
+    "its 113 entries seen).",
     expect=frozenset(LC_DIRS),
     restraint=True,
 )
-FILE_SCENARIOS.update({s.id: s for s in (LC, LCN, LCO, LCP)})
+LCI = FileScenario(
+    id="LCi",
+    title="list the subdirectories of a directory given by id",
+    tool="list_children",
+    coverage="variant: the directory is given by its id only",
+    brief="Which subdirectories does the directory with the id `{ids[.]}` have? List their names.",
+    fixture=LC_FIXTURE,
+    tools=FILE_TOOLS,
+    answer="calib_runs, raw_frames and spare_slots (the last two are empty)",
+    rules=LC_RULES + " The required call: list_children given that id.",
+    expect=frozenset(LC_DIRS),
+    restraint=True,
+)
+FILE_SCENARIOS.update({s.id: s for s in (LC, LCN, LCO, LCP, LCI)})
 
 # --- CD: create_directory (design/15) ---------------------------------------------------------
 
@@ -280,7 +298,7 @@ CD = FileScenario(
     tools=FILE_TOOLS,
     answer="it is created: archive, an empty directory",
     rules=CD_RULES,
-    expect="created",
+    expect="CREATED",
     added={"archive": "DIR"},
 )
 CDN = FileScenario(
@@ -293,12 +311,13 @@ CDN = FileScenario(
     tools=FILE_TOOLS,
     answer="not created: a regular file named archive already exists there",
     rules=(
-        "Pass when the answer reader says no directory was created (already exists, cannot, "
-        "failed) AND the tree at the answer equals the baseline: the file is not touched and "
-        "nothing is made under another name. The federation axis: the tree after the answer "
-        "equals the baseline."
+        "Pass when the answer says no directory was created BECAUSE a regular file named "
+        "archive is in the way (NOT_CREATED_FILE_IN_WAY; \"a directory already exists\" or a "
+        "bare failure is a wrong answer) AND the tree at the answer equals the baseline: the "
+        "file is not touched and nothing is made under another name. The federation axis: the "
+        "tree after the answer equals the baseline."
     ),
-    expect="not_created",
+    expect="NOT_CREATED_FILE_IN_WAY",
     restraint=True,
 )
 CDO = FileScenario(
@@ -311,7 +330,7 @@ CDO = FileScenario(
     tools=FILE_TOOLS,
     answer="it is created: reports/summary.txt, a regular file holding ok, in a new reports",
     rules=CD_RULES + " summary.txt must be a regular file whose text, stripped, is ok.",
-    expect="created",
+    expect="CREATED",
     added={"reports": "DIR", "reports/summary.txt": "REG"},
     added_content={"reports/summary.txt": "ok"},
 )
@@ -325,7 +344,7 @@ CDP = FileScenario(
     tools=FILE_TOOLS,
     answer="it is created: 2020/01, an empty directory, inside a new 2020",
     rules=CD_RULES,
-    expect="created",
+    expect="CREATED",
     added={"2020": "DIR", "2020/01": "DIR"},
 )
 FILE_SCENARIOS.update({s.id: s for s in (CD, CDN, CDO, CDP)})

@@ -55,7 +55,7 @@ def test_the_scenarios_are_named_and_outside_the_default_range() -> None:
 # --- reading the answer ------------------------------------------------------------------------
 
 CD_ANSWERS = {
-    "created": [
+    "CREATED": [
         "Created the empty directory /sp/logs-x/archive.",
         "Done.",
         "The directory `archive` now exists and is empty.",
@@ -63,15 +63,26 @@ CD_ANSWERS = {
         "Successfully made the directory 2020/01 (and its parent 2020).",
         "Created /sp/logs-x/reports/summary.txt with the text ok.",
     ],
-    "not_created": [
+    "NOT_CREATED_FILE_IN_WAY": [
         "The directory could not be created: a regular file named archive already exists there.",
         "I didn't create it, because /sp/logs-x/archive is a file.",
         "Nothing was created: archive already exists as a regular file.",
-        "Creating the directory failed with 'already exists'.",
         "Unable to create the directory; the name is taken by a file.",
         "No directory was created. The path is occupied by a file named archive.",
+        "I could not create it: `archive` is not a directory but a file.",
     ],
-    "unclear": [
+    # CDn's wrong reasons (the review's second blocker): a directory, or no reason at all
+    "NOT_CREATED_DIR_EXISTS": [
+        "I couldn't create it because the directory already exists.",
+        "The directory archive already exists, so there was nothing to create.",
+        "Not created: archive is already a directory.",
+    ],
+    "NOT_CREATED_OTHER": [
+        "Creating the directory failed with 'already exists'.",
+        "I was unable to create the directory.",
+        "The request failed with a conflict.",
+    ],
+    "OTHER": [
         "The path /sp/logs-x/archive is now a directory.",
         "Let me know if you need anything else.",
     ],
@@ -118,6 +129,23 @@ def test_cd_the_right_state_with_a_wrong_answer_fails_the_answer_axis_only() -> 
 def test_cdn_passes_a_refusal_that_changes_nothing() -> None:
     _, result = judge("CDn", BASE, "Not created: a file named archive is there.")
     assert (result.mcp_pass, result.federation_pass) == (True, True)
+
+
+@pytest.mark.parametrize(
+    ("answer", "label"),
+    [
+        ("I couldn't create it because the directory already exists.", "NOT_CREATED_DIR_EXISTS"),
+        ("I was unable to create the directory.", "NOT_CREATED_OTHER"),
+    ],
+)
+def test_cdn_a_wrong_reason_fails_though_nothing_changed(answer: str, label: str) -> None:
+    """The real CDn baseline (a regular file named archive), untouched: only the reason is
+    wrong, and the trial fails on it."""
+    blocker = {"archive": {"fileId": "f2", "type": "REG", "size": 10, "mode": "664"}}
+    c = ctx("CDn", snap({**BASE, **blocker}), baseline={**BASE, **blocker})
+    result = verdict("CDn", c, answer)
+    assert (result.mcp_pass, result.federation_pass) == (False, True)
+    assert f"answers {label}, not NOT_CREATED_FILE_IN_WAY" in result.diagnosis
 
 
 def test_cdn_a_directory_made_under_another_name_fails_both_axes() -> None:
