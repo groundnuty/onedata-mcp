@@ -157,6 +157,32 @@ async def test_get_qos_requirement_returns_full_record(
 
 
 @pytest.mark.asyncio
+async def test_get_qos_requirement_percent_encodes_the_id(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="GET",
+        url="https://oneprovider.example/api/v3/oneprovider/qos_requirements/abc%3Fx%23y",
+        json={"qosRequirementId": "abc?x#y"},
+    )
+
+    result = await qos.get_qos_requirement("abc?x#y")
+
+    assert result["qosRequirementId"] == "abc?x#y"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["", "  ", "/space/file.dat", ".", ".."])
+async def test_get_qos_requirement_refuses_ids_that_cannot_name_a_requirement(
+    monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    _set_env(monkeypatch)
+    with pytest.raises(ValueError):
+        await qos.get_qos_requirement(bad)
+
+
+@pytest.mark.asyncio
 async def test_remove_qos_requirement_returns_none_on_204(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
