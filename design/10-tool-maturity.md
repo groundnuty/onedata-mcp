@@ -1,6 +1,6 @@
 # Tool maturity: how a tool goes from experimental to stable
 
-Status: agreed 2026-11-20.
+Status: agreed 2026-11-20; tightened the same day after the external reviews of the first promotion package (Codex and Gemini both found ways a tool could pass without the evidence intended).
 
 Every tool the server registers has a maturity tier, recorded in [`onedata_mcp/tool_maturity.py`](../onedata_mcp/tool_maturity.py). Operators can expose only stable tools (`ONEDATA_MCP_MATURITY=stable`). The tier is model-invisible: it never appears in a tool's description.
 
@@ -9,7 +9,7 @@ Every tool the server registers has a maturity tier, recorded in [`onedata_mcp/t
 - **experimental**: every new tool starts here. So does any tool whose model-facing surface changed in a way the rules below send back.
 - **stable**: the tool passed every gate below at its current surface.
 
-A tool's **surface** is what a model sees in `tools/list`: its name, description, input schema and annotations. `make tools-manifest` prints it.
+A tool's **surface** is what a model sees in `tools/list`: its name, description, input schema and annotations. `make tools-manifest` prints it. A tool's **behaviour** is what a model sees when it calls the tool: the shape of its result and the hints in its errors (removing a leaked host name from an error is a fix, not a behaviour change).
 
 The preview flag `ONEDATA_MCP_EXPERIMENTAL` is a separate mechanism: it registers opt-in features (extra tools, alternative schemas) that are not ready for the default tool list at all. A preview tool enters the default list as experimental before it can be promoted.
 
@@ -27,12 +27,19 @@ A tool is promoted by a PR that moves it into `STABLE` and adds its validation r
    - Errors tell the caller how to fix the call.
    - `make conformance` passes, and the `tools/list` diff is reviewed.
 3. **Live check.** A gated test in `test/live/` exercises the tool against a real Onedata 25.0 deployment, including at least one failure path.
-4. **Validation run.** The standing panel (below) runs every scenario that requires the tool, at **K=8** repetitions, at the surface being promoted. A scenario *requires* a tool when no other tool it offers can do the job; usage in a scenario where another tool would also do is supporting evidence only. The scenarios for a tool cover:
-   - a task that needs it;
+4. **Validation run.** The standing panel (below) runs **all** the tool's scenarios, at **K=8** repetitions, at the surface being promoted. A scenario *requires* a tool when no other tool it offers can do the job; usage in a scenario where another tool would also do is supporting evidence only. The scenarios for a tool cover:
+   - a task that requires it; its oracle also checks that the tool was called successfully on the right target;
    - a state where the right answer is "no, because …";
    - a task where it is offered but not needed;
-   - id, name and path variants of its arguments;
-   - for a mutating tool, a check of the federation's end state after the agent's final answer, so that a premature "done" is caught.
+   - id, name and path variants of its arguments; a form that cannot apply (e.g. an argument that is only ever an opaque id) is named in the record with the reason;
+   - for a mutating tool, a check of the federation's state at the moment of the final answer, so that a premature "done" is caught.
+
+   How a trial is scored:
+   - It **passes** only when its answer is right **and** every federation check that applies to it passes.
+   - In a scenario where nothing should change, any successful mutating call fails the trial, and the federation is read again after a bounded settle window, even if the first read already matched.
+   - A failed or malformed read of the federation is a harness error, never an empty state. The fixture's starting state is confirmed before the agent starts, and recorded.
+   - Each final answer is read twice: by a fixed-rubric judge model and by a deterministic reader. When they agree, that label decides. When they disagree, the trial is **NEEDS_REVIEW** and is classified by hand; no record is complete while one remains.
+   - Paths and names in a brief do not reveal which scenario variant it is.
 
    Every non-pass is classified before anything counts:
    - harness or oracle bug: fix and rescore;
@@ -41,23 +48,24 @@ A tool is promoted by a PR that moves it into `STABLE` and adds its validation r
    - model capability.
 
    The run passes when:
-   - the control model passes every scenario, or each control failure is shown to be a harness bug or artefact;
-   - no tool-attributable finding is open: each is fixed and re-run, or accepted with a written reason.
+   - every control trial passes. A control trial lost to a harness bug or deployment artefact is re-run after the fix, so each scenario ends with K passing control trials;
+   - no tool-attributable finding is open: each is fixed and the affected scenarios re-run. A finding may be accepted unfixed only when its cause lies outside the tool, with the reason and the operator's sign-off in the record.
 
    Pass rates are reported but do not gate.
-5. **Record.** A validation record in `design/` names:
+5. **External review and record.** Before the validation run, the package (code, tests, scenarios and oracles) is reviewed by at least one external frontier model, run only through a jailed wrapper. Each BLOCKING or MAJOR finding is fixed, or answered in the record. A validation record in `design/` names:
    - the commit and the surface (a `tools/list` hash);
    - the panel and K;
-   - the per-model results and each classification.
+   - the per-model results and each classification;
+   - the external review(s) and how each BLOCKING or MAJOR finding was resolved.
 
 ## Staying stable
 
 A change to a stable tool's surface:
 
 - **name, input schema or annotations**: the tool goes back to experimental. These changes break agents and clients that already use it.
-- **description wording only**: re-run the tool's scenarios on the smoke pair at K=3. The tool stays stable if no new tool-attributable failure appears; otherwise it goes back to experimental.
+- **description wording, the wording of its error hints, or the shape of its result**: re-run the tool's scenarios on the smoke pair at K=3. The tool stays stable if no new tool-attributable failure appears; otherwise it goes back to experimental.
 
-Bug fixes that leave the surface unchanged need only gates 1 and 3.
+Bug fixes that leave both the surface and the behaviour unchanged need only gates 1 and 3.
 
 ## The standing panel
 
