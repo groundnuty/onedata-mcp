@@ -36,7 +36,7 @@ The server registers 23 tools by default. **Access** `W` marks the 9 tools that 
 | `get_file_qos_summary` | Show the QoS requirements on a file and whether they are met | R | stable |
 | `add_file_qos_requirement` | Add a QoS requirement, e.g. "keep a replica at provider X" | W | stable |
 | `get_qos_requirement` | Read one QoS requirement | R | stable |
-| `remove_qos_requirement` | Remove a QoS requirement | W | experimental |
+| `remove_qos_requirement` | Remove a QoS requirement | W | stable |
 | `schedule_file_replication` | Copy a file's data to a given provider | W | experimental |
 | `list_space_transfers` | List the transfers in a space | R | stable |
 | `get_transfer` | Read one transfer: type, destination, bytes moved, timing | R | stable |
