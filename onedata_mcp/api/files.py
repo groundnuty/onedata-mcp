@@ -170,16 +170,63 @@ def _status(error: OnedataApiError) -> int | None:
     return status if isinstance(status, int) else None
 
 
+# A specific diagnosis needs a structured Onedata error (an error id or an errno in the body) on
+# a 4xx status. The same body on a 5xx says the provider failed, not what the failure was
+# about: an `enoent` in a 500 does not show that the file is missing. A 5xx therefore gets
+# either no hint (the error as it is) or, for a not-found, the uncertain one
+# (`_unconfirmed_hint`), and never "not found" or "missing parent".
+
+
+def _is_client_error(error: OnedataApiError) -> bool:
+    status = _status(error)
+    return status is not None and 400 <= status < 500
+
+
+def _errno_is(error: OnedataApiError, errno: str) -> bool:
+    """The errno is `errno`, on a 4xx status."""
+    return _is_client_error(error) and error.errno == errno
+
+
 def _is_forbidden(error: OnedataApiError) -> bool:
-    return (
-        _status(error) == 403 or error.error_id == "forbidden" or error.errno in {"eacces", "eperm"}
+    return _status(error) == 403 or (
+        _is_client_error(error)
+        and (error.error_id == "forbidden" or error.errno in {"eacces", "eperm"})
     )
 
 
 def _is_not_found(error: OnedataApiError) -> bool:
-    """A structured not-found: an `enoent` errno or the `notFound` error id. A bare 404 (no such
-    body) is not one: a provider that cannot resolve or disclose a target answers 404 too."""
-    return error.errno == "enoent" or error.error_id == "notFound"
+    """A structured not-found on a 4xx status: an `enoent` errno or the `notFound` error id. A
+    bare 404 (no such body) is not one: a provider that cannot resolve or disclose a target
+    answers 404 too. A 5xx carrying one is `_is_unconfirmed_not_found`."""
+    return _is_client_error(error) and (error.errno == "enoent" or error.error_id == "notFound")
+
+
+def _is_unconfirmed_not_found(error: OnedataApiError) -> bool:
+    """A 5xx whose body mentions a missing item: the provider failed, and what is missing is
+    not established."""
+    status = _status(error)
+    return (
+        status is not None
+        and status >= 500
+        and (error.errno == "enoent" or error.error_id == "notFound")
+    )
+
+
+def _unconfirmed_hint(target: str, error: OnedataApiError, *, creating: bool = False) -> str:
+    """For a 5xx that mentions a missing item. It claims neither that the target is missing nor
+    (when creating) that nothing was created."""
+    status = _status(error)
+    if creating:
+        return (
+            f"This provider answered {status} and mentioned a missing item: the provider "
+            f"failed, and a parent of {target} may also not exist. It is not known whether "
+            "anything was created; check what exists at the path before calling again."
+        )
+    return (
+        f"This provider answered {status} and mentioned a missing item: the provider failed, "
+        f"and {target} may also not exist. That does not show which; check the path or id, "
+        "the space and the provider, and try again."
+    )
 
 
 def _is_bare_404(error: OnedataApiError) -> bool:
@@ -235,12 +282,12 @@ async def _file_error(
             f"Not allowed to {action} {target}: the token has no access to it. Calling again "
             "will not help."
         )
-    elif error.error_id == "spaceNotSupportedBy":
+    elif _is_client_error(error) and error.error_id == "spaceNotSupportedBy":
         hint = (
             f"This provider does not support the space of {target}, so it cannot {action} it "
             f"here; the space may still exist.{await _visible_spaces()}"
         )
-    elif lookup and error.errno == "enotdir":
+    elif lookup and _errno_is(error, "enotdir"):
         hint = (
             f"A component of {target} before its last part is not a directory, so this provider "
             "cannot resolve the path."
@@ -256,6 +303,8 @@ async def _file_error(
         hint = f"This provider rejected {target} as a file id. {_HOW_TO_NAME_A_FILE}"
     elif _is_bare_404(error):
         hint = _bare_404_hint(target, "it may not exist")
+    elif _is_unconfirmed_not_found(error):
+        hint = _unconfirmed_hint(target, error)
     else:
         return error
     return _with_hint(hint, error)
@@ -366,7 +415,7 @@ async def list_children(
             json_body=request_body,
         )
     except OnedataApiError as e:
-        if e.errno == "enotdir":  # the target itself resolved, and is not a directory
+        if _errno_is(e, "enotdir"):  # the target itself resolved, and is not a directory
             hint = (
                 f"The {_target(parent_id_or_path)} is not a directory: only a directory has "
                 "entries to list."
@@ -590,10 +639,12 @@ async def _create_directory_error(
 
     "Already exists" needs evidence: an `eexist` errno, or a 409 whose path then resolves. With
     a type read at the path, it says what is there. A 409 that nothing explains is a conflict,
-    not an existing entry. A missing parent needs a structured not-found (with create_parents
-    false); a bare 404 gets the possible causes."""
+    not an existing entry. A missing parent needs a structured not-found on a 4xx status (with
+    create_parents false); a bare 404 gets the possible causes; a 5xx that mentions a missing
+    item gets the uncertain hint (the provider failed; a parent may also not exist; whether
+    anything was created is not known). Every errno or error id counts on a 4xx status only."""
     shown = _shown(path)
-    eexist = error.errno == "eexist"
+    eexist = _errno_is(error, "eexist")
     if eexist or _status(error) == 409:
         kind = await _type_at(path)
         if kind in _EXISTING:
@@ -606,7 +657,7 @@ async def _create_directory_error(
             f"This provider refused to create {shown} with a conflict (409) and did not say "
             "why, so no directory was created. Check what is at the path."
         )
-    elif error.errno == "enotdir":
+    elif _errno_is(error, "enotdir"):
         hint = (
             f"A component of {shown} above the new directory is not a directory, so nothing "
             "was created."
@@ -616,7 +667,7 @@ async def _create_directory_error(
             f"Not allowed to create {shown}: the token may be read-only or have no write "
             "access in this space. Calling again will not help."
         )
-    elif error.error_id == "spaceNotSupportedBy":
+    elif _is_client_error(error) and error.error_id == "spaceNotSupportedBy":
         hint = (
             f"This provider does not support the space of {shown}, so nothing was created "
             f"here; the space may still exist.{await _visible_spaces()}"
@@ -633,6 +684,8 @@ async def _create_directory_error(
         )
     elif _is_bare_404(error):
         hint = _bare_404_hint(shown, "a parent may not exist") + " Nothing was created."
+    elif _is_unconfirmed_not_found(error):
+        hint = _unconfirmed_hint(shown, error, creating=True)
     else:
         return error
     return _with_hint(hint, error)
