@@ -21,10 +21,10 @@ import re
 from typing import Any, Literal
 from urllib.parse import quote
 
-from onedata_mcp.api.files import _normalize_path_to_file_id
+from onedata_mcp.api.files import _normalize_path_to_file_id, _unconfirmed_hint
 from onedata_mcp.api.spaces import resolve_space_id_or_name
 from onedata_mcp.config import get_oneprovider_config
-from onedata_mcp.utils import OnedataApiError, redact_endpoints, request
+from onedata_mcp.utils import OnedataApiError, bound_message, redact_endpoints, request
 
 TransferState = Literal["waiting", "ongoing", "ended"]
 
@@ -160,10 +160,15 @@ async def create_transfer(
 # the generic Error body; the 25.0 error ids are not pinned there. A bare 400 does not say which
 # argument was wrong, so a hint blames the provider only when Onedata's answer does (the error
 # id `spaceNotSupportedBy`, or `details.key` naming the provider field), and blames the file only
-# when it was given as an id (a path has already resolved to a file by then) or the key names
-# the file field. A target that is the NAME of one of the space's providers is answered with
-# that provider's id, first. Onedata does not refuse a second replication of a file that is
-# already being copied: no status in the swagger says so, and nothing here pretends otherwise.
+# when the key names the file field. A 404 that names neither field, for a file given as an id,
+# points at both arguments (the file may be the unknown one, or the target); for a path, which
+# has already resolved to a file by then, it points at the target. A target that is the NAME of
+# one of the space's providers (matched on the name as Onedata gives it) is answered with that
+# provider's id, first. Every hint is for a 4xx status only: a 5xx with a body that mentions a
+# missing item or a permission says the provider failed, not what the failure was about, and is
+# passed on unchanged. Every hint is redacted and bounded as a whole. Onedata does not refuse a
+# second replication of a file that is already being copied: no status in the swagger says so,
+# and nothing here pretends otherwise.
 # ---------------------------------------------------------------------------
 
 _SHOWN_MAX = 80
@@ -262,12 +267,14 @@ async def _space_id_for(file_arg: str, file_id: str, error: OnedataApiError) -> 
 
 async def _space_providers(
     file_arg: str, file_id: str, error: OnedataApiError
-) -> list[tuple[str, str]] | None:
+) -> list[tuple[str | None, str]] | None:
     """(name, id) of the providers supporting the file's space, or None if not found.
 
     Only on the error path: the space comes from `_space_id_for`, and one `GET /spaces/{sid}`
     (the id percent-encoded) lists its providers. Any failure here gives None, so the hint
-    falls back to plain words.
+    falls back to plain words. The name is kept as Onedata gives it (None when there is none),
+    so that a target can be matched against it; it is redacted only where it is shown, with the
+    rest of the message.
     """
     space_id = await _space_id_for(file_arg, file_id, error)
     if not space_id:
@@ -279,28 +286,38 @@ async def _space_providers(
         return None
     body = response["body"]
     providers = body.get("providers") if isinstance(body, dict) else None
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str | None, str]] = []
     for entry in providers if isinstance(providers, list) else ():
         if not isinstance(entry, dict):
             continue
         pid, name = entry.get("providerId"), entry.get("providerName")
         if isinstance(pid, str) and pid:
-            shown_name = name if isinstance(name, str) and name else "(no name)"
-            out.append((redact_endpoints(shown_name, config), pid))
+            out.append((name if isinstance(name, str) and name else None, pid))
     return out or None
 
 
-def _providers_sentence(providers: list[tuple[str, str]] | None) -> str:
-    """Which ids are valid targets."""
+def _providers_sentence(providers: list[tuple[str | None, str]] | None) -> str:
+    """Which ids are valid targets. The names are shown as given; the message they go into is
+    redacted as a whole (`_hinted`)."""
     if not providers:
         return "Give the id (not the name) of a provider that supports the file's space."
-    listed = ", ".join(f"{name} (id {pid!r})" for name, pid in providers)
+    listed = ", ".join(f"{name or '(no name)'} (id {pid!r})" for name, pid in providers)
     return f"The providers that support the file's space are: {listed}."
 
 
-def _id_of_name(providers: list[tuple[str, str]] | None, target: str) -> str | None:
-    """The id of the space's provider whose NAME the target is, if it is one."""
-    return next((pid for name, pid in providers or () if name == target), None)
+def _id_of_name(providers: list[tuple[str | None, str]] | None, target: str) -> str | None:
+    """The id of the space's provider whose NAME the target is, if it is one. The raw name is
+    compared: a name that redaction would change, or a provider with no name, matches only
+    itself."""
+    return next((pid for name, pid in providers or () if name is not None and name == target), None)
+
+
+def _hinted(hint: str, error: OnedataApiError) -> OnedataApiError:
+    """The hint first, then Onedata's own message; the whole redacted (a configured host, a
+    URL) and bounded, so that no echoed argument, provider name or id carries either past it."""
+    config = get_oneprovider_config()
+    message = bound_message(redact_endpoints(f"{hint} [{error}]", config))
+    return OnedataApiError(message, response=error.response)
 
 
 def _error_parts(error: OnedataApiError) -> tuple[int | None, str | None, str | None, Any]:
@@ -311,9 +328,22 @@ def _error_parts(error: OnedataApiError) -> tuple[int | None, str | None, str | 
     return response.get("status_code"), error.error_id, error.errno, key
 
 
+def _is_client_error(status: Any) -> bool:
+    return isinstance(status, int) and 400 <= status < 500
+
+
+def _is_server_error(error: OnedataApiError) -> bool:
+    response = error.response if isinstance(error.response, dict) else {}
+    status = response.get("status_code")
+    return isinstance(status, int) and status >= 500
+
+
 def _permission_hint(shown_file: str, error: OnedataApiError) -> str | None:
+    """For a 403, or a 4xx whose body says forbidden. The same body on a 5xx is not one."""
     status, error_id, errno, _ = _error_parts(error)
-    if status == 403 or error_id == "forbidden" or errno in {"eacces", "eperm"}:
+    if status == 403 or (
+        _is_client_error(status) and (error_id == "forbidden" or errno in {"eacces", "eperm"})
+    ):
         return (
             f"Not allowed to schedule a replication of {shown_file}: the token may not schedule "
             "replications in this space (the space privilege space_schedule_replication), may "
@@ -328,7 +358,8 @@ async def _replication_error_hint(
     """What the caller can do about a failed schedule, or None to pass the error on unchanged.
 
     Keyed on the status the swagger lists (400, 403, 404), and on the error id, errno and
-    `details.key` where Onedata gives them. 5xx and anything else pass unchanged. In order:
+    `details.key` where Onedata gives them. Only a 4xx status gets a hint: a 5xx, and anything
+    else, passes unchanged. In order:
 
     - permission;
     - a target that is the name of one of the space's providers: "Pass its id ...", whatever
@@ -338,18 +369,21 @@ async def _replication_error_hint(
       the space (true of a name, too, when the providers could not be listed);
     - `details.key` names the provider field: not a valid provider id for the space (no claim
       about support);
-    - the file: blamed when the key names the file field, or on a not-found when the file was
-      given as an id; a path has already resolved to a file, so its not-found points at the
-      target;
+    - the file: blamed only when the key names the file field;
+    - a not-found that names neither field, for a file given as an id: Onedata did not say
+      which argument it means, so both are pointed at, with the providers; for a path, which
+      has already resolved to a file, it points at the target;
     - a bare 400: check both arguments.
     """
     status, error_id, errno, key = _error_parts(error)
     shown_file, shown_target = _shown(file_arg), _shown(target)
     if hint := _permission_hint(shown_file, error):
         return hint
+    if not _is_client_error(status):
+        return None
     not_found = status == 404 or error_id == "notFound" or errno == "enoent"
     from_path = file_arg.startswith("/")
-    file_blamed = key in _FILE_FIELDS or (not_found and not from_path)
+    file_blamed = key in _FILE_FIELDS
     provider_blamed = error_id == "spaceNotSupportedBy" or key in _PROVIDER_FIELDS
     if not (provider_blamed or file_blamed or not_found or status == 400):
         return None
@@ -375,6 +409,13 @@ async def _replication_error_hint(
         return (
             f"No file is known by {shown_file}: give the file's id, or {_PATH_FORM}. "
             "A file name alone is neither."
+        )
+    if not_found and not from_path:  # an id: Onedata did not say which argument it means
+        return (
+            f"Onedata found nothing for the replication of {shown_file} to {shown_target}, and "
+            f"did not say which argument it means. Check both: the file is a file id, or "
+            f"{_PATH_FORM} (a file name alone is neither); the target is a provider id. "
+            f"{_providers_sentence(providers)}"
         )
     if not_found:  # a path that resolved: the file is known, so look at the target
         return (
@@ -420,15 +461,24 @@ async def schedule_file_replication(
     _check_replication_args(file_arg, target)
     try:
         file_id = await _normalize_path_to_file_id(file_arg)
+    except FileNotFoundError as missing:
+        # The shared lookup maps an `enoent` on ANY status to "not found". On a 5xx that is not
+        # established (the provider failed): say so. The stable tools that share the lookup keep
+        # its mapping (design/10: their own gates); the cause carries the status.
+        cause = missing.__cause__
+        if isinstance(cause, OnedataApiError) and _is_server_error(cause):
+            hint = _unconfirmed_hint(_shown(file_arg), cause)
+            raise _hinted(hint, cause) from cause
+        raise
     except OnedataApiError as error:  # the path lookup: only a permission error has a hint
         hint = _permission_hint(_shown(file_arg), error)
         if hint is None:
             raise
-        raise OnedataApiError(f"{hint} [{error}]", response=error.response) from error
+        raise _hinted(hint, error) from error
     try:
         return await create_transfer(file_id, "replication", replicating_provider_id=target)
     except OnedataApiError as error:
         hint = await _replication_error_hint(error, file_arg, file_id, target)
         if hint is None:
             raise
-        raise OnedataApiError(f"{hint} [{error}]", response=error.response) from error
+        raise _hinted(hint, error) from error

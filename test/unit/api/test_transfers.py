@@ -9,7 +9,7 @@ import pytest
 from pytest_httpx import HTTPXMock
 
 from onedata_mcp.api import transfers
-from onedata_mcp.utils import OnedataApiError
+from onedata_mcp.utils import MAX_ERROR_CHARS, OnedataApiError
 
 
 def _set_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -332,26 +332,128 @@ async def test_an_unknown_path_is_a_not_found_error_without_a_transfer(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("status", "body"),
-    [
-        (404, {"error": {"id": "notFound", "description": "The resource could not be found."}}),
-        (404, {"error": {"id": "posix", "details": {"errno": "enoent"}, "description": "enoent"}}),
-        (400, {"error": {"id": "badValueIdentifier", "details": {"key": "fileId"}}}),
-    ],
-)
-async def test_an_unknown_file_id_says_what_forms_work(
-    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, status: int, body: dict
+async def test_an_error_that_names_the_file_field_blames_the_file(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
-    """A file name, or an id that names no file."""
+    """A file name, or an id that names no file, when Onedata says the file is the bad value."""
     _set_env(monkeypatch)
-    _post_error(httpx_mock, status, body)
+    _post_error(
+        httpx_mock, 400, {"error": {"id": "badValueIdentifier", "details": {"key": "fileId"}}}
+    )
 
     text = await _failure("log_20200105.dat", "pLocal0123456789abcdef")
 
     assert text.startswith("No file is known by 'log_20200105.dat'")
     assert "a path starting with '/'" in text and "A file name alone is neither" in text
-    assert f"(status={status})" in text  # Onedata's own message follows
+    assert "(status=400)" in text  # Onedata's own message follows
+    assert len(httpx_mock.get_requests()) == 1  # no provider list: Onedata named the file
+
+
+NOT_FOUND_BODIES = [
+    {"error": {"id": "notFound", "description": "The resource could not be found."}},
+    {"error": {"id": "posix", "details": {"errno": "enoent"}, "description": "enoent"}},
+    {"error": {}},  # a bare 404
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", NOT_FOUND_BODIES, ids=["notFound", "enoent", "bare"])
+async def test_a_404_for_a_file_given_as_an_id_points_at_both_arguments_and_lists_the_providers(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, body: dict
+) -> None:
+    """The file is a valid id (the SR1i case: the brief gives it) and the target is not. Onedata
+    names no field, so the file is not blamed; both arguments are pointed at, with the
+    providers that can be the target."""
+    _set_env(monkeypatch)
+    _post_error(httpx_mock, 404, body)
+    httpx_mock.add_response(method="GET", url=f"{BASE}/spaces/{SPACE_ID}", json=PROVIDERS)
+
+    text = await _failure(FILE_ID, "pUnknown")
+
+    hint = text.split(" [", 1)[0]
+    assert hint.startswith("Onedata found nothing for the replication of ")
+    assert "did not say which argument it means" in hint and "Check both" in hint
+    assert "the target is a provider id" in hint and "a file name alone is neither" in hint
+    assert "vistula-dc (id 'pLocal0123456789abcdef')" in hint
+    assert "nordic-marine-dc (id 'pOwner0123456789abcdef')" in hint
+    assert "No file is known" not in hint
+    assert "(status=404)" in text  # Onedata's own message follows
+
+
+@pytest.mark.asyncio
+async def test_a_404_for_a_file_name_given_as_an_id_falls_back_to_plain_words_for_providers(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """No space can be found from a bare name, so the providers sentence is the plain one."""
+    _set_env(monkeypatch)
+    _post_error(httpx_mock, 404, {"error": {"id": "notFound"}})
+
+    text = await _failure("log_20200105.dat", "pLocal0123456789abcdef")
+
+    hint = text.split(" [", 1)[0]
+    assert hint.startswith("Onedata found nothing for the replication of 'log_20200105.dat'")
+    assert "a file name alone is neither" in hint
+    assert "Give the id (not the name) of a provider that supports the file's space." in hint
+    assert "No file is known" not in hint
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [500, 502, 503])
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"error": {"id": "notFound"}},
+        {"error": {"id": "posix", "details": {"errno": "enoent"}}},
+        {"error": {"id": "forbidden"}},
+        {"error": {"id": "posix", "details": {"errno": "eacces"}}},
+        {"error": {"id": "spaceNotSupportedBy", "details": {"spaceId": SPACE_ID}}},
+        {"error": {"id": "badValueIdentifier", "details": {"key": "replicatingProviderId"}}},
+    ],
+    ids=["notFound", "enoent", "forbidden", "eacces", "unsupported", "provider-key"],
+)
+async def test_a_5xx_is_passed_on_unchanged_whatever_its_body_mentions(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, status: int, body: dict
+) -> None:
+    """A not-found or a permission hint needs a 4xx. A 5xx says the provider failed, not what
+    the failure was about: no hint, no provider listing, Onedata's message as it is."""
+    _set_env(monkeypatch)
+    _post_error(httpx_mock, status, body)
+
+    text = await _failure(FILE_ID, "pLocal0123456789abcdef")
+
+    assert text.startswith(f"Onedata API request failed: POST /transfers (status={status})")
+    for hint_word in (
+        "Not allowed",
+        "No file is known",
+        "Onedata found nothing",
+        "Cannot replicate",
+    ):
+        assert hint_word not in text
+    assert len(httpx_mock.get_requests()) == 1  # nothing fetched to build a hint
+
+
+@pytest.mark.asyncio
+async def test_a_5xx_with_enoent_on_the_path_lookup_is_not_called_not_found(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """The shared lookup maps an `enoent` of any status to `Path ... not found`; here a 5xx says
+    the provider failed, and the file may also not exist. Nothing is posted."""
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{BASE}/lookup-file-id/%2Fk2val-x%2Flogs%2Fnope.dat",
+        status_code=500,
+        json={"error": {"id": "posix", "details": {"errno": "enoent"}}},
+    )
+
+    with pytest.raises(OnedataApiError) as excinfo:  # not FileNotFoundError
+        await transfers.schedule_file_replication("/k2val-x/logs/nope.dat", "pLocal")
+
+    text = str(excinfo.value)
+    assert text.startswith("This provider answered 500 and mentioned a missing item: the provider")
+    assert "may also not exist" in text and "not found" not in text.split(" [", 1)[0]
+    assert "(status=500)" in text
+    assert len(httpx_mock.get_requests()) == 1  # no transfer was posted
 
 
 @pytest.mark.asyncio
@@ -673,3 +775,102 @@ async def test_a_provider_name_with_a_path_is_resolved_through_the_space_name(
     text = await _failure(PATH, "vistula-dc")
 
     assert text.startswith("Pass its id 'pLocal0123456789abcdef', not its name")
+
+
+# --- every hint is redacted and bounded as a whole; names are matched raw ---------------------
+
+HOST = "oneprovider.example"  # the configured Oneprovider (see _set_env)
+
+
+@pytest.mark.asyncio
+async def test_a_hint_that_echoes_the_configured_host_is_redacted_and_the_whole_is_bounded(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """The target is echoed in the hint; Onedata's message is long. Neither gets past the
+    redaction and the bound, which cover the hint and Onedata's text together."""
+    _set_env(monkeypatch)
+    _post_error(httpx_mock, 404, {"error": {"id": "notFound", "description": "n" * 10_000}})
+
+    text = await _failure("plain-file-id", HOST)
+
+    assert text.startswith("Onedata found nothing for the replication of 'plain-file-id' to")
+    assert HOST not in text
+    assert "'oneprovider'" in text  # the configured host reads as its declared name
+    assert len(text) == MAX_ERROR_CHARS and text.endswith("...")
+
+
+@pytest.mark.asyncio
+async def test_the_path_lookups_permission_hint_is_redacted_and_bounded_too(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{BASE}/lookup-file-id/%2F{HOST}%2Fa.dat",
+        status_code=403,
+        json={"error": {"id": "forbidden", "description": "n" * 10_000}},
+    )
+
+    text = await _failure(f"/{HOST}/a.dat", "pLocal0123456789abcdef")
+
+    assert text.startswith("Not allowed to schedule a replication of '/oneprovider/a.dat'")
+    # the hint's echo is redacted (the request path that follows is the caller's own, encoded)
+    assert HOST not in text.split(" [", 1)[0]
+    assert len(text) == MAX_ERROR_CHARS and text.endswith("...")
+
+
+@pytest.mark.asyncio
+async def test_a_provider_whose_name_redaction_would_change_is_still_matched_by_its_raw_name(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """A provider named like the configured host: redaction shows it as `oneprovider`, which
+    is not what the caller typed. The target is matched against the name as Onedata gives it,
+    so the caller still gets "Pass its id"; the name is redacted only as it is shown."""
+    _set_env(monkeypatch)
+    _post_error(httpx_mock, 404, {"error": {"id": "notFound"}})
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{BASE}/spaces/{SPACE_ID}",
+        json={
+            "spaceId": SPACE_ID,
+            "providers": [
+                {"providerId": "pHost0123456789abcdef", "providerName": HOST},
+                {"providerId": "pOther0123456789abcdef", "providerName": "vistula-dc"},
+            ],
+        },
+    )
+
+    text = await _failure(FILE_ID, HOST)
+
+    assert text.startswith("Pass its id 'pHost0123456789abcdef', not its name: 'oneprovider'")
+    assert HOST not in text
+    assert "oneprovider (id 'pHost0123456789abcdef')" in text  # shown redacted
+
+
+@pytest.mark.asyncio
+async def test_a_target_that_reads_like_the_placeholder_for_a_nameless_provider_is_not_its_name(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """A provider with no name is shown as `(no name)`: a target of that text is not a match."""
+    _set_env(monkeypatch)
+    _post_error(httpx_mock, 404, {"error": {"id": "notFound"}})
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{BASE}/spaces/{SPACE_ID}",
+        json={
+            "spaceId": SPACE_ID,
+            "providers": [
+                {"providerId": "pNameless0123456789ab"},
+                {"providerId": "pEmpty0123456789abcde", "providerName": ""},
+                {"providerId": "pOther0123456789abcdef", "providerName": "vistula-dc"},
+            ],
+        },
+    )
+
+    text = await _failure(FILE_ID, "(no name)")
+
+    assert not text.startswith("Pass its id")
+    hint = text.split(" [", 1)[0]
+    assert "(no name) (id 'pNameless0123456789ab')" in hint
+    assert "(no name) (id 'pEmpty0123456789abcde')" in hint
+    assert "vistula-dc (id 'pOther0123456789abcdef')" in hint
