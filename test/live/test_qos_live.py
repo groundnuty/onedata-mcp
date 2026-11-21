@@ -257,7 +257,8 @@ async def test_a_requirement_is_added_read_removed_and_a_second_removal_fails(
     assert record.get("qosRequirementId") == qos_id
     assert str(record.get("fileId", "")).lower() == probe.file_id.lower()
     assert record.get("replicasNum") == 1
-    assert record.get("qosExpression") == "anyStorage"
+    assert record.get("expression") == "anyStorage"  # 25.0 names it `expression`, as measured
+    assert "qosExpression" not in record
 
     result, text = await _call(qos_mcp, "remove_qos_requirement", {"qos_id": qos_id})
 

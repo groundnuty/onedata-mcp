@@ -155,7 +155,7 @@ async def test_get_qos_requirement_returns_full_record(
         json={
             "qosRequirementId": qid,
             "fileId": "fileXYZ",
-            "qosExpression": "country=FR",
+            "expression": "country=FR",
             "replicasNum": 2,
             "status": "fulfilled",
         },
@@ -163,7 +163,7 @@ async def test_get_qos_requirement_returns_full_record(
 
     result = await qos.get_qos_requirement(qid)
 
-    assert result["qosExpression"] == "country=FR"
+    assert result["expression"] == "country=FR"
     assert result["status"] == "fulfilled"
 
 

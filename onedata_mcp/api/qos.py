@@ -93,11 +93,12 @@ async def add_qos_requirement(
 async def get_qos_requirement(qos_id: str) -> dict[str, Any]:
     """Return detailed information about a single QoS requirement.
 
-    Response shape (QosRequirement swagger definition):
+    Response shape (Onedata 25.0, as measured live; the swagger example names the expression
+    `qosExpression`, which 25.0 does not send):
         {
           "qosRequirementId": "...",
           "fileId": "...",
-          "qosExpression": "...",
+          "expression": "...",
           "replicasNum": N,
           "status": "fulfilled|pending|impossible"
         }
