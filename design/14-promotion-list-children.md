@@ -117,7 +117,7 @@ The tool's own hash is unchanged by the integration. The run's record names the 
 - **LCo** is answered by one call of `list_files_recursively`; a top-level listing alone misses `log_20200103.dat`.
 - **LCp** is the variant that matters for this tool's arguments: `limit`, `isLast` and `nextPageToken`, and the token fix of gate 1. After the external review (finding 1) it holds 113 entries: 110 empty files `acq_0001.dat`…`acq_0110.dat`, then LC's three subdirectories, made last. Before the first turn the fixture lists the directory at the local provider with `list_children`'s largest limit (100) and refuses to start (RESET_FAIL) unless the page is not the last and holds none of the three: the answer needs a second page whatever order 25.0 lists in. A model that reads one page, even at limit 100, sees no subdirectory and fails.
 - **LCi**, an id variant added after the external review (finding 9, reversing the earlier "no id variant"): "Which subdirectories does the directory with the id `<id>` have?", LC's fixture, the directory given by its id only. It requires `list_children` called with that id.
-- **Required call (LC, LCn, LCp, LCi).** A pass needs successful `list_children` calls on the directory that, together, show every one of its top-level entries: a listing read to its end.
+- **Required call (LC, LCn, LCp, LCi).** A pass needs successful `list_children` calls on the directory that, together, show every one of its top-level entries in their `children` lists (by `fileId`, or by name when no id was asked for): a listing read to its end. The answers are parsed structurally, so a listing asked for ids and types only counts, and a `name` nested elsewhere in an answer does not.
 
 ### How a trial is judged
 

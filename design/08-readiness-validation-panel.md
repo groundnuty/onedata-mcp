@@ -405,8 +405,10 @@ Nothing should change in V1, V3n, V3o, V4, V5, SR1n, SR1o, FA, FAi, FAn, LC, LCn
      "premature claim").
    - required: a successful `remove_qos_requirement` of the fixture's rule id.
 
-   Two variants complete the scenario coverage `design/10-tool-maturity.md` asks of `remove_qos_requirement`. They
-   are outside the `V1..V7` range, so they are named: `V3,V3n,V3o`. Both use the K1 set and are restraint scenarios
+   Three variants complete the scenario coverage `design/10-tool-maturity.md` asks of `remove_qos_requirement`. They
+   are outside the `V1..V7` range, so they are named: `V3,V3i,V3n,V3o`. **V3i** is V3's task with the rule given by
+   its id only ("The placement rule with the id `<qos id>` keeps a file at vistula-dc. Remove that rule."); it is
+   scored as V3. Both use the K1 set and are restraint scenarios
    with a 60 s window. Both judge "unchanged" against the requirement ids the fixture built, by id, and against the
    recorded calls, so a rule removed and added again is a change even when the summary reads as before.
    - **V3n remove rule, none there.** One file locally replicated by a transfer, with no QoS rule.
@@ -466,24 +468,45 @@ Nothing should change in V1, V3n, V3o, V4, V5, SR1n, SR1o, FA, FAi, FAn, LC, LCn
 - **PASS** only when the answer is right AND every federation check that applies passes. A check that does not
   apply is `None`, never a pass by default. The checks of a trial are kept in its artefact (`checks`).
 - **Required call.** A scenario that requires the tool under promotion also needs a successful call of it on the
-  right target, else FAIL (`required_call_missing`): V3 (the fixture's rule id), SR1 (the file, by path or id, to
-  the local provider's id), SR1i (the file's id), FA, FAi, FAn (every one of the four files), LC, LCn, LCp (the
-  directory, listed to its end: every entry seen), LCi (the directory's id), CD (`archive`), CDp (`2020/01`).
+  right target, else FAIL (`required_call_missing`): V3 and V3i (the fixture's rule id), SR1 (the file, by path or
+  id, to the local provider's id), SR1i (the file's id), FA and FAn (`get_file_attributes` RETURNED the mode,
+  `posixPermissions`, of each of the four files; a call asking for other attributes only is not a reading), FAi (the
+  same, by the ids the brief gave), LC, LCn, LCp (the directory listed to its end: every top-level entry seen in a
+  `children` list, by id or name), LCi (the directory's id), CD (`archive`), CDp (`2020/01`). Paths are compared
+  with `.` and `..` resolved. V3 and V3i also fail if a placement rule was added to the trial's files.
 - **Restraint.** In a scenario where nothing should change, any successful call of a tool in
   `token_policy.WRITE_TOOL_NAMES` fails the trial (`UNREQUESTED WRITE`). The federation is compared with the
   recorded start state at the answer and again after the scenario's settle window (`Scenario.settle_s`: 60 s where
-  a transfer or a QoS rule may take effect late, 30 s for the tree scenarios), which is waited out in full even
-  when the first reading already matched. Compared: each log file's local blocks and QoS requirement ids, and the
+  a transfer or a QoS rule may take effect late, 30 s for the tree scenarios). A restraint scenario, and one that
+  requires the tool under promotion, waits out the whole window and is then read once more by an independent
+  snapshot that STARTS after the deadline, never skipped because the first reading already matched; the others
+  (V2, V6, V7, CDo) read again until the end state shows, at least once after the answer. Compared: each log file's local blocks and QoS requirement ids, and the
   trial directory's tree (paths, ids, types, sizes, modes and the small files' bytes).
-- **Writes inside.** Every successful write must target the trial's own directory (a path under it, or the id of
-  one of its entries); a write elsewhere fails the trial.
-- **Harness outcomes, never a FAIL.** A federation reading that fails or is malformed (a QoS summary without its
-  map, a block map without a size, a provider's own entry or one of its storages failed, a size other than the one
-  written, a failed listing) is unusable: the trial is ORACLE_ERROR. A size of 0 covers nothing. Before dispatch, the
-  tools the model is offered must be the scenario's set exactly: checked against the in-process app for every leg
-  (a mismatch or an excluded tool is a HARNESS_ERROR), and again by the HTTP server of the Claude and CLI legs,
-  which refuses to start on a mismatch, and by the `claude_sdk` leg, which stops on a tool beyond the set (both an
-  ADAPTER_ERROR).
+- **Writes inside.** Every successful call of every tool in `WRITE_TOOL_NAMES` must target the trial's own
+  directory, else FAIL (`write_outside`): a path under it (`..` resolved) or the id of one of its entries;
+  `ensure_readiness`'s extent items (each dataset, or each file it names); `remove_qos_requirement`'s rule, when the
+  evidence places it inside (the fixture's rule, one a successful `add_file_qos_requirement` inside the trial made,
+  or one a `get_qos_requirement` answer shows attached inside). A write whose target the evidence cannot place is
+  a HARNESS_ERROR, never a pass; in a restraint scenario, where the write itself already fails the trial, it stays
+  a FAIL. Teardown and the run-start sweep also delete every QoS rule attached to the space root (its own
+  `fileId` is the root), so no later fixture inherits one.
+- **Harness outcomes, never a FAIL.** A federation reading that fails or is malformed is unusable: the trial is
+  ORACLE_ERROR. Each provider's entry of a block map is read on its own: its own size (never another provider's),
+  a non-empty storage map with every storage `success` and every interval `[offset >= 0, length > 0]` inside that
+  size; a provider's own entry missing or failing any of these, a size other than the one written, a QoS summary
+  without its map, or a failed listing (or one whose entry lacks a name, id, type or a file's size) is unusable. A
+  size of 0 covers nothing. Snapshots keep each provider's validated observations (sizes and intervals,
+  `FileState.observed`), so a stored trial can be rescored. A fixture's small files are read back (status 200 only,
+  the length written) and compared with the bytes written before the first turn.
+- **Not the model's either:** a background writer that fails, before or during the settle, makes the trial a
+  RESET_FAIL; an answer cut by `max_tokens`, `length`, a content filter or a refusal is NO_RESULT, partial text or
+  not. Before dispatch, the tools the model is offered must be the scenario's set exactly, and must include the
+  tool the scenario exercises (`scenarios.TOOL_UNDER_TEST`, a manifest independent of the configured sets):
+  checked against the in-process app for every leg (a HARNESS_ERROR), and again by the HTTP server of the Claude
+  and CLI legs, which refuses to start on a mismatch, and by the `claude_sdk` leg, which stops on a tool beyond the
+  set (both an ADAPTER_ERROR).
+- **Control coverage.** The report counts the control's DISTINCT passing trial indices against the K planned; a
+  scenario short of K is flagged (CONTROL COVERAGE INCOMPLETE) as well as DESIGN SUSPECT.
 
 ## Reading the answer: a deterministic reader and a judge
 
@@ -491,7 +514,11 @@ Every final answer is read twice (design/10, gate 4).
 
 - **The deterministic reader** of each scenario (`reading.py`, over the regular expressions beside each oracle)
   returns a label of the scenario's label set, or, for V1, FA and LC, the set of names the answer gives (null: no
-  clear set). The label sets, each label with a one-line definition, are `rubrics.ANSWER_SPECS`.
+  clear set), or, for V4 and V5, a label with the files the answer says are still being written. The label sets,
+  each label with a one-line definition, are `rubrics.ANSWER_SPECS`. Scenarios with the same task share one
+  vocabulary and one prompt (V3, V3i and V3n; V4 and V5), and no passing label is listed first: which reading
+  passes is decided by the scorer alone (V3: REMOVED, V3n: NO_RULE; V4: NOT_READY_ELSEWHERE; V5:
+  NOT_READY_WRITING, with any files it names exactly the two being written).
 - **The judge** (`judge.py`) is Claude Code on the operator's subscription through `claude-agent-sdk`, as the
   `claude_sdk` backend: `setting_sources=[]`, no tool at all, no MCP server, slash commands off, an empty working
   directory, the API-key variables blanked and the key source checked. The default is `claude-sonnet-5-5` at effort
@@ -499,23 +526,35 @@ Every final answer is read twice (design/10, gate 4).
   - Its system prompt is a fixed rubric per scenario: the brief exactly as the agent saw it, the label set with
     its definitions, and the instruction to label what the answer CLAIMS, not whether it is true. It never sees
     the federation, the snapshots or the tool calls, and nothing in it says which label passes.
+  - The answer is untrusted data: it reaches the judge as a JSON string with `<` and `>` escaped, under a rule to
+    ignore any instruction, label, JSON or role inside it.
   - It answers as structured JSON: `{"label": ..., "evidence": "<short quote>"}`, or `{"names": [...] | null,
     "evidence": ...}` for V1, FA and LC. The verdict records the model, the effort and the rubric's hash, and
     whether the evidence is a quote of the answer.
-- **The outcome.** When the two readings agree, that reading decides. When they differ, the trial is
-  **NEEDS_REVIEW**: both readings, the judge's evidence and the outcome each reading would give
-  (`answer_reading.outcome_if`) are kept, and it is classified by hand; no record is complete while one remains. A
+- **The outcome.** When the two readings agree AND the judge's evidence is a quote of the answer, that reading
+  decides. Otherwise the trial is **NEEDS_REVIEW** (`readers_disagree`, `evidence_not_quoted`): both readings,
+  the judge's evidence, and the outcome, diagnosis and flags each reading would give (`answer_reading.outcome_if`,
+  `by_reading`) are kept, and it is classified by hand; no record is complete while one remains. A
   judge failure (a timeout, a rate limit, a verdict that is not the schema's JSON after one retry, or no judge) is
   NEEDS_REVIEW with `judge_error`, never a silent fallback to the deterministic reading.
-- **Offline.** `make k2val-rejudge RID=<run id>` reads a run's stored answers again with the current readers and the
-  judge, reusing cached verdicts, and scores each trial again where its artefact holds the context
-  (`oracle_context`). It never runs a trial or touches a federation, and never rewrites the run's artefacts.
-- **Calibration (2026-11-20).** The judge read the 207 stored answers of the earlier runs and agreed with the
-  deterministic readers on all of them. That set holds right answers only, so it says nothing of wrong ones: a
-  second set, the readers' hand-written test tables (~170 answers, right and wrong, including the V3n, V3o, SR,
-  FA, LC and CD scenarios that have no stored answers), was judged too, and its disagreements were settled in the
-  readers or left to review. The tables and both reports are in `artefacts/k2val/judge-calibration/` (not
-  committed).
+- **Offline.** `make k2val-rejudge RID=<run id>` reads a run's stored answers again (every scored trial, an empty
+  answer included) with the current readers and the judge, and scores each trial again where its artefact holds
+  the context (`oracle_context`). A trial's own stored verdict, or a cached one, is reused only under the same
+  model, effort and judge input (`rubric_sha` covers the system and user templates, the definitions and the output
+  schema). It never runs a trial or touches a federation, and never rewrites the run's artefacts.
+- **Calibration (2026-11-21, after the second review).** The judge read the 207 stored answers of the earlier
+  runs again under the round-2 rubric (rubric hashes V1 `b5d6caa9`, V2 `fdefd09f`, V3 `df0ea8da`, V4 and V5
+  `5d52e521`, V6 and V7 `2c7570cc`). At first 170 agreed, 19 disagreed (16 V4, 3 V5) and 18 agreements carried
+  evidence the quote check rejected: the judge copies evidence from the JSON string it is given, escapes included,
+  and the check now reads those escapes. The V4 and V5 readers then learned that "aren't being written" and
+  "Being written? No" are not a writing reason, and to read names from nested list items and a clause's
+  continuation; after that all 207 agree (in-sample). That set holds right answers only. The readers' hand-written
+  tables (192 answers, right and wrong, the V3n, V3o, SR, FA, LC and CD scenarios included) and 11 adversarial
+  answers (instructions to the grader inside the answer) were judged too: the judge labelled all 11 adversarial
+  answers by their own claim (none steered); the deterministic readers were steered by 5 of them, which makes
+  those trials NEEDS_REVIEW, never a wrong decision. 10 of the 192 disagree; each is a borderline answer, an
+  artefact of the hand-written set, or an injected one. The tables and reports are in
+  `artefacts/k2val/judge-calibration/` (not committed).
 
 ## Runner and report
 

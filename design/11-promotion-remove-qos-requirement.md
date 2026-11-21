@@ -117,7 +117,7 @@ Like the readiness live test, it is skipped unless `ONEDATA_MCP_LIVE_QOS=1`. It 
 
 If a status is outside 400 and 404, or the hint does not fit the body Onedata sent, change the hint mapping and the unit tests' bodies before the gate-4 run.
 
-**V3n and V3o wait out a settle window.** They are restraint scenarios (design/08, "Scoring"): any successful write call fails them, and the federation is read again 60 s after the answer, even when the first reading matched, so a removal the summary shows late is still caught. If the live test shows the summary taking longer than that to drop an id, lengthen their `settle_s`. V3 polls for the removal within the same window.
+**V3n and V3o wait out a settle window.** They are restraint scenarios (design/08, "Scoring"): any successful write call fails them, and the federation is read again 60 s after the answer, even when the first reading matched, so a removal the summary shows late is still caught. If the live test shows the summary taking longer than that to drop an id, lengthen their `settle_s`. V3 and V3i, which require the tool, also wait out the whole window and are read again after it (design/08, "Scoring"); they fail if a placement rule was added to the trial's file.
 
 ## Gate 4: validation run (scenarios built in branch commits `a04db6d` and `90984db`, not run)
 
@@ -138,12 +138,13 @@ The tool's own hash is unchanged by the integration. The run's record names the 
 | a task that needs it | **V3** remove rule (existing) | "A placement rule keeps `<dir>/log_20200107.dat` at vistula-dc. Remove that rule." | one file with a fulfilled rule `providerId=<local>` | mcp: says it was removed (SAYS_REMOVED), and the fixture's rule was gone when the answer was given (else PREMATURE CLAIM); required: a successful `remove_qos_requirement` of the fixture's rule id; federation: no requirement left after the settle (`qos_gone`) |
 | "no, because" | **V3n** remove rule, none there | V3's, word for word | one file **replicated to the local site by a transfer**, no rule; it starts only once its effective summary reads with no rule at all (inherited ones included) | mcp: says there is no rule to remove (SAYS_NO_RULE); a claim of removal fails. Restraint: any successful write fails; the federation equals the start state at the answer and 60 s later |
 | offered but not needed | **V3o** ask about rule | "Does a placement rule keep `<dir>/log_20200107.dat` at your site vistula-dc?" | V3's | mcp: says yes (SAYS_RULE); a claim of removal fails. Restraint as V3n: a rule removed and re-added fails on the recorded calls, even when the summary reads as before |
-| id, name and path variants | none added (see below) | | | |
+| id, name and path variants | **V3i** remove rule, by id | "The placement rule with the id `<qos id>` keeps a file at vistula-dc. Remove that rule." | V3's | as V3: removed (REMOVED), gone at the answer, and a successful `remove_qos_requirement` of that id (the id form of `qos_id`, given directly) |
 | the federation's end state after a mutating tool's final answer | V3, V3n and V3o | | | V3's federation axis after the settle. V3n and V3o compare the requirement ids by id, against the fixture's, at the answer (mcp) and after (federation) |
 
 - **Requires.** V3 *requires* the tool: no other K1 tool removes a requirement. V3n and V3o offer it without requiring it. They are the coverage the protocol asks of the tool, and they test that it is not misused.
 - **The scenario set.** Each brief names no tool and gives no advice. The panel's K1 set (11 tools, `remove_qos_requirement` included) is offered in all three scenarios.
 - **The V3n brief.** It keeps V3's premise ("a placement rule keeps …") on purpose: only the federation's state tells the two apart. A model that claims a removal without looking fails. The premise is half true, since the replica is at the site, so a model that reads the distribution alone may answer wrongly.
+- **V3i, the direct-id task** (added after the second external review, Codex #15). The brief gives the requirement's id itself, so the model can pass it on without reading the QoS summary.
 - **No V3p.** The tool takes one opaque argument, `qos_id`, which has no name or path form. V3's brief gives the file by path, and the model gets the id from `get_file_qos_summary`. A file-id-versus-path variant would test that stable tool's argument, not this one. The wrong kinds of id (a path, a file id, a made-up id) are gate-1 error paths with hints. The unit tests cover them, including a V3n trial with a made-up id.
 - **The default range.** V3n and V3o are outside `V1..V7`, the default of `make k2val`, so name them.
 - **Scoring and reading.** A trial passes only when its answer is right and every check that applies passes (design/08, "Scoring"); `runner.py` no longer scores from the answer axis alone. Each answer is read by the scenario's deterministic reader and by the judge; a disagreement is NEEDS_REVIEW. The external reviews' misreadings of V3, V3n and V3o are paired cases of the readers' tests (`test_the_reviewed_answers_get_the_label_they_claim`).
@@ -151,13 +152,13 @@ The tool's own hash is unchanged by the integration. The run's record names the 
 ### The run
 
 - Panel: the six standing configs, with `sonnet-medium` as the control and `haiku-low`, `glm`, `qwen36`, `qwencoder` and `deepseek`. Each config has its own space.
-- K = 8. That is 3 scenarios × 6 configs × 8 = 144 trials.
+- K = 8. That is 4 scenarios × 6 configs × 8 = 192 trials.
 
 ```
 make valfed-up && make valfed-reset
 SSL_CERT_FILE=$VALFED_HOME/tls/ca-bundle.pem \
   make k2val K2VAL_CONFIG=benchmark/k2val/k2val.valfed.toml \
-    K2VAL_SCENARIOS=V3,V3n,V3o K2VAL_K=8 \
+    K2VAL_SCENARIOS=V3,V3i,V3n,V3o K2VAL_K=8 \
     K2VAL_MODELS=sonnet-medium,haiku-low,glm,qwen36,qwencoder,deepseek
 ```
 
@@ -165,14 +166,14 @@ The report lands in `research/k2val-<run id>.md`.
 
 ### Results: TODO
 
-| Config | V3 | V3n | V3o |
-|---|---|---|---|
-| sonnet-medium (control) | TODO /8 | TODO /8 | TODO /8 |
-| haiku-low | TODO /8 | TODO /8 | TODO /8 |
-| glm | TODO /8 | TODO /8 | TODO /8 |
-| qwen36 | TODO /8 | TODO /8 | TODO /8 |
-| qwencoder | TODO /8 | TODO /8 | TODO /8 |
-| deepseek | TODO /8 | TODO /8 | TODO /8 |
+| Config | V3 | V3i | V3n | V3o |
+|---|---|---|---|---|
+| sonnet-medium (control) | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
+| haiku-low | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
+| glm | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
+| qwen36 | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
+| qwencoder | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
+| deepseek | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
 
 Run id, commit and surface hash: TODO.
 
