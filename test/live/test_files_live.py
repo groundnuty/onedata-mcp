@@ -361,11 +361,16 @@ async def test_listing_errors_and_an_empty_directory_as_the_model_reads_them(
     assert result.is_error is True, text
     assert "rejected" not in text and "reports nothing" not in text  # no id hint
     assert "valid only as returned in the previous page's nextPageToken" in text
-    # The status and the error id are pinned, so that an unrelated failure (a server error, a
-    # gateway page) cannot pass as "a bad token". The status is the swagger's; the id is
-    # TODO(first live run): see BAD_TOKEN_ERROR_ID.
+    # 25.0 answers a made-up token with 500 internalServerError (seen live, 2026-11-21), the same
+    # status and id as an unrelated server failure. So the token is shown to be the cause by a
+    # control: the same directory lists without a token right before and right after.
+    control_before = await list_children(probe, limit=10, offset=0)
     with pytest.raises(OnedataApiError) as caught:
         await list_children(probe, limit=10, offset=0, token="not-a-token")
+    control_after = await list_children(probe, limit=10, offset=0)
+    assert control_before == control_after and control_before["children"], (
+        "the tokenless control listing must succeed, unchanged, on both sides"
+    )
     status = (caught.value.response or {}).get("status_code")
     print(f"a made-up token: status {status}, error id {caught.value.error_id!r}")
     assert status == BAD_TOKEN_STATUS, f"expected {BAD_TOKEN_STATUS}, got {status}: {caught.value}"

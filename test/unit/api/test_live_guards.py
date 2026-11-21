@@ -213,10 +213,15 @@ def test_the_files_test_pins_its_hosts_and_ignores_proxies(monkeypatch: pytest.M
     assert os.environ["NO_PROXY"] == "*"
 
 
-def test_the_files_bad_token_pin_names_a_client_error_never_a_server_error() -> None:
-    """The made-up pagination token must answer a 4xx: a 5xx cannot satisfy the pin (the swagger
-    lists 400; the error id is a TODO for the first live run)."""
+def test_the_files_bad_token_pin_is_25_0s_contract_with_a_tokenless_control() -> None:
+    """25.0 answers a made-up page token with 500 internalServerError (seen live, 2026-11-21): the
+    same status and id as an unrelated server failure. The pin is that observed contract, and the
+    live test proves the token is the cause by listing the same directory without a token,
+    successfully and unchanged, right before and right after."""
     live = _load("files")
 
-    assert 400 <= live.BAD_TOKEN_STATUS < 500
-    assert live.BAD_TOKEN_ERROR_ID is None or isinstance(live.BAD_TOKEN_ERROR_ID, str)
+    assert live.BAD_TOKEN_STATUS == 500
+    assert live.BAD_TOKEN_ERROR_ID == "internalServerError"
+    source = Path(live.__file__).read_text(encoding="utf-8")
+    assert "control_before = await list_children(probe" in source
+    assert "control_after = await list_children(probe" in source
