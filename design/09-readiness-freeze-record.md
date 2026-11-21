@@ -100,3 +100,12 @@ Two bugs only the live run could show were fixed before the freeze. Onedata 25.0
     - it reported ready only after the tool did.
   - Recorded only: one model twice passed an existing tool's list argument as a JSON string. It was rejected by the schema, and the model recovered.
 - **Changes made to the readiness tools because of panel trials: none.**
+
+## Note added 2026-11-21: re-scoring the stored wave-1 trials with the hardened harness
+
+After this freeze, the validation harness was hardened following external reviews (`design/10-tool-maturity.md`, gate 4: a trial passes only when the answer and every applicable federation check pass; writes must stay inside the trial's own data; each answer is also read by a rubric judge). The stored wave-1 trials were re-scored offline with those rules. The frozen tools and the results above are unchanged, except for two trials:
+
+- **Qwen3.6-35B-A3B, V7, trial 2:** PASS becomes **FAIL**. Its `ensure_readiness` call named the whole scratch space as the extent, so the hold it placed reached beyond the trial's own data. The answer and the readiness verdict were right, and this is not a readiness violation; the original harness had no containment check.
+- **GLM-5.3-Flash, V1, trial 2:** PASS becomes **ORACLE_ERROR**. Its federation snapshots contain distribution read timeouts, which the hardened harness treats as unusable evidence instead of a state.
+
+The judge and the deterministic readers agree on all 207 stored answers. Readiness violations and premature ready or done claims remain **0**.
