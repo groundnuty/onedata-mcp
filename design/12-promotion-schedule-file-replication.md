@@ -231,6 +231,21 @@ One frontier model (Gemini, gemini-4-argon-high) reviewed the package as of bran
 
 The harness findings (1, 5, 7) concern `benchmark/k2val/` and `test/unit/k2val/`, which this branch no longer changes; the gate-4 text above describes the scenarios as built here, before those fixes.
 
+### Round 2
+
+Two further external reviews (Codex and Gemini, round 2) of the whole promotion package found defects that the first round's fixes left or introduced. This list is the tool-level part, fixed in `fix/r2-tools` (code and unit tests only: no container, live test or model call was run). The harness items of both reviews (`benchmark/k2val/`, `test/unit/k2val/`) are not changed here and are not claimed as resolved by this list.
+
+| Review item | Finding | Status |
+|---|---|---|
+| Gemini 7.1 | The hints bypassed `bound_message` and `redact_endpoints`, so a message could pass 2000 characters or echo a configured host | fixed, `670fead`: every hint, at all three raise sites (the path lookup's permission hint, the POST's hints, the path lookup's 5xx hint), is redacted and bounded together with Onedata's own text |
+| Gemini 7.2 | The target was matched against provider names that redaction had already changed, and `(no name)` matched itself | fixed, `670fead`: the raw `providerName` is compared (a name that redaction would change still gets "Pass its id"); a provider with no name is never matched; names are redacted only where shown |
+| Gemini 7.3 | Not-found and forbidden hints were not limited to 4xx; for a file given as an id, any 404 blamed the file and hid the providers | fixed, `670fead`: every hint is for a 4xx status only (a 5xx passes unchanged, with no provider request); a 404 for an id that names no file field points at **both** arguments and lists the providers; the file is blamed only when `details.key` names the file field. A path's 404 still points at the target, as before |
+| Codex 12 (the lookup) | A 5xx with `enoent` on the path lookup read `Path ... not found` | fixed for this tool, `670fead`: it gets the uncertain hint (the provider failed; the file may also not exist). The shared `get_file_id`, which the stable path-taking tools use, keeps its mapping: changing it is a change to stable tools' error hints and needs their own K=3 re-run (design/10). **Open for those tools** |
+| Codex 13; Gemini 8.1 and 8.2 | Host redaction | fixed once for every tool, `c32a67f` (see design/11, Round 2). The provider names in a hint are shown as Onedata gives them, except that a configured host or a URL inside one is masked |
+| Gemini 8.3 | A 3xx on `POST /transfers` was a success | fixed, `c32a67f` (any status outside 2xx is an error) |
+| Codex 14 | The transfer live test only checked host names | fixed, `673a2c6`: it uses the shared loopback guard (every resolved address loopback, resolution pinned, proxies ignored) and checks and pins the source provider too |
+| Codex 1–11, 15; Gemini 1–6, 9, 10 | Harness | not changed here |
+
 ## Decisions for the operator
 
 1. **`destructiveHint: true`.** A replication only adds a replica. By the MCP definition it is additive, so the hint would be `false`. It is left `true`, as on `add_file_qos_requirement`, which is stable and also additive. Changing it changes the annotations, and clients may then run the tool without asking. Your call.

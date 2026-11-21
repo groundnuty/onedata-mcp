@@ -177,6 +177,19 @@ An external frontier-model review of this package (the three file tools, their s
 
 The review also noted, without a finding: the cap of 64 names permits batching `xattr.<key>` names; `offset` 0 to 500 matches the exposed arguments; with a token no offset is sent. The pinned swagger, the live 25.0 behaviour and conformance were not verified by the reviewer either.
 
+### Round 2
+
+Two further external reviews (Codex and Gemini, round 2) of the whole promotion package found defects that the first round's fixes left or introduced. This list is the tool-level part, fixed in `fix/r2-tools` (code and unit tests only: no container, live test or model call was run). The harness items of both reviews (`benchmark/k2val/`, `test/unit/k2val/`) are not changed here and are not claimed as resolved by this list.
+
+| Review item | Finding | Status |
+|---|---|---|
+| Codex 12 | A 500 with `enoent` on the listing or on the path lookup read as a missing target; a 5xx with `enotdir` read as "not a directory" | fixed, `9658ffa`: those diagnoses need a 4xx status; a 5xx that mentions a missing item gets the uncertain hint; any other 5xx passes unchanged |
+| Codex 13; Gemini 8.1 | The heuristic masked dotted real text in error messages | fixed, `c32a67f` (design/11, Round 2) |
+| Gemini 8.3 | A 3xx was a success | fixed, `c32a67f` |
+| Codex 14 | The live listing test passed any `*.datahub.test` name | fixed, `673a2c6`: the shared loopback guard and proxy isolation |
+| Codex, earlier file #11 | A made-up pagination token passed on any error, a server error included | fixed, `673a2c6`: it must answer the swagger's 400 as a structured Onedata error (not a 5xx, not a gateway page). The error id is **not recorded** by the swagger: `BAD_TOKEN_ERROR_ID` is a named constant, `TODO(first live run)`, to be set from what the first run prints |
+| Codex 1–11, 15; Gemini 1–6, 9, 10 | Harness (the repeated-token listing hang in `children()` included) | not changed here |
+
 ## Gate 5: record
 
 This file. To complete it: fill in the TODOs of gates 2 to 4; then, in the same PR, move `list_children` from `EXPERIMENTAL` to `STABLE` in `onedata_mcp/tool_maturity.py`, change its tier in README's tool table, and update `test/unit/test_tool_maturity.py`, which lists it as experimental.

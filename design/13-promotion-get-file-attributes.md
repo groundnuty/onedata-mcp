@@ -194,6 +194,18 @@ An external frontier-model review of this package (the three file tools, their s
 
 The review also noted, without a finding: the cap of 64 names permits batching `xattr.<key>` names; `offset` 0 to 500 matches the exposed arguments; with a token no offset is sent. The pinned swagger, the live 25.0 behaviour and conformance were not verified by the reviewer either.
 
+### Round 2
+
+Two further external reviews (Codex and Gemini, round 2) of the whole promotion package found defects that the first round's fixes left or introduced. This list is the tool-level part, fixed in `fix/r2-tools` (code and unit tests only: no container, live test or model call was run). The harness items of both reviews (`benchmark/k2val/`, `test/unit/k2val/`) are not changed here and are not claimed as resolved by this list.
+
+| Review item | Finding | Status |
+|---|---|---|
+| Codex 12 | A file lookup answering 500 with `enoent` became `Path ... not found`; a 5xx could also get "not allowed", "does not support the space" or "a component is not a directory" | fixed, `9658ffa`: forbidden, not-found, `enotdir` and unsupported-space diagnoses need a 4xx status. A 5xx that mentions a missing item gets "the provider failed, and the target may also not exist; that does not show which", for an id and for a path (an `OnedataApiError`, not `FileNotFoundError`); any other 5xx passes unchanged |
+| Codex 13; Gemini 8.1 | The heuristic read an attribute name such as `xattr.user.id` in an error as a host and replaced it | fixed, `c32a67f`: the heuristic is removed (see design/11, Round 2, with its residual) |
+| Gemini 8.3 | A 3xx was a success | fixed, `c32a67f` |
+| Codex 14 | The live file test passed any `*.datahub.test` name, even one resolving off-machine | fixed, `673a2c6`: the shared loopback guard and proxy isolation |
+| Codex 1–11, 15; Gemini 1–6, 9, 10 | Harness | not changed here |
+
 ## Gate 5: record
 
 This file. To complete it:
