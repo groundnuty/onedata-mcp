@@ -123,6 +123,15 @@ class VerdictCache:
             self._rows[key] = row
 
 
+def _requoted(verdict: JudgeVerdict, answer: str) -> JudgeVerdict:
+    """A reused verdict, its evidence checked against the answer by the current rule."""
+    from benchmark.k2val.judge import evidence_quoted
+
+    if verdict.error is None:
+        verdict.evidence_quoted = evidence_quoted(verdict.evidence, answer)
+    return verdict
+
+
 async def judge_trials(
     trials: list[StoredTrial],
     judge: Judge | None,
@@ -146,12 +155,12 @@ async def judge_trials(
         local = local_site(t, by_source)
         own = stored_verdict(t.row)
         if own is not None and (own.model, own.effort) == (conf.model, conf.effort):
-            out[t.key] = own
+            out[t.key] = _requoted(own, t.answer)
             return
         key = cache_key(sid, brief, local, t.answer, conf)
         cached = cache.get(key)
         if cached is not None:
-            out[t.key] = cached
+            out[t.key] = _requoted(cached, t.answer)
             return
         if judge is None:
             out[t.key] = JudgeVerdict(scenario_id=sid, error="not judged (no cached verdict)")

@@ -700,24 +700,83 @@ def _days_in(text: str) -> set[str]:
     return {d for d in days if 1 <= int(d) <= 31}
 
 
+# A negation of the phrase: within the six words before it ("they aren't being written",
+# "not that they are incomplete or being written"), not a "Not ready:" or "No," before it.
+_WRITING_NEG = re.compile(
+    r"(?:\b(?:not|none|neither|nor|nothing|never|without)\b|\bno\b(?!\s*[,.:;!—–-])|n['’]t\b)"
+    # ... but not "not ready" / "not complete": a verdict on the files, not on the writing; nor
+    # an answer's opening "No," (above)
+    r"(?!\W*(?:yet\W+)?(?:ready|complete|readable|available|fully|local)\b)\W*"
+    r"(?:[\w.`-]+\W+){0,5}$",
+    re.I,
+)
+_WRITING_CLAUSE = re.compile(r";|\.\s|,\s+(?:but|so|and)\s|\s(?:but|while|whereas)\s", re.I)
+
+
+_ANSWERED_NO = re.compile(r"^\W*\?\W*(?:no|none)\b", re.I)
+# Another site's or a finished file's clause ends a continuation of names.
+_NOT_WRITING_ANY_MORE = re.compile(
+    r"\bcomplete\b|\bcompleted\b|\banother\b|\bother (?:site|provider)\b|\belsewhere\b"
+    r"|\bat_other_site\b|\bremote(?:ly)?\b|\bavailable\b|\bfinished\b",
+    re.I,
+)
+
+
+def _writing_match(clause: str) -> bool:
+    """The clause says files ARE still being written: the phrase, with no negation before it
+    in its clause and not answered "no" ("Being written? No")."""
+    m = _BEING_WRITTEN.search(clause)
+    return bool(
+        m
+        and not _WRITING_NEG.search(clause[: m.start()])
+        and not _ANSWERED_NO.match(clause[m.end() :])
+    )
+
+
+def _writing_clauses(line: str) -> list[str]:
+    """The clauses of a line that say files are still being written, each with the clauses that
+    continue it on the line (a list of names after ': '), up to one about another site or a
+    finished file."""
+    clauses = [c for c in _WRITING_CLAUSE.split(line) if c.strip()]
+    out = []
+    for k, clause in enumerate(clauses):
+        if not _writing_match(clause):
+            continue
+        text = clause
+        for more in clauses[k + 1 :]:
+            if _writing_match(more) or _NOT_WRITING_ANY_MORE.search(more):
+                break
+            text += " " + more
+        out.append(text)
+    return out
+
+
+def says_writing(answer: str) -> bool:
+    return any(_writing_clauses(_plain(ln)) for ln in answer.splitlines())
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" \t"))
+
+
 def writing_names(answer: str) -> frozenset[str]:
     """The files an answer says are still being written: the names (or January dates) in a
-    clause that says so, or in the list that follows a line saying so and ending in ':'."""
-    lines = [_plain(ln) for ln in answer.splitlines()]
+    clause that says so, and in the list items under a line that says so (items indented
+    below it, or, under a heading line ending in ':', the items that follow it). Bullets and
+    indents are read from the raw lines (emphasis marks are bullets too)."""
+    raw = answer.splitlines()
     days: set[str] = set()
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if _BEING_WRITTEN.search(line):
-            for clause in re.split(r";|\.\s|\s(?:but|while|whereas)\s", line):
-                if _BEING_WRITTEN.search(clause):
-                    days |= _days_in(clause)
-            if line.rstrip().endswith(":"):
-                j = i + 1
-                while j < len(lines) and _ITEM.match(lines[j]):
-                    days |= _days_in(lines[j])
-                    j += 1
-        i += 1
+    for i, line in enumerate(raw):
+        clauses = _writing_clauses(_plain(line))
+        if not clauses:
+            continue
+        for clause in clauses:
+            days |= _days_in(clause)
+        heading = not _ITEM.match(line) and _plain(line).rstrip().endswith(":")
+        for item in raw[i + 1 :]:
+            if not _ITEM.match(item) or (not heading and _indent(item) <= _indent(line)):
+                break
+            days |= _days_in(_plain(item))
     return frozenset(f"log_202001{d}.dat" for d in days)
 
 
@@ -733,7 +792,7 @@ def read_check(answer: str, local: str, owner: str) -> tuple[str, frozenset[str]
         return "SAYS_READY", names
     if not _says_not_ready(text):
         return "OTHER", names
-    if _BEING_WRITTEN.search(text):
+    if says_writing(answer):
         return "NOT_READY_WRITING", names
     if other_site.search(text):
         return "NOT_READY_ELSEWHERE", names

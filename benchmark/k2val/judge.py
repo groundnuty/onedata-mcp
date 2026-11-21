@@ -185,9 +185,27 @@ def evidence_quoted(evidence: str, answer: str) -> bool:
     if not answer.strip():
         return not evidence.strip()
     flat_answer = _flat(answer)
-    parts = [_flat(p).strip(" .,;:\"'“”") for p in _ELLIPSIS.split(evidence)]
-    parts = [p for p in parts if p]
-    return bool(parts) and all(p in flat_answer for p in parts)
+    for candidate in (evidence, _unescaped(evidence)):
+        parts = [_flat(p).strip(" .,;:\"'“”") for p in _ELLIPSIS.split(candidate)]
+        parts = [p for p in parts if p]
+        if parts and all(p in flat_answer for p in parts):
+            return True
+    return False
+
+
+def _unescaped(evidence: str) -> str:
+    """The evidence as the answer's text, when the judge copied it from the JSON string it was
+    given (with `\\n`, `\\"` or `\\u003c` escapes)."""
+    try:
+        return json.loads(f'"{evidence}"')
+    except ValueError:
+        return (
+            evidence.replace("\\n", "\n")
+            .replace("\\t", "\t")
+            .replace('\\"', '"')
+            .replace("\\u003c", "<")
+            .replace("\\u003e", ">")
+        )
 
 
 # ---------------------------------------------------------------------------------------------

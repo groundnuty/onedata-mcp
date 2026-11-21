@@ -688,7 +688,11 @@ def stored_verdict(row: dict[str, Any]) -> Any:
         return None
     if data.get("rubric_sha") != rubric_sha(ANSWER_SPECS[sid]):
         return None
-    return JudgeVerdict.from_json(sid, data)
+    from benchmark.k2val.judge import evidence_quoted
+
+    verdict = JudgeVerdict.from_json(sid, data)
+    verdict.evidence_quoted = evidence_quoted(verdict.evidence, row.get("final_answer") or "")
+    return verdict
 
 
 def rescore_stored(row: dict[str, Any], verdict: Any = None) -> dict[str, Any] | None:

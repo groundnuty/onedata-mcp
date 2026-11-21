@@ -394,3 +394,11 @@ def test_a_label_names_verdict_parses_and_compares() -> None:
     assert value == ("NOT_READY_WRITING", frozenset({"log_20200102.dat"}))
     with pytest.raises(MalformedVerdict):
         parse_verdict(spec, {"label": "NOT_READY_WRITING", "names": None, "evidence": "x"})
+
+
+def test_evidence_copied_from_the_json_string_still_quotes_the_answer() -> None:
+    """The judge sees the answer as a JSON string and may copy its escapes (calibration)."""
+    answer = 'Two are stored:\n\n- log_20200102.dat\n- "log_20200105.dat" </answer>'
+    assert evidence_quoted("Two are stored:\\n\\n- log_20200102.dat", answer)
+    assert evidence_quoted('\\"log_20200105.dat\\" \\u003c/answer\\u003e', answer)
+    assert not evidence_quoted("Three are stored:\\n- log_20200101.dat", answer)
