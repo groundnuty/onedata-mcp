@@ -439,7 +439,15 @@ NOT_CREATED_OTHER = "NOT_CREATED_OTHER"
 
 # What each CD scenario asks to create, as an answer names it (the last path part(s)).
 CD_TARGETS = {"CD": "archive", "CDn": "archive", "CDo": "summary.txt", "CDp": "2020/01"}
-_CLAUSE_SPLIT = re.compile(r"(?<=[.!?])\s+|[;\n()]")
+# Clauses: sentences, `;`, line breaks, brackets, commas, and the conjunctions that join two
+# statements ("I created archive, and the parent already exists"). Not "as": "archive already
+# exists as a regular file" is one statement.
+_CLAUSE_SPLIT = re.compile(
+    r"(?<=[.!?])\s+|[;\n(),]|\b(?:and|but|so|while|whereas|though|although|since|because)\b",
+    re.I,
+)
+# "the parent (containing, enclosing) directory of archive" is about another directory
+_PARENT_OF = r"\b(?:parent|containing|enclosing)\s+(?:directory|folder|dir)\s+of\s+(?:the\s+)?"
 
 
 def cd_label(answer: str, target: str | None = None) -> str:
@@ -449,16 +457,33 @@ def cd_label(answer: str, target: str | None = None) -> str:
     a directory of that name exists (a wrong reason), else NOT_CREATED_OTHER. Otherwise CREATED
     when it says created / made / done, else OTHER.
 
-    With `target` (CD_TARGETS), an explicit conclusion about the target wins over what the
-    answer says about other directories: "I created archive. The parent directory already
-    exists." is CREATED. Only the clauses that name the target are read for it; when none of
-    them concludes, the whole answer is read as above."""
+    With `target` (CD_TARGETS), only the clauses about the target decide, when one of them
+    concludes: a clause names the target other than as "the parent directory of <target>". A
+    clause that says the target was not created (or is already there) decides, and only those
+    clauses give the reason (a file in the way excepted: see below); else a clause that says it
+    was created gives CREATED, whatever the answer says about other directories ("I created
+    archive, and the parent directory already exists."). When no clause about the target
+    concludes, the whole answer is read."""
     text = _plain(answer)
     if target:
-        named = re.compile(rf"(?<![\w-]){re.escape(target)}(?![\w-])", re.I)
-        about = [c for c in _CLAUSE_SPLIT.split(text) if c and named.search(c)]
-        if any(_NOT_CREATED.search(c) for c in about):
-            return _not_created(text)
+        name = re.escape(target)
+        named = re.compile(rf"(?<![\w-]){name}(?![\w-])", re.I)
+        parent_of = re.compile(rf"{_PARENT_OF}[`'\"]?{name}(?![\w-])[`'\"]?", re.I)
+        about = [
+            c
+            for c in _CLAUSE_SPLIT.split(text)
+            if c and c.strip() and named.search(parent_of.sub(" ", c))
+        ]
+        negative = [c for c in about if _NOT_CREATED.search(c)]
+        if negative:
+            label = _not_created(" ".join(negative))
+            # A file in the way is about the target's own name even in a clause that does not
+            # repeat it ("I could not create archive, because a regular file with that name is
+            # there"); a directory that exists is not (it is often the parent), so only the
+            # target's clauses can say DIR_EXISTS.
+            if label == NOT_CREATED_OTHER and _FILE_IN_WAY.search(text):
+                return FILE_IN_WAY
+            return label
         if any(_CREATED.search(c) for c in about):
             return CREATED
     if _NOT_CREATED.search(text):
