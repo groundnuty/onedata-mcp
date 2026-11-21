@@ -10,6 +10,7 @@ import re
 import tomllib
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -23,7 +24,7 @@ from benchmark.k2val.fixtures import (
     FixtureSpec,
 )
 from benchmark.k2val.oracles import ORACLES
-from benchmark.k2val.runner import run_trial
+from benchmark.k2val.runner import _tools_for, run_trial
 from benchmark.k2val.scenarios import (
     SCENARIOS,
     SR_DAY,
@@ -91,6 +92,18 @@ def test_the_full_k1_set_is_offered_so_sr1_requires_the_tool_by_its_oracle() -> 
     make the copy is a placement rule, which SR1's brief rules out and its oracle fails."""
     assert all(SCENARIOS[sid].tier == "K1" for sid in SR)
     assert {"schedule_file_replication", "add_file_qos_requirement"} <= set(K1_TOOLS)
+
+
+@pytest.mark.parametrize("sid", ["SR1", "SR1i"])
+def test_the_block_map_tool_is_offered_where_a_whole_claim_must_be_read_from_it(
+    cfg, sid: str
+) -> None:
+    """Their oracle fails a claim of completion with no successful get_file_distribution after
+    the last schedule, so the tool must be in the offered set (here the panel's K1 set)."""
+    offered = _tools_for(SimpleNamespace(cfg=cfg), SCENARIOS[sid])
+    assert "get_file_distribution" in offered
+    assert offered == frozenset(K1_TOOLS)
+    assert "get_file_distribution" not in SCENARIOS[sid].excluded_tools
 
 
 def test_the_settles() -> None:
@@ -240,6 +253,29 @@ async def test_sr1_done_said_right_after_scheduling_is_a_premature_claim(
     assert art.outcome == "FAIL"
     assert "premature_claim" in art.flags and "PREMATURE CLAIM" in art.oracle_diagnosis
     assert art.oracle_federation_pass is True  # it did arrive
+
+
+@pytest.mark.asyncio
+async def test_sr1_whole_said_without_reading_the_blocks_after_scheduling_fails(
+    cfg, api, fed, clock, tmp_path, sr_app
+):
+    """The copy is whole when the answer is given, and the claim is true; but the agent never
+    read the file's block map after scheduling (it read its attributes, not its distribution)."""
+
+    async def steps(app, path):
+        await _copy(app, path)
+        fed.tick()
+        await app.call_tool("get_file_attributes", {"file_id_or_path": path})
+        return "The copy is complete: the file is now fully stored at vistula-dc."
+
+    deps = make_deps(cfg, api, clock, tmp_path, scripted(steps), app=sr_app)
+
+    art = await run_trial(deps, cfg.models["glm"], small("SR1"), 0)
+
+    assert art.outcome == "FAIL"
+    assert "unread_claim" in art.flags and "premature_claim" not in art.flags
+    assert "completion claimed without reading the target's block map" in art.oracle_diagnosis
+    assert art.oracle_federation_pass is True
 
 
 @pytest.mark.asyncio

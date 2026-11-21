@@ -15,8 +15,9 @@ Kinds of file (design/08, Fixtures):
   and the file is locally covered.
 - Any kind but `s2` may be larger than the standard 256 KiB (`FileSpec.size`): such a file is
   written in `PART`-sized writes at explicit offsets, so memory stays bounded. The copy scenarios
-  of `schedule_file_replication` (SR1, design/12) use `LARGE_FILE_SIZE`, so that a transfer is
-  still running when a model answers and a premature "done" can be seen.
+  of `schedule_file_replication` (SR1, design/12) use `LARGE_FILE_SIZE`, which takes a transfer
+  a moment (about 2 s on an unloaded 25.0 federation); SR1's oracle therefore asks that a "whole"
+  claim be read off the block map after scheduling, not that the transfer be seen running.
 - `s2`: being written, mirroring the preallocated mode of the reference ingest tool (its
   `preallocate` and `ingestsparse` steps): create at the owner; extend with an EMPTY write at the
   final size (`PUT ...?offset=<size>`, which on 25.0 sets the size and writes no block); write a
@@ -39,8 +40,10 @@ FILE_SIZE = 256 * 1024
 # list_children's largest `limit` (onedata_mcp/modules/files.py): LCp's names must lie beyond it.
 PAGE_LIMIT_MAX = 100
 CHUNK = 64 * 1024
-# A file a transfer takes long enough over to be seen in transfer (design/12, gate 4). To be
-# calibrated by the live test's time to whole (test/live/test_transfer_live.py) before a run.
+# SR1's file (design/12, gate 4). Calibrated by the live test (test/live/test_transfer_live.py) on
+# 2026-11-21, unloaded: whole 2.06 s after scheduling, about 62 MiB/s. Kept at 128 MiB by decision:
+# "in transfer" is rarely observable, so SR1 and SR1i fail a "whole" claim not read off the block
+# map after scheduling instead (design/12, "A whole claim is read from the blocks").
 LARGE_FILE_SIZE = 128 * 1024 * 1024
 # A large file's writes. Small enough to finish within the REST client's default 5 s timeout on
 # a CPU-capped provider; if a live write still times out, lower it.

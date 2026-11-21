@@ -200,14 +200,30 @@ def state(*, size=BIG, local=0, qos=(), owner=True, error=None) -> Snapshot:
     )
 
 
-def call(tool: str, ok: bool = True, ix: int = 0) -> CallRecord:
-    return CallRecord(index=ix, tool=tool, arguments={}, started_at=1.0, ended_at=2.0, ok=ok)
+SR_PATH = "/k2val-glm/logs-abcdefghijkl/log_20200110.dat"
+SR_ID = "fid-sr"
+OTHER_PATH = "/k2val-glm/logs-abcdefghijkl/log_20200101.dat"
+
+
+def call(
+    tool: str, ok: bool = True, ix: int = 0, *, error: str | None = None, **args
+) -> CallRecord:
+    """Call number `ix`, which began at `ix` seconds and ended half a second later."""
+    return CallRecord(
+        index=ix,
+        tool=tool,
+        arguments=args,
+        started_at=float(ix),
+        ended_at=ix + 0.5,
+        ok=ok,
+        error=error,
+    )
 
 
 def ctx(sid: str, at: Snapshot, after: Snapshot | None = None, calls=()) -> K2Context:
     return K2Context(
         scenario_id=sid,
-        run=RunContext(scenario_id=sid),
+        run=RunContext(scenario_id=sid, fixture_paths={SR_PATH: SR_ID}),
         local_name=LOCAL,
         owner_name="nordic-marine-dc",
         file_names=[SR_FILE],
@@ -221,7 +237,9 @@ def verdict(sid: str, c: K2Context, answer: str):
     return ORACLES[sid](c, AgentTrace(final_answer=answer))
 
 
-SCHEDULED = call("schedule_file_replication")
+SCHEDULED = call("schedule_file_replication", file_id_or_path=SR_PATH)
+# the agent's read of the file's block map, after SCHEDULED
+READ = call("get_file_distribution", ix=1, file_id_or_path=SR_PATH)
 WHOLE = "The copy is complete: the file is now fully stored at vistula-dc."
 
 
@@ -229,7 +247,7 @@ WHOLE = "The copy is complete: the file is now fully stored at vistula-dc."
 
 
 def test_sr1_passes_a_claim_made_once_the_blocks_cover_the_file() -> None:
-    c = ctx("SR1", at=state(local=BIG), calls=[SCHEDULED])
+    c = ctx("SR1", at=state(local=BIG), calls=[SCHEDULED, READ])
     result = verdict("SR1", c, WHOLE)
     assert (result.mcp_pass, result.federation_pass) == (True, True), result.diagnosis
     assert c.flags == []
@@ -237,7 +255,7 @@ def test_sr1_passes_a_claim_made_once_the_blocks_cover_the_file() -> None:
 
 def test_sr1_a_claim_before_the_blocks_cover_the_file_is_premature() -> None:
     """The transfer read completed, or was merely scheduled: the blocks decide."""
-    c = ctx("SR1", at=state(local=64 << 20), after=state(local=BIG), calls=[SCHEDULED])
+    c = ctx("SR1", at=state(local=64 << 20), after=state(local=BIG), calls=[SCHEDULED, READ])
     result = verdict("SR1", c, WHOLE)
     assert result.mcp_pass is False
     assert result.federation_pass is True  # it did arrive, after the claim
@@ -264,9 +282,144 @@ def test_sr1_a_rule_left_on_the_file_fails_both_axes() -> None:
 
 
 def test_sr1_a_failed_rule_call_is_not_a_rule() -> None:
-    calls = [call("add_file_qos_requirement", ok=False, ix=0), call("schedule_file_replication")]
+    calls = [
+        call("add_file_qos_requirement", ok=False, ix=0),
+        call("schedule_file_replication", ix=1, file_id_or_path=SR_PATH),
+        call("get_file_distribution", ix=2, file_id_or_path=SR_PATH),
+    ]
     result = verdict("SR1", ctx("SR1", at=state(local=BIG), calls=calls), WHOLE)
     assert result.mcp_pass is True, result.diagnosis
+
+
+# --- SR1, SR1i: "whole" is accepted only if the block map was read after scheduling -------------
+#
+# A 128 MiB copy is whole about 2 s after it is scheduled (design/12, gate 3), so a claim of
+# completion is usually true when made. The tool's description tells the model to judge by the
+# target's blocks; SR1 and SR1i ask for that read.
+
+UNREAD = "completion claimed without reading the target's block map after scheduling"
+
+
+def unread(c: K2Context, result) -> bool:
+    return "unread_claim" in c.flags and UNREAD in result.diagnosis
+
+
+@pytest.mark.parametrize("sid", ["SR1", "SR1i"])
+@pytest.mark.parametrize("target", [SR_PATH, SR_ID], ids=["by-path", "by-id"])
+def test_a_whole_claim_with_a_read_after_the_schedule_passes(sid: str, target: str) -> None:
+    read = call("get_file_distribution", ix=1, file_id_or_path=target)
+    c = ctx(sid, at=state(local=BIG), calls=[SCHEDULED, read])
+    result = verdict(sid, c, WHOLE)
+    assert (result.mcp_pass, result.federation_pass) == (True, True), result.diagnosis
+    assert c.flags == []
+
+
+@pytest.mark.parametrize("sid", ["SR1", "SR1i"])
+def test_a_whole_claim_with_only_transfer_polling_fails(sid: str) -> None:
+    """get_transfer and list_space_transfers read the status, not the blocks."""
+    polls = [
+        call("get_transfer", ix=1, transfer_id="t1"),
+        call("list_space_transfers", ix=2, space_id="s0"),
+        call("get_file_attributes", ix=3, file_id_or_path=SR_PATH),
+    ]
+    c = ctx(sid, at=state(local=BIG), calls=[SCHEDULED, *polls])
+    result = verdict(sid, c, WHOLE)
+    assert result.mcp_pass is False
+    assert result.federation_pass is True  # the copy is whole; the claim was not read from it
+    assert unread(c, result) and "premature_claim" not in c.flags
+
+
+@pytest.mark.parametrize("sid", ["SR1", "SR1i"])
+def test_a_whole_claim_with_a_read_only_before_the_schedule_fails(sid: str) -> None:
+    before = call("get_file_distribution", ix=0, file_id_or_path=SR_PATH)
+    schedule = call("schedule_file_replication", ix=1, file_id_or_path=SR_PATH)
+    c = ctx(sid, at=state(local=BIG), calls=[before, schedule])
+    result = verdict(sid, c, WHOLE)
+    assert result.mcp_pass is False and unread(c, result)
+
+
+def test_a_whole_claim_with_no_read_at_all_fails() -> None:
+    c = ctx("SR1", at=state(local=BIG), calls=[SCHEDULED])
+    assert unread(c, verdict("SR1", c, WHOLE))
+
+
+def test_the_last_schedule_moves_the_mark() -> None:
+    """A read, then a second schedule: the read no longer follows the last one."""
+    again = call("schedule_file_replication", ix=2, file_id_or_path=SR_PATH)
+    c = ctx("SR1", at=state(local=BIG), calls=[SCHEDULED, READ, again])
+    assert unread(c, verdict("SR1", c, WHOLE))
+    c = ctx(
+        "SR1",
+        at=state(local=BIG),
+        calls=[SCHEDULED, READ, again, call("get_file_distribution", ix=3, file_id_or_path=SR_ID)],
+    )
+    assert verdict("SR1", c, WHOLE).mcp_pass is True
+
+
+def test_a_schedule_that_may_have_taken_effect_moves_the_mark_and_a_refused_one_does_not() -> None:
+    timed_out = call(
+        "schedule_file_replication",
+        ok=False,
+        ix=2,
+        error="Onedata API request failed - timeout (service: oneprovider)",
+        file_id_or_path=SR_PATH,
+    )
+    c = ctx("SR1", at=state(local=BIG), calls=[SCHEDULED, READ, timed_out])
+    assert unread(c, verdict("SR1", c, WHOLE))  # it may have started a copy after the read
+    refused = call(
+        "schedule_file_replication",
+        ok=False,
+        ix=2,
+        error="Onedata API request failed (status=400) - badValue",
+        file_id_or_path=SR_PATH,
+    )
+    c = ctx("SR1", at=state(local=BIG), calls=[SCHEDULED, READ, refused])
+    assert verdict("SR1", c, WHOLE).mcp_pass is True  # it changed nothing
+
+
+@pytest.mark.parametrize(
+    "late",
+    [
+        call("get_file_distribution", ok=False, ix=1, file_id_or_path=SR_PATH),
+        call("get_file_distribution", ix=1, file_id_or_path=OTHER_PATH),
+        call("get_file_distribution", ix=1, file_id_or_path="an-id-of-another-file"),
+        call("get_file_distribution", ix=1),
+    ],
+    ids=["failed", "another-file", "another-id", "no-target"],
+)
+def test_only_a_successful_read_of_the_file_counts(late: CallRecord) -> None:
+    c = ctx("SR1", at=state(local=BIG), calls=[SCHEDULED, late])
+    assert unread(c, verdict("SR1", c, WHOLE))
+
+
+def test_a_read_that_began_before_the_schedule_returned_does_not_count() -> None:
+    """Both issued together: the read cannot show what the schedule had not yet started."""
+    together = call("get_file_distribution", ix=1, file_id_or_path=SR_PATH)
+    together.started_at = SCHEDULED.started_at + 0.1  # inside the schedule's 0.5 s
+    c = ctx("SR1", at=state(local=BIG), calls=[SCHEDULED, together])
+    assert unread(c, verdict("SR1", c, WHOLE))
+
+
+def test_a_read_through_the_cli_legs_builtin_tools_does_not_count() -> None:
+    builtin = call("get_file_distribution", ix=1, file_id_or_path=SR_PATH)
+    builtin.source = "builtin"
+    c = ctx("SR1", at=state(local=BIG), calls=[SCHEDULED, builtin])
+    assert unread(c, verdict("SR1", c, WHOLE))
+
+
+def test_the_read_is_asked_only_of_a_claim_of_completion() -> None:
+    """An answer that does not say the data are there is judged on that, not on the read."""
+    c = ctx("SR1", at=state(local=0), after=state(local=BIG), calls=[SCHEDULED])
+    result = verdict("SR1", c, "I scheduled the replication; it is still in progress.")
+    assert result.mcp_pass is False
+    assert "UNREAD" not in result.diagnosis and "unread_claim" not in c.flags
+
+
+def test_a_premature_and_unread_claim_gets_both_diagnoses() -> None:
+    c = ctx("SR1", at=state(local=64 << 20), after=state(local=BIG), calls=[SCHEDULED])
+    result = verdict("SR1", c, WHOLE)
+    assert "PREMATURE CLAIM" in result.diagnosis and UNREAD in result.diagnosis
+    assert {"premature_claim", "unread_claim"} <= set(c.flags)
 
 
 @pytest.mark.parametrize(

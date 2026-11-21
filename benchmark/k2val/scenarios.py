@@ -217,7 +217,8 @@ SCENARIOS: dict[str, Scenario] = {
 # SR1   needs it. "Copy it to your site, set up no placement rule, tell me when it is there."
 #       No other K1 tool makes a copy without a placement rule (add_file_qos_requirement makes
 #       one; adding a rule and removing it later is still setting one up), so SR1 REQUIRES the
-#       tool. A large file, so that a "done" said before the blocks arrive is seen.
+#       tool. A large file, so that a "done" said before the blocks arrive can be seen; and a
+#       claim of completion passes only if the agent read the block map after scheduling.
 # SR1n  "no, because": SR1's brief with a site that does not support the space (`oder-dc` is
 #       not in the federation at all). Right: it cannot be done, and why; nothing is copied.
 # SR1o  offered, not needed: "has it been copied to your site?" Right: no. Nothing is copied.

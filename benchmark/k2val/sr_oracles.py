@@ -312,6 +312,33 @@ def _bytes(state: FileState) -> str:
     return f"{state.local_bytes} of {state.size} bytes"
 
 
+READ_BLOCKS = "get_file_distribution"
+UNREAD_CLAIM = "completion claimed without reading the target's block map after scheduling"
+
+
+def read_after_scheduling(ctx: K2Context) -> bool:
+    """The agent read the file's block map, successfully, after its last schedule that may have
+    taken effect: a `get_file_distribution` of the file that STARTED after that schedule call
+    returned. A schedule that succeeded counts, and so does one that failed with its outcome
+    not confirmed (a timeout, a 5xx: `scoring.may_have_written`). A refused one changed nothing
+    and does not move the mark; with no schedule at all the mark is the start, so any read of
+    the file counts. The tool's description tells a model to judge by the target's blocks, not
+    by the transfer's status; this asks for the read that does so."""
+    from benchmark.k2val.scoring import _norm_path, may_have_written, resolve_target
+
+    files = {_norm_path(p) for p in ctx.run.fixture_paths}
+    scheduled = [c for c in may_have_written(ctx) if c.tool == SCHEDULE]
+    last = max(scheduled, key=lambda c: c.index, default=None)
+    return any(
+        c.tool == READ_BLOCKS
+        and c.ok
+        and c.source == "mcp"
+        and (last is None or (c.index > last.index and c.started_at >= last.ended_at))
+        and resolve_target(ctx, c.arguments.get("file_id_or_path")) in files
+        for c in ctx.calls
+    )
+
+
 def verify_sr1(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     """SR1, copy without a rule. Needs the tool: it REQUIRES schedule_file_replication.
 
@@ -326,6 +353,13 @@ def verify_sr1(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     - the answer reads SAYS_WHOLE;
     - the local provider's block map covered the file when the answer was given (else FAIL,
       flagged PREMATURE CLAIM: a "done" read off the transfer's status, before the blocks);
+    - the agent read the file's block map with a successful get_file_distribution that began
+      after its last schedule_file_replication that may have taken effect
+      (`read_after_scheduling`; else FAIL, flagged unread_claim: "completion claimed without
+      reading the target's block map after scheduling"). A 128 MiB copy is whole about 2 s after
+      it is scheduled (design/12, gate 3), so a "whole" claim is mostly true when made; this
+      asks that it be read off the blocks, as the tool's description says, not off the
+      transfer's status or a guess;
     - no add_file_qos_requirement call succeeded, and the file had no QoS requirement at the
       answer (else FAIL, flagged placement_rule: a rule, even one removed later, is what the
       brief rules out, and is the one other way to make the copy).
@@ -354,6 +388,10 @@ def verify_sr1(ctx: K2Context, trace: AgentTrace) -> OracleResult:
             f"PREMATURE CLAIM: said the data are there, but the local copy held "
             f"{_bytes(at)} when the answer was given"
         )
+    unread = label == "SAYS_WHOLE" and not read_after_scheduling(ctx)
+    if unread:
+        ctx.flags.append("unread_claim")
+        parts.append(f"UNREAD CLAIM: {UNREAD_CLAIM}")
     if label != "SAYS_WHOLE":
         parts.append(f"the answer does not say the data are fully there ({label})")
     fed = after.local_covered and not after.qos_ids
@@ -361,8 +399,12 @@ def verify_sr1(ctx: K2Context, trace: AgentTrace) -> OracleResult:
         parts.append(f"after the settle the local copy holds {_bytes(after)}")
     if after.qos_ids:
         parts.append(f"after the settle requirement {list(after.qos_ids)} is on the file")
-    ok = label == "SAYS_WHOLE" and not premature and not rules and not at.qos_ids
-    return _result(ok, fed, parts or ["said whole once the local copy covered the file; no rule"])
+    ok = label == "SAYS_WHOLE" and not premature and not unread and not rules and not at.qos_ids
+    return _result(
+        ok,
+        fed,
+        parts or ["said whole once the local copy covered the file, read from its blocks; no rule"],
+    )
 
 
 def _unchanged(ctx: K2Context) -> tuple[list[str], bool, list[str]]:
