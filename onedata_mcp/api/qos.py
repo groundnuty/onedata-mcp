@@ -194,6 +194,14 @@ def _remove_error_hint(error: OnedataApiError, qos_id: str) -> str | None:
     not_found = error.error_id == "notFound" or error.errno == "enoent"
     forbidden = error.error_id == "forbidden" or error.errno in {"eacces", "eperm"}
     client_error = status in {400, 404}
+    if status is not None and 300 <= status < 400:
+        # `request` treats anything outside 2xx as an error, a redirect included; it follows
+        # none, so the removal did not happen as far as anything here can tell.
+        return (
+            f"Onedata answered {status}, not 204: this tool does not follow a redirect, so the "
+            f"removal is not confirmed and QoS requirement {shown} may still exist. Check the "
+            f"provider. {_WHERE_IDS_ARE}"
+        )
     if status == 403 or (client_error and forbidden):
         return (
             f"Not allowed to remove QoS requirement {shown}: the token may lack the privilege to "
@@ -231,11 +239,11 @@ async def remove_qos_requirement(qos_id: str) -> None:
 
     The id is stripped of surrounding whitespace and percent-encoded into the path: unencoded,
     a `?` or `#` in it would cut the path short and remove the requirement named by the part
-    before it. Only a 2xx (204 is documented) is a success: a redirect, which the HTTP client
-    does not follow and does not count as an error, would otherwise read as a removal that did
-    not happen. A failure the caller can act on (unknown id, wrong kind of id, no permission)
-    is raised with what to do about it, followed by Onedata's own message. The whole message
-    holds no configured host or URL and is bounded.
+    before it. Only a 204, the one documented success, is a success: a redirect (which is not
+    followed) and a 202 (accepted, not confirmed) are errors that say the removal is not
+    confirmed and the requirement may still exist. A failure the caller can act on (unknown id,
+    wrong kind of id, no permission) is raised with what to do about it, followed by Onedata's
+    own message. The whole message holds no configured host or URL and is bounded.
     """
     qos_id = _clean_qos_id(qos_id)
     config = get_oneprovider_config()
@@ -249,12 +257,21 @@ async def remove_qos_requirement(qos_id: str) -> None:
         message = bound_message(redact_endpoints(f"{hint} [{error}]", config))
         raise OnedataApiError(message, response=error.response) from error
     status = response["status_code"]
-    if not 200 <= status < 300:
-        failure = http_failure_message(config, "DELETE", path, status, None)
+    if status != 204:
+        # 204 is the one documented success. Any other 2xx, a 202 (accepted) above all, does not
+        # say that the requirement is gone: the removal is not confirmed.
+        accepted = (
+            "the removal was accepted but is not confirmed"
+            if status == 202
+            else "the removal is not confirmed"
+        )
+        failure = http_failure_message(
+            config, "DELETE", path, status, None, label="Onedata API answer"
+        )
         message = (
-            f"Onedata answered {status}, not 204: this tool does not follow a redirect, so the "
-            f"removal is not confirmed and QoS requirement {_shown(qos_id)} may still exist. "
-            f"Check the provider. {_WHERE_IDS_ARE} [{failure}]"
+            f"Onedata answered {status}{' (accepted)' if status == 202 else ''}, not 204: "
+            f"{accepted}, so QoS requirement {_shown(qos_id)} may still exist. Check the "
+            f"provider. {_WHERE_IDS_ARE} [{failure}]"
         )
         raise OnedataApiError(
             bound_message(redact_endpoints(message, config)),

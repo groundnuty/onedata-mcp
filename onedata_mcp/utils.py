@@ -192,8 +192,9 @@ def transport_failure(
 
 
 # What the structured JSON body of a non-2xx answer may not show. Onedata's own error
-# ids and descriptions reach the agent unchanged, except for these rules, all of which hold
-# with or without a node list unless said otherwise:
+# ids and descriptions reach the agent unchanged, except for these rules, all of which are
+# STRUCTURAL: each names a thing this server knows to be a host, never a guess from the shape
+# of a word. All hold with or without a node list unless said otherwise:
 #   1. a node's host name or address (with a port that follows it) is replaced by its
 #      DECLARED name, so the text an agent sees is the same on every deployment of the same
 #      layout. The nodes are the two hosts this server is configured with (see
@@ -203,17 +204,21 @@ def transport_failure(
 #   2. a URL is masked;
 #   3. a `host=` or `port=` pair is masked, ONLY when a node list is given;
 #   4. the value of a domain-bearing field of the error (`serviceDomain`, which every 25.0
-#      error carries in its `ctx`, and `domain`, `host` and the like) reads `a provider`: it
-#      names the service that answered, which may be a peer provider that is not configured;
-#   5. a bare host name inside a text (a dotted name whose last label is a top-level
-#      domain, such as `peer.site.example.com:8443`) is masked. A file name (`notes.txt`,
-#      `data.v2.csv`), a version, an address, a QoS expression or an attribute name is not
-#      one and passes untouched.
-# Rules 1 and 2 both name no configured host; 4 and 5 name no other host either. Rules 1
-# to 3 run in this order, so a URL or a pair naming a known node reads `<address>`.
-# Anything else, a dotted file name or an unlisted IP address included, passes untouched.
-# Transport errors and non-JSON bodies are this server's own fixed host-free texts and are
-# the same in every mode.
+#      error carries in its `ctx`, and `domain`, `host` and the like) names the service that
+#      answered, which may be a peer provider that is not configured. The node-name mapping
+#      (rule 1) is applied to it FIRST: a value that is, as a whole, one known node reads as
+#      that node's declared name. Anything else, a known node mixed with other text included,
+#      reads `a provider`.
+# Rules 1 to 3 run in this order, so a URL or a pair naming a known node reads `<address>`.
+#
+# What is NOT masked: a host name that is written in the free text of an error's description,
+# or in any field that is not domain-bearing, and is neither a configured host, a listed node
+# nor part of a URL. An earlier version also masked "bare" host names, guessing from the last
+# label of a dotted word. It was removed: it replaced real text (an attribute name such as
+# `xattr.user.id`, a file name such as `notes.v1.md`) with `<address>`, and it still missed a
+# peer whose name ends in a label it did not know. A deploy whose peers' names must stay hidden
+# lists them in ONEDATA_MCP_NODE_NAMES. Transport errors and non-JSON bodies are this server's
+# own fixed host-free texts and are the same in every mode.
 _MASK = "<address>"
 # A URL starts at a token start; the scan of a hostile `a.a.a. ...` body stays linear.
 # Trailing sentence punctuation stays outside the URL.
@@ -229,41 +234,9 @@ _KEYWORD_RE = re.compile(
 # host elsewhere, since an error's `details` is specific to each error type.
 _DOMAIN_KEYS = ("serviceDomain", "domain", "domainName", "subdomain", "host", "hostname", "fqdn")
 _DOMAIN_FIELD_RE = re.compile(
-    r'("(?:' + "|".join(_DOMAIN_KEYS) + r')"\s*:\s*)"(?:[^"\\]|\\.)*"', re.IGNORECASE
+    r'("(?:' + "|".join(_DOMAIN_KEYS) + r')"\s*:\s*)("(?:[^"\\]|\\.)*")', re.IGNORECASE
 )
 _DOMAIN_VALUE = "a provider"
-# A bare host name (rule 5): two or more labels and an alphabetic last label, not preceded by
-# a name character, a dot, a hyphen, a slash, a backslash or `~` (so a path component, or the
-# tail of a longer name, is not one), with an optional port, and not followed by a name
-# character or `.` and one. A token start is the only place a match can begin, so the scan
-# of a hostile `a.a.a. ...` body stays linear.
-_BARE_HOST_RE = re.compile(
-    r"(?<![\w.\-/\\~])"
-    r"((?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+)([A-Za-z]{2,24})"
-    r"(?::\d{1,5})?(?![\w-]|\.\w)"
-)
-# What counts as a top-level domain for rule 5: the generic ones, the names a private network
-# uses (`local`, `internal`, `test`, `example`, ...) and the country codes. A last label that
-# is none of these is not a host name, which keeps file names out: `notes.txt`, `data.csv`,
-# `archive.tar.gz`.
-_TLD_WORDS = (
-    "com org net edu gov mil int info biz name pro io dev app cloud tech online site xyz "
-    "asia eu local localhost internal lan home corp intranet test example invalid arpa "
-    "ac ad ae af ag ai al am ao aq ar as at au aw ax az ba bb bd be bf bg bh bi bj bm bn bo "
-    "br bs bt bw by bz ca cc cd cf cg ch ci ck cl cm cn co cr cu cv cw cx cy cz de dj dk dm "
-    "do dz ec ee eg er es et fi fj fk fm fo fr ga gd ge gf gg gh gi gl gm gn gp gq gr gs gt "
-    "gu gw gy hk hm hn hr ht hu id ie il im in iq ir is it je jm jo jp ke kg kh ki km kn kp "
-    "kr kw ky kz la lb lc li lk lr ls lt lu lv ly ma mc md me mg mh mk ml mm mn mo mp mq mr "
-    "ms mt mu mv mw mx my mz na nc ne nf ng ni nl no np nr nu nz om pa pe pf pg ph pk pl pm "
-    "pn pr ps pt pw py qa re ro rs ru rw sa sb sc sd se sg sh si sk sl sm sn so sr ss st su "
-    "sv sx sy sz tc td tf tg th tj tk tl tm tn to tr tt tv tw tz ua ug uk us uy uz va vc ve "
-    "vg vi vn vu wf ws ye yt za zm zw"
-)
-_TLDS = frozenset(_TLD_WORDS.split())
-# Top-level domains that are also common file extensions or words: a name of two labels ending
-# in one (`script.py`, `README.md`, `data.in`) is not masked; one of three or more is.
-_AMBIGUOUS_WORDS = "py sh md rs pl pm ps cc so ai in id app"
-_AMBIGUOUS_TLDS = frozenset(_AMBIGUOUS_WORDS.split())
 
 
 @functools.lru_cache(maxsize=8)
@@ -302,6 +275,19 @@ def replace_node_names(text: str, node_names: tuple[tuple[str, str], ...]) -> st
     return pattern.sub(_declared_name, text)
 
 
+def declared_name_of_node(value: str, node_names: tuple[tuple[str, str], ...]) -> str | None:
+    """The declared name of the node that `value` is, as a whole (a host name or address,
+    with or without its port); None when it is anything else, a known node mixed with other
+    text included."""
+    if not node_names:
+        return None
+    declared = dict(node_names)
+    match = _node_name_regex(tuple(declared)).fullmatch(value.strip())
+    if match is None:
+        return None
+    return declared[match.group(match.lastgroup or "plain").lower()]
+
+
 def _host_of(url: Any) -> str | None:
     """The lower-cased host name or address of a configured URL; None for anything unusable."""
     if not isinstance(url, str) or not url.strip():
@@ -334,32 +320,36 @@ def known_node_names(config: OnedataConfig) -> tuple[tuple[str, str], ...]:
     return tuple(sorted(merged.items()))
 
 
-def _mask_bare_host(match: re.Match[str]) -> str:
-    last = match.group(2).lower()
-    labels = match.group(1).count(".") + 1
-    if last in _TLDS and (labels >= 3 or last not in _AMBIGUOUS_TLDS):
-        return _MASK
-    return match.group(0)
-
-
 def _redact(text: str, names: tuple[tuple[str, str], ...], with_pairs: bool) -> str:
     text = replace_node_names(text, names)
     text = _URL_RE.sub(_MASK, text)
     if with_pairs:
         text = _KEYWORD_RE.sub(_MASK, text)
-    return _BARE_HOST_RE.sub(_mask_bare_host, text)
+    return text
 
 
 def redact_endpoints(text: str, config: OnedataConfig) -> str:
     """Apply the rules above to a service's error text; every other byte is kept.
 
     A configured host is replaced and a URL masked in every mode; the `host=`/`port=` pairs
-    are masked only when the deploy gives a node list (`config.node_names`).
+    are masked only when the deploy gives a node list (`config.node_names`). A host name in
+    the text that is none of these is not masked (see the note on what is not masked).
     """
     return _redact(text, known_node_names(config), bool(config.node_names))
 
 
 _JSON_STRING_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
+
+
+def _domain_value(literal: str, names: tuple[tuple[str, str], ...]) -> str:
+    """The JSON literal that replaces a domain-bearing field's string value: the declared name
+    of the node the value is, as a whole, else `a provider`."""
+    try:
+        decoded = json.loads(literal)
+    except ValueError:
+        decoded = None
+    declared = declared_name_of_node(decoded, names) if isinstance(decoded, str) else None
+    return json.dumps(declared if declared is not None else _DOMAIN_VALUE)
 
 
 def redact_json_text(text: str, config: OnedataConfig) -> str:
@@ -368,11 +358,12 @@ def redact_json_text(text: str, config: OnedataConfig) -> str:
     On the serialized text an escape such as `\\n` or `\\"` would sit against a name
     and break its boundary (`\\nnode17`, `host=\\"x\\"`). A string no rule touches is
     kept byte for byte. The value of a domain-bearing field (`serviceDomain`, `domain`, ...) is
-    replaced first, whatever it holds.
+    replaced first: by the declared name of the node it is, as a whole, when it is a known node
+    (rule 4), else by `a provider`, whatever it holds.
     """
     names = known_node_names(config)
     with_pairs = bool(config.node_names)
-    text = _DOMAIN_FIELD_RE.sub(lambda m: f'{m.group(1)}"{_DOMAIN_VALUE}"', text)
+    text = _DOMAIN_FIELD_RE.sub(lambda m: m.group(1) + _domain_value(m.group(2), names), text)
 
     def _one(match: re.Match[str]) -> str:
         literal = match.group(0)
@@ -522,7 +513,10 @@ async def request(
                 # A non-2xx Onedata response is a REST-level failure: mark the span
                 # ERROR here (not only on network exceptions), so Tempo queries
                 # filtering onedata.rest spans by status.code==ERROR don't undercount.
-                if response.is_error:
+                # Anything outside 2xx counts, a redirect (which httpx does not follow
+                # and does not call an error) included: a redirect's page is never a
+                # tool's result.
+                if not 200 <= response.status_code < 300:
                     onedata_error = OnedataApiError(
                         http_failure_message(
                             config, method, path, response.status_code, response_body

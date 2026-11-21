@@ -179,6 +179,18 @@ An external frontier-model review of this package (the three file tools, their s
 
 The review also noted, without a finding: the cap of 64 names permits batching `xattr.<key>` names; `offset` 0 to 500 matches the exposed arguments; with a token no offset is sent. The pinned swagger, the live 25.0 behaviour and conformance were not verified by the reviewer either.
 
+### Round 2
+
+Two further external reviews (Codex and Gemini, round 2) of the whole promotion package found defects that the first round's fixes left or introduced. This list is the tool-level part, fixed in `fix/r2-tools` (code and unit tests only: no container, live test or model call was run). The harness items of both reviews (`benchmark/k2val/`, `test/unit/k2val/`) are not changed here and are not claimed as resolved by this list.
+
+| Review item | Finding | Status |
+|---|---|---|
+| Codex 12 | A creation answered 500 with `enoent` could diagnose a missing parent; a 5xx with `eexist` could read as "already exists" | fixed, `9658ffa`: "already exists", `enotdir`, forbidden and unsupported-space diagnoses need a 4xx status (an `eexist` on a 5xx is passed on, not a `FileExistsError`). A 5xx that mentions a missing item says the provider failed, a parent may also not exist, and it is **not known whether anything was created**: it claims neither a missing parent nor "nothing was created". The same holds for the space lookup (`No space named ...` needs a 4xx) |
+| Codex 13; Gemini 8.1 | The heuristic masked dotted real text in error messages | fixed, `c32a67f` (design/11, Round 2) |
+| Gemini 8.3 | A 3xx was a success | fixed, `c32a67f` |
+| Codex 14 | The live file test passed any `*.datahub.test` name | fixed, `673a2c6`: the shared loopback guard and proxy isolation |
+| Codex 1–11, 15; Gemini 1–6, 9, 10 | Harness | not changed here |
+
 ## Gate 5: record
 
 This file. To complete it: fill in the TODOs of gates 2 to 4; then, in the same PR, move `create_directory` from `EXPERIMENTAL` to `STABLE` in `onedata_mcp/tool_maturity.py`, change its tier in README's tool table, and update `test/unit/test_tool_maturity.py`, which lists it as experimental.

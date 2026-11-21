@@ -106,7 +106,16 @@ async def test_a_relative_path_is_refused_without_a_request(
 @pytest.mark.parametrize(
     ("status", "body", "needle"),
     [
-        (404, {"error": {"id": "notFound", "description": "not found"}}, "No file is known"),
+        (
+            404,
+            {"error": {"id": "notFound", "description": "not found"}},
+            "did not say which argument it means",
+        ),
+        (
+            400,
+            {"error": {"id": "badValueIdentifier", "details": {"key": "fileId"}}},
+            "No file is known",
+        ),
         (403, {"error": {"id": "forbidden", "description": "no"}}, "will not help"),
         (400, {"error": {"id": "spaceNotSupportedBy"}}, "no provider with that id supports"),
         (500, {"error": {"id": "internalServerError"}}, "status=500"),

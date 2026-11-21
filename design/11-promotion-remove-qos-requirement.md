@@ -243,6 +243,24 @@ The status is one of: **fixed in this branch** (`fix/qos-review-findings`); **ha
 | 8 | MAJOR | Protocol loopholes in design/10 | harness: resolved in the harness change (protocol; design/10 as amended in #32) |
 | 9 | MINOR | `sweep_space` does not clean rules on the space root (9.1); a JSON error body is unredacted without a node list (9.2) | 9.1: harness: resolved in the harness change. 9.2: fixed in this branch |
 
+### Round 2
+
+Two further external reviews (Codex and Gemini, round 2) of the whole promotion package found defects that the first round's fixes left or introduced. This list is the tool-level part, fixed in `fix/r2-tools` (code and unit tests only: no container, live test or model call was run). The harness items of both reviews (`benchmark/k2val/`, `test/unit/k2val/`) are not changed here and are not claimed as resolved by this list.
+
+| Review item | Finding | Status |
+|---|---|---|
+| Codex 12 and earlier #9; Gemini 8.3 | DELETE read a 202 as a completed removal, and a 3xx was an error in this tool only | fixed in `fix/r2-tools`, `c32a67f`: the tool succeeds only on a 204; a 202 or any other 2xx is an error that says the removal was accepted (or answered) but is not confirmed and the requirement may still exist; `request` itself raises on any status outside 2xx, so no tool returns a redirect as a result. The redirect hint of this tool is unchanged in wording |
+| Codex 13; Gemini 8.1 | The bare-hostname heuristic masked real text (`xattr.user.id`, `file.name`, `notes.v1.md`) and still missed peers | fixed, `c32a67f`: the heuristic (`_mask_bare_host`, the top-level-domain lists) is **removed**. Only structural redaction remains: the configured Onezone and Oneprovider hosts, the `ONEDATA_MCP_NODE_NAMES` entries, URLs, and the values of domain-bearing fields. The 2000-character bound is kept |
+| Gemini 8.2 | A domain-bearing field's `a provider` overwrote a configured or listed node's declared name | fixed, `c32a67f`: the node-name mapping runs first. A value that is, as a whole, one known node (with or without its port) reads as that node's declared name; anything else, a known node mixed with other text included, reads `a provider` |
+| Gemini 8.3 | A 3xx was a success in `request` and in the direct download and CDMI move calls | fixed, `c32a67f`: any status outside 2xx is an error, redirect page and target never shown |
+| Codex 14 (QoS part) | The live guard | the QoS live test already pinned loopback resolution and proxies; the guard is now shared with the other live tests, `673a2c6` |
+| Codex 15 | No QoS trial gives the requirement id directly | harness: not changed here |
+| Codex 1–11, Gemini 1–6, 9, 10 | Scoring, federation evidence, rubrics, judge, fixtures, report | harness: not changed here |
+
+**Residual (known, accepted).** A peer host written into the free text of an error description, or into any field that is not domain-bearing, is not masked unless it is a configured host, a listed node or part of a URL. Guessing hosts from the shape of a word was removed because it rewrote attribute and file names; a deploy that must hide its peers lists them in `ONEDATA_MCP_NODE_NAMES`. A unit test pins this (`test_an_unlisted_host_name_in_free_text_is_not_masked_a_known_residual`).
+
+**This list supersedes four statements in gate 1 above**, which are left as written because this round changes only the External review sections: (1) the bullet that a bare host name in a description is masked; (2) the bullet that a domain-bearing field reads `a provider` whatever it holds (now: the declared name of a known node, else `a provider`); (3) the table row "Success (2xx; 204 is documented)" (now: 204 only); (4) in the redirect row, that "HTTPX does not count a 3xx as an error" is now only a fact about HTTPX: `request` raises on it.
+
 ## Also on this branch
 
 Branch commit `65df0b3` fixes a unit test that failed on master `4cd4c47`. Once the Claude configs moved to the subscription backend, they had no key file, and the test still expected every config to have one. `make check` was red on master before this branch.

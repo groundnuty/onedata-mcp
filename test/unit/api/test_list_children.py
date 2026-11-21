@@ -160,6 +160,59 @@ async def test_listing_a_regular_file_says_only_a_directory_has_entries(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", [500, 502])
+@pytest.mark.parametrize("error", [("notFound", None), ("posix", "enoent")], ids=["id", "errno"])
+async def test_a_5xx_that_mentions_a_missing_item_keeps_the_uncertainty(
+    httpx_mock: HTTPXMock, error: tuple, status: int
+) -> None:
+    httpx_mock.add_response(
+        method="GET", url=f"{API}/data/{DIR}/children", **onedata_error(status, *error)
+    )
+
+    with pytest.raises(OnedataApiError) as caught:
+        await files.list_children(DIR, limit=10, offset=0)
+
+    hint = str(caught.value).split(" [", 1)[0]
+    assert hint.startswith(
+        f"This provider answered {status} and mentioned a missing item: the provider failed, "
+        f"and file id '{DIR}' may also not exist."
+    )
+    assert "reports nothing" not in hint
+
+
+@pytest.mark.asyncio
+async def test_a_5xx_with_enotdir_does_not_say_the_target_is_not_a_directory(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        method="GET", url=f"{API}/data/{DIR}/children", **onedata_error(500, "posix", "enotdir")
+    )
+
+    with pytest.raises(OnedataApiError) as caught:
+        await files.list_children(DIR, limit=10, offset=0)
+
+    assert str(caught.value).startswith("Onedata API request failed: GET")
+
+
+@pytest.mark.asyncio
+async def test_a_5xx_with_enoent_on_the_path_lookup_is_not_a_missing_path(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        method="POST", url=lookup_url("/Alpha/d"), **onedata_error(500, "posix", "enoent")
+    )
+
+    with pytest.raises(OnedataApiError) as caught:  # not FileNotFoundError
+        await files.list_children("/Alpha/d", limit=10, offset=0)
+
+    assert str(caught.value).startswith(
+        "This provider answered 500 and mentioned a missing item: the provider failed, and "
+        "path '/Alpha/d' may also not exist."
+    )
+    assert listings(httpx_mock) == []
+
+
+@pytest.mark.asyncio
 async def test_a_file_on_the_way_of_the_path_names_a_component(httpx_mock: HTTPXMock) -> None:
     """`enotdir` while resolving `/Alpha/a.dat/sub`: a component is not a directory, which says
     nothing of `sub` itself."""

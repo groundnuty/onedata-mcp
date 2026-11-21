@@ -338,6 +338,58 @@ async def test_a_server_error_passes_on_unchanged(httpx_mock: HTTPXMock) -> None
     assert str(caught.value).startswith("Onedata API request failed: GET")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [500, 503])
+@pytest.mark.parametrize("error", [("notFound", None), ("posix", "enoent")], ids=["id", "errno"])
+@pytest.mark.parametrize("via", ["id", "path"])
+async def test_a_5xx_that_mentions_a_missing_item_keeps_the_uncertainty(
+    httpx_mock: HTTPXMock, via: str, error: tuple, status: int
+) -> None:
+    """The same body on a 5xx says the provider failed, not that the file is missing: never
+    "not found" (for a path, never `Path ... not found`), never "reports nothing"."""
+    failure = onedata_error(status, *error)
+    if via == "id":
+        target, shown = FID, f"file id '{FID}'"
+        httpx_mock.add_response(method="GET", url=f"{API}/data/{FID}", **failure)
+    else:
+        target, shown = "/Alpha/a.dat", "path '/Alpha/a.dat'"
+        httpx_mock.add_response(method="POST", url=lookup_url(target), **failure)
+
+    with pytest.raises(OnedataApiError) as caught:  # not FileNotFoundError, which is not one
+        await files.get_file_attributes(target)
+
+    text = str(caught.value)
+    hint = text.split(" [", 1)[0]
+    assert hint.startswith(
+        f"This provider answered {status} and mentioned a missing item: the provider failed, "
+        f"and {shown} may also not exist."
+    )
+    assert "reports nothing" not in hint and "not found" not in hint
+    assert f"status={status}" in text  # the underlying error is kept
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        onedata_error(500, "forbidden"),
+        onedata_error(500, "posix", "eacces"),
+        onedata_error(503, "spaceNotSupportedBy"),
+        onedata_error(500, "posix", "enotdir"),
+    ],
+    ids=["forbidden", "eacces", "unsupported-space", "enotdir"],
+)
+async def test_a_5xx_never_gets_a_specific_diagnosis(httpx_mock: HTTPXMock, error: dict) -> None:
+    """A permission, a missing space and a path component that is not a directory are claims
+    about the caller's target. On a 5xx the provider only said that it failed."""
+    httpx_mock.add_response(method="GET", url=f"{API}/data/{FID}", **error)
+
+    with pytest.raises(OnedataApiError) as caught:
+        await files.get_file_attributes(FID)
+
+    assert str(caught.value).startswith("Onedata API request failed: GET")
+
+
 # --- through the MCP client, as the model sees it ----------------------------------------------
 
 

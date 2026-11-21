@@ -283,6 +283,71 @@ async def test_other_failures_pass_on_unchanged(httpx_mock: HTTPXMock) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("create_parents", [True, False])
+@pytest.mark.parametrize("error", [("notFound", None), ("posix", "enoent")], ids=["id", "errno"])
+async def test_a_5xx_that_mentions_a_missing_item_claims_no_missing_parent_and_no_clean_slate(
+    httpx_mock: HTTPXMock, error: tuple, create_parents: bool
+) -> None:
+    """The provider failed. A parent may also be missing, and a failed creation may have
+    created something: neither "the parent directory does not exist" nor "nothing was created"."""
+    root_lookup(httpx_mock)
+    httpx_mock.add_response(method="PUT", **onedata_error(500, *error))
+
+    with pytest.raises(OnedataApiError) as caught:
+        await files.create_directory("/Alpha/a/b", create_parents=create_parents)
+
+    hint = str(caught.value).split(" [", 1)[0]
+    assert hint.startswith(
+        "This provider answered 500 and mentioned a missing item: the provider failed, and a "
+        "parent of '/Alpha/a/b' may also not exist. It is not known whether anything was created"
+    )
+    assert "does not exist" not in hint and "nothing was created" not in hint
+    assert "status=500" in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_a_5xx_with_enoent_on_the_space_lookup_is_not_a_missing_space(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        method="POST", url=lookup_url("/Alpha"), **onedata_error(500, "posix", "enoent")
+    )
+
+    with pytest.raises(OnedataApiError) as caught:  # not FileNotFoundError ("No space named")
+        await files.create_directory("/Alpha/archive")
+
+    assert str(caught.value).startswith(
+        "This provider answered 500 and mentioned a missing item: the provider failed, and "
+        "path '/Alpha' may also not exist."
+    )
+    assert "No space named" not in str(caught.value)
+    assert puts(httpx_mock) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        onedata_error(500, "posix", "eexist"),
+        onedata_error(500, "posix", "enotdir"),
+        onedata_error(500, "forbidden"),
+        onedata_error(503, "spaceNotSupportedBy"),
+    ],
+    ids=["eexist", "enotdir", "forbidden", "unsupported-space"],
+)
+async def test_a_5xx_never_gets_a_specific_diagnosis(httpx_mock: HTTPXMock, error: dict) -> None:
+    """Not "already exists" (FileExistsError), not "a component is not a directory", not "not
+    allowed": the provider failed, and the error is passed on as it is."""
+    root_lookup(httpx_mock)
+    httpx_mock.add_response(method="PUT", **error)
+
+    with pytest.raises(OnedataApiError) as caught:  # a FileExistsError would not be one
+        await files.create_directory("/Alpha/archive")
+
+    assert str(caught.value).startswith("Onedata API request failed: PUT")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "error", [onedata_error(400, "posix", "enoent"), onedata_error(404, "notFound")]
 )

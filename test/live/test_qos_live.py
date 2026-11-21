@@ -7,7 +7,8 @@ Oneprovider host, and the Onezone host when one is set, is `127.0.0.1`, `localho
 other address is refused). It creates and deletes a file and QoS requirements, and must never
 touch production. Once the check passes, name resolution for those hosts is pinned to the
 addresses that were checked (the TLS host name stays the URL's), and proxy variables are
-ignored, so the connection cannot go anywhere else.
+ignored, so the connection cannot go anywhere else. The guard is shared with the other live
+tests: test/live/local_federation.py.
 
     make test-qos-live      the usual ONEDATA_* variables, set by hand
     make valfed-qos-live    against the project's own federation, in its space omcp-live
@@ -39,16 +40,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import ipaddress
 import json
 import os
 import re
 import secrets
 import socket
 import time
-from collections.abc import Callable
 from dataclasses import dataclass, field
-from urllib.parse import urlparse
 
 import pytest
 import pytest_asyncio
@@ -57,6 +55,13 @@ from fastmcp import Client, FastMCP
 from onedata_mcp.api.files import create_file, delete_file, get_file_id
 from onedata_mcp.api.qos import remove_qos_requirement
 from onedata_mcp.modules import qos as qos_module
+from test.live.local_federation import (  # noqa: F401 - the guard's unit tests read these here
+    NotLoopback,
+    enforce_local_federation,
+    is_local_host,
+    pin_resolution,
+    resolve_loopback_only,
+)
 
 ENABLE = "ONEDATA_MCP_LIVE_QOS"
 SPACE_ENV = "ONEDATA_MCP_LIVE_QOS_SPACE"
@@ -72,100 +77,29 @@ pytestmark = pytest.mark.skipif(
 
 
 # ---------------------------------------------------------------------------
-# Locality: the hosts must be local by name AND resolve only to loopback addresses
+# Locality: the hosts must be local by name AND resolve only to loopback addresses. The guard
+# is shared by the gated live tests (test/live/local_federation.py); the names below are
+# re-exported because the unit tests of the guard read them from here.
 # ---------------------------------------------------------------------------
 
-
-class NotLoopback(Exception):
-    """A configured host is not provably the local machine."""
+WHAT = "the live QoS test writes a file and QoS requirements"
 
 
-def is_local_host(host: str | None) -> bool:
-    return bool(host) and (host in {"127.0.0.1", "localhost"} or host.endswith(".datahub.test"))
+def federation_urls() -> dict[str, str]:
+    urls = {"ONEDATA_ONEPROVIDER_HOST": os.environ.get("ONEDATA_ONEPROVIDER_HOST", "")}
+    if os.environ.get("ONEDATA_ONEZONE_HOST"):
+        urls["ONEDATA_ONEZONE_HOST"] = os.environ["ONEDATA_ONEZONE_HOST"]
+    return urls
 
 
-def resolve_loopback_only(
-    host: str, port: int, resolve: Callable[..., list] = socket.getaddrinfo
-) -> tuple[str, ...]:
-    """The addresses `host` resolves to, provided EVERY one is loopback; else NotLoopback.
-
-    A name that does not resolve, or resolves to nothing, is refused too.
-    """
-    try:
-        infos = resolve(host, port, type=socket.SOCK_STREAM)
-    except OSError as error:
-        raise NotLoopback(f"{host!r} does not resolve ({type(error).__name__})") from None
-    addresses = sorted({str(info[4][0]).split("%", 1)[0] for info in infos})
-    if not addresses:
-        raise NotLoopback(f"{host!r} resolves to no address")
-    others = []
-    for address in addresses:
-        try:
-            if not ipaddress.ip_address(address).is_loopback:
-                others.append(address)
-        except ValueError:
-            others.append(address)
-    if others:
-        raise NotLoopback(f"{host!r} resolves to non-loopback address(es) {others}")
-    return tuple(addresses)
-
-
-def pin_resolution(monkeypatch: pytest.MonkeyPatch, pins: dict[str, tuple[str, ...]]) -> None:
-    """Make `socket.getaddrinfo` answer for each pinned host name with the addresses that were
-    checked, whatever DNS or /etc/hosts says by the time the connection is made. The URL keeps
-    its host name, so TLS verifies against it."""
-    real = socket.getaddrinfo
-
-    def pinned(host, port, *args, **kwargs):  # noqa: ANN001, ANN202
-        # anyio asks with the name as bytes
-        name = host.decode("ascii", "replace") if isinstance(host, bytes) else host
-        addresses = pins.get(name.lower()) if isinstance(name, str) else None
-        if addresses is None:
-            return real(host, port, *args, **kwargs)
-        found: list = []
-        for address in addresses:
-            found.extend(real(address, port, *args, **kwargs))
-        return found
-
-    monkeypatch.setattr(socket, "getaddrinfo", pinned)
-
-
-def enforce_local_federation(
-    monkeypatch: pytest.MonkeyPatch,
-    urls: dict[str, str],
-    resolve: Callable[..., list] = socket.getaddrinfo,
-) -> None:
-    """Refuse (pytest.fail) unless every URL's host is local by name and loopback by address;
-    then pin its resolution and ignore proxy variables."""
-    pins: dict[str, tuple[str, ...]] = {}
-    for name, url in urls.items():
-        parsed = urlparse(url)
-        host = parsed.hostname
-        if not is_local_host(host):
-            pytest.fail(
-                "refusing to run: the live QoS test writes a file and QoS requirements, and runs "
-                f"only against 127.0.0.1, localhost or *.datahub.test ({name} host: {host!r})",
-                pytrace=False,
-            )
-        try:
-            port = parsed.port or (443 if parsed.scheme == "https" else 80)
-            pins[host.lower()] = resolve_loopback_only(host, port, resolve)
-        except (ValueError, NotLoopback) as error:
-            pytest.fail(
-                f"refusing to run: {name} host is not loopback-only ({error})", pytrace=False
-            )
-    pin_resolution(monkeypatch, pins)
-    # httpx trusts the environment's proxies; a proxy would carry the traffic elsewhere
-    for var in ("NO_PROXY", "no_proxy"):
-        monkeypatch.setenv(var, "*")
+def enforce_local(monkeypatch: pytest.MonkeyPatch, resolve=socket.getaddrinfo) -> None:  # noqa: ANN001
+    """The shared guard over every host this test uses (`resolve` is for the unit tests)."""
+    enforce_local_federation(monkeypatch, federation_urls(), resolve, what=WHAT)
 
 
 @pytest.fixture(autouse=True)
 def _local_federation_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    urls = {"ONEDATA_ONEPROVIDER_HOST": os.environ.get("ONEDATA_ONEPROVIDER_HOST", "")}
-    if os.environ.get("ONEDATA_ONEZONE_HOST"):
-        urls["ONEDATA_ONEZONE_HOST"] = os.environ["ONEDATA_ONEZONE_HOST"]
-    enforce_local_federation(monkeypatch, urls)
+    enforce_local(monkeypatch)
 
 
 @pytest.fixture

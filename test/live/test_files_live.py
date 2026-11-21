@@ -3,8 +3,11 @@ Compose federation (design/13, design/14, design/15).
 
 Skipped unless ONEDATA_MCP_LIVE_FILES=1. With it set, the test REFUSES to run (it fails) unless
 the Oneprovider host, and the Onezone host when one is set, is `127.0.0.1`, `localhost` or ends
-in `.datahub.test`: it creates and deletes files and directories, and must never touch
-production.
+in `.datahub.test` AND resolves only to loopback addresses (a `*.datahub.test` name mapped to any
+other address is refused): it creates and deletes files and directories, and must never touch
+production. Once the check passes, name resolution for those hosts is pinned to the addresses
+that were checked and proxy variables are ignored, so the connection cannot go anywhere else
+(the guard is shared with the other live tests: test/live/local_federation.py).
 
     make test-files-live      the usual ONEDATA_* variables, set by hand
     make valfed-files-live    against the project's own federation, in its space omcp-live
@@ -30,44 +33,50 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import socket
 import time
-from urllib.parse import quote, urlparse
+from urllib.parse import quote
 
 import pytest
 import pytest_asyncio
 from fastmcp import Client, FastMCP
 
-from onedata_mcp.api.files import create_file, delete_file, get_file_id
+from onedata_mcp.api.files import create_file, delete_file, get_file_id, list_children
 from onedata_mcp.config import get_oneprovider_config
 from onedata_mcp.modules import files as files_module
 from onedata_mcp.utils import OnedataApiError, request
+from test.live.local_federation import enforce_local_federation
 
 ENABLE = "ONEDATA_MCP_LIVE_FILES"
 SPACE_ENV = "ONEDATA_MCP_LIVE_FILES_SPACE"
 PROBE_TRIES = 5
+WHAT = "the live file-tools test writes files and directories"
+# What a made-up pagination token must answer. The swagger lists 400 ("Invalid request") for the
+# listing and gives no error id. TODO(first live run): confirm the status, and set the id from
+# what the first run prints; an unrelated server error then cannot pass as "a bad token".
+BAD_TOKEN_STATUS = 400
+BAD_TOKEN_ERROR_ID: str | None = None
 
 pytestmark = pytest.mark.skipif(
     os.environ.get(ENABLE) != "1", reason=f"live test: set {ENABLE}=1 (local Compose only)"
 )
 
 
-def is_local_host(host: str | None) -> bool:
-    return bool(host) and (host in {"127.0.0.1", "localhost"} or host.endswith(".datahub.test"))
+def federation_urls() -> dict[str, str]:
+    urls = {"ONEDATA_ONEPROVIDER_HOST": os.environ.get("ONEDATA_ONEPROVIDER_HOST", "")}
+    if os.environ.get("ONEDATA_ONEZONE_HOST"):
+        urls["ONEDATA_ONEZONE_HOST"] = os.environ["ONEDATA_ONEZONE_HOST"]
+    return urls
+
+
+def enforce_local(monkeypatch: pytest.MonkeyPatch, resolve=socket.getaddrinfo) -> None:  # noqa: ANN001
+    """The shared guard over every host this test uses (`resolve` is for the unit tests)."""
+    enforce_local_federation(monkeypatch, federation_urls(), resolve, what=WHAT)
 
 
 @pytest.fixture(autouse=True)
-def _local_federation_only() -> None:
-    hosts = {"ONEDATA_ONEPROVIDER_HOST": os.environ.get("ONEDATA_ONEPROVIDER_HOST", "")}
-    if os.environ.get("ONEDATA_ONEZONE_HOST"):
-        hosts["ONEDATA_ONEZONE_HOST"] = os.environ["ONEDATA_ONEZONE_HOST"]
-    for name, url in hosts.items():
-        host = urlparse(url).hostname
-        if not is_local_host(host):
-            pytest.fail(
-                "refusing to run: the live file-tools test writes files and directories, and runs "
-                f"only against 127.0.0.1, localhost or *.datahub.test ({name} host: {host!r})",
-                pytrace=False,
-            )
+def _local_federation_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    enforce_local(monkeypatch)
 
 
 @pytest.fixture
@@ -348,10 +357,19 @@ async def test_listing_errors_and_an_empty_directory_as_the_model_reads_them(
         files_mcp, "list_children", {"parent_id_or_path": probe, "token": "not-a-token"}
     )
     print(f"a made-up token answered: is_error={result.is_error} {text}")
-    # TODO(first live run): pin 25.0's status and error id, printed above. Expected: a 400
-    # about the token, passed on with Onedata's message and no id hint.
     assert result.is_error is True, text
-    assert "rejected" not in text and "reports nothing" not in text
+    assert "rejected" not in text and "reports nothing" not in text  # no id hint
+    # The status and the error id are pinned, so that an unrelated failure (a server error, a
+    # gateway page) cannot pass as "a bad token". The status is the swagger's; the id is
+    # TODO(first live run): see BAD_TOKEN_ERROR_ID.
+    with pytest.raises(OnedataApiError) as caught:
+        await list_children(probe, limit=10, offset=0, token="not-a-token")
+    status = (caught.value.response or {}).get("status_code")
+    print(f"a made-up token: status {status}, error id {caught.value.error_id!r}")
+    assert status == BAD_TOKEN_STATUS, f"expected {BAD_TOKEN_STATUS}, got {status}: {caught.value}"
+    assert caught.value.error_id is not None, "not a structured Onedata error"
+    if BAD_TOKEN_ERROR_ID is not None:
+        assert caught.value.error_id == BAD_TOKEN_ERROR_ID
 
 
 # =============================================================================================

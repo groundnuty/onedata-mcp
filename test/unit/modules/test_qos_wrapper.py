@@ -184,7 +184,7 @@ async def test_the_complete_message_holds_no_host_or_url_and_no_long_id_in_full(
             "error": {
                 "id": "notFound",
                 "description": (
-                    f"No such requirement at {HOST}:8443 or peer-b.site-b.pl; see "
+                    f"No such requirement at {HOST}:8443; see "
                     f"https://{HOST}/api/v3/x or http://other.example/y. " + "z" * 5000
                 ),
                 "ctx": {"serviceDomain": PEER_DOMAIN},
@@ -197,7 +197,7 @@ async def test_the_complete_message_holds_no_host_or_url_and_no_long_id_in_full(
     assert result.is_error is True
     assert text.startswith("Error calling tool 'remove_qos_requirement': No QoS requirement")
     assert HOST not in text and "other.example" not in text and "://" not in text
-    assert PEER_DOMAIN not in text and "site-b.pl" not in text
+    assert PEER_DOMAIN not in text
     assert long_id not in text and "d" * 129 not in text
     assert len(text) <= MAX_ERROR_CHARS + len("Error calling tool 'remove_qos_requirement': ")
 
