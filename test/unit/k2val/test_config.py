@@ -153,17 +153,21 @@ def test_the_example_config_is_valid_and_lists_every_config_and_space() -> None:
     assert cfg.models["qwencoder"].extra_body == {"top_k": 20, "repetition_penalty": 1.05}
     assert cfg.models["sonnet-medium"].control
     assert cfg.spend.cap_usd == 50.0 and cfg.spend.reserve_usd == 0.5
-    assert cfg.limits.concurrency_per_model == 2
+    assert cfg.limits.concurrency_per_model == 1
     assert cfg.jail.wrapper == ""  # the CLI legs are off until a wrapper is set
     # no secret in the example: only placeholder paths
     assert "SECRET" not in EXAMPLE.read_text()
 
 
-def test_concurrency_can_be_lowered_never_raised(secret_files) -> None:
+@pytest.mark.parametrize("value", [0, 2, 9])
+def test_concurrency_per_config_is_one_and_cannot_be_raised(secret_files, value) -> None:
     raw = raw_config(secret_files)
-    raw["run"]["concurrency_per_model"] = 9
-    assert parse_config(raw).limits.concurrency_per_model == 2
+    raw["run"]["concurrency_per_model"] = value
+    with pytest.raises(ConfigError, match="concurrency_per_model must be 1"):
+        parse_config(raw)
     raw["run"]["concurrency_per_model"] = 1
+    assert parse_config(raw).limits.concurrency_per_model == 1
+    del raw["run"]["concurrency_per_model"]
     assert parse_config(raw).limits.concurrency_per_model == 1
 
 

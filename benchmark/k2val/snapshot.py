@@ -178,6 +178,11 @@ async def _take_tree(fed: FedApi, fixture: BuiltFixture, snap: Snapshot) -> None
             # Every small file's bytes are read: a fixture file must keep its known bytes
             # (`sha256`), and a file the agent made must hold what was asked (`content`).
             data = await fed.content("local", entry["fileId"])
+            if len(data) != size:
+                # a read that disagrees with the listing cannot say what the file holds
+                raise ValueError(
+                    f"{entry['fileId']}: read {len(data)} bytes, the listing says {size}"
+                )
             entry["sha256"] = hashlib.sha256(data).hexdigest()
             if entry.get("fileId") not in known:
                 entry["content"] = data.decode("utf-8", errors="replace")

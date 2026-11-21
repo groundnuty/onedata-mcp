@@ -98,10 +98,20 @@ def serve(argv: list[str]) -> int:
     # The surface the model will see must be the scenario's set exactly: a server that would
     # expose another tool (or miss one) refuses to start, and the trial is a harness error.
     wanted = {t for t in a.tools.split(",") if t}
-    exposed = {t.name for t in asyncio.run(mcp.list_tools())}
+    listing = asyncio.run(mcp.list_tools())
+    exposed = {t.name for t in listing}
     if problem := surface_mismatch(wanted, exposed):
         print(f"mcp_http: {problem}", file=sys.stderr)
         return 3
+    # ... and so must its descriptions and schemas: a recorded set is served only as recorded
+    # (the runner checks the in-process listing before dispatch; this checks the served one).
+    from benchmark.k2val.surfaces import RECORDED_SURFACES, surface_problem
+
+    if frozenset(wanted) in RECORDED_SURFACES:
+        _, problem = surface_problem(listing, frozenset(wanted), RECORDED_SURFACES)
+        if problem:
+            print(f"mcp_http: {problem}", file=sys.stderr)
+            return 3
     mcp.add_middleware(make_recording_middleware(Path(a.record)))
     server_main()
     return 0

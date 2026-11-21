@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from benchmark.k2val.judge import Judge, JudgeConf, JudgeVerdict
+from benchmark.k2val.judge import Judge, JudgeConf, JudgeVerdict, judge_input_sha
 from benchmark.k2val.rubrics import ANSWER_SPECS, rubric_sha
 
 DEFAULT_LOCAL = "vistula-dc"
@@ -159,7 +159,10 @@ async def judge_trials(
             return
         key = cache_key(sid, brief, local, t.answer, conf)
         cached = cache.get(key)
-        if cached is not None:
+        expected = judge_input_sha(
+            sid, brief=brief, local=local, answer=t.answer, model=conf.model, effort=conf.effort
+        )
+        if cached is not None and cached.input_sha == expected:
             out[t.key] = _requoted(cached, t.answer)
             return
         if judge is None:

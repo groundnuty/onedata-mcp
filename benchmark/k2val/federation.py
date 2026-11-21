@@ -12,6 +12,7 @@ Everything is async; waiting goes through an injectable `Clock`.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -27,6 +28,7 @@ Role = Literal["owner", "local"]
 POLL_S = 2.0
 # what `FedApi.tree` asks of each entry (the file-tool scenarios, design/13-15)
 TREE_ATTRIBUTES = ("fileId", "name", "type", "size", "posixPermissions")
+_MODE_RE = re.compile(r"[0-7]{3,4}")
 # A listing of more pages than this is malformed (at 1000 entries a page, no trial comes near).
 MAX_LISTING_PAGES = 20
 
@@ -389,6 +391,12 @@ class FedApi:
                 size = entry.get("size")
                 if kind == "REG" and (not isinstance(size, int) or isinstance(size, bool)):
                     raise OnedataApiError(f"listing of {current}: file {name!r} has no size")
+                if kind == "REG" and size < 0:
+                    raise OnedataApiError(f"listing of {current}: file {name!r} has size {size}")
+                mode = entry.get("posixPermissions")
+                if kind == "REG" and not (isinstance(mode, str) and _MODE_RE.fullmatch(mode)):
+                    # a file's mode is compared with the start state: none is not "unchanged"
+                    raise OnedataApiError(f"listing of {current}: file {name!r} has no mode")
                 path = f"{prefix}{name}"
                 out[path] = {
                     "fileId": entry.get("fileId"),

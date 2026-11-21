@@ -51,18 +51,29 @@ def ordered_models(cfg: K2valConfig, present: set[str]) -> list[str]:
     return out
 
 
-def _cell(rows: list[dict]) -> str:
-    """`passes/judged`, pass^k when every trial was judged, then the other outcomes; a
-    NEEDS_REVIEW is never counted as a pass or a fail until it is classified."""
+def _exact_indices(rows: list[dict], k: int | None) -> bool:
+    """The cell holds the planned trials exactly: indices 0..K-1, each once."""
+    return isinstance(k, int) and sorted(r["trial_ix"] for r in rows) == list(range(k))
+
+
+def _cell(rows: list[dict], k: int | None = None, *, planned: bool = True) -> str:
+    """`passes/judged`, pass^K only when the cell holds exactly the K planned trial indices and
+    every one was judged, then the other outcomes; a NEEDS_REVIEW is never counted as a pass or
+    a fail until it is classified. A planned cell with no trial is MISSING."""
     if not rows:
-        return "-"
+        return "**MISSING**" if planned else "-"
     judged = [r for r in rows if r["outcome"] in JUDGED]
     passes = sum(r["outcome"] == "PASS" for r in judged)
     review = sum(r["outcome"] == "NEEDS_REVIEW" for r in rows)
     extra = Counter(r["outcome"] for r in rows if r["outcome"] not in (*JUDGED, "NEEDS_REVIEW"))
     text = f"{passes}/{len(judged)}" if judged else "0/0"
-    if judged and len(judged) == len(rows):
-        text += f" (pass^{len(rows)}={int(passes == len(rows))})"
+    if not isinstance(k, int):
+        pass  # no plan recorded: no pass^K, which needs the K planned indices
+    elif not _exact_indices(rows, k):
+        have = len({r["trial_ix"] for r in rows} & set(range(k)))
+        text += f" **INCOMPLETE: {have} of K={k} planned indices, {len(rows)} trial(s)**"
+    elif len(judged) == len(rows):
+        text += f" (pass^{k}={int(passes == k)})"
     if review:
         text += f" **+{review} NEEDS_REVIEW**"
     if extra:
@@ -131,8 +142,15 @@ def _cost_cell(rows: list[dict]) -> str:
 def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | None = None) -> str:
     rows = read_trials(run_dir)
     meta = meta or {}
-    models = ordered_models(cfg, {r["llm_name"] for r in rows})
-    scenarios = [s for s in SCENARIOS if any(r["scenario_id"] == s for r in rows)]
+    # The matrix is the RUN PLAN (every planned config x scenario), with any cell that has
+    # trials but was not planned added; a planned cell with no trial shows as MISSING.
+    planned_models = set(meta.get("models") or [])
+    planned_scenarios = set(meta.get("scenarios") or [])
+    present_models = {r["llm_name"] for r in rows}
+    models = ordered_models(cfg, planned_models | present_models)
+    models += sorted((planned_models | present_models) - set(models))  # not in this config
+    wanted = planned_scenarios | {r["scenario_id"] for r in rows}
+    scenarios = [s for s in SCENARIOS if s in wanted] + sorted(wanted - set(SCENARIOS))
     by = defaultdict(list)
     for r in rows:
         by[(r["llm_name"], r["scenario_id"])].append(r)
@@ -158,8 +176,24 @@ def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | N
     w("")
 
     # 1. control
-    controls = [m for m in models if cfg.models[m].control]
+    controls = [m for m in models if m in cfg.models and cfg.models[m].control]
     planned_k = meta.get("k")
+
+    def is_planned(m: str, sid: str) -> bool:
+        """In the run plan (run.json's configs x scenarios); with no plan recorded, no cell is
+        known to be planned, so none shows as MISSING."""
+        return m in planned_models and sid in planned_scenarios
+
+    def control_short(c: str, sid: str) -> bool:
+        """The control's cell is not K distinct passing trials (or not K exactly)."""
+        cell = by.get((c, sid), [])
+        if not cell:
+            return is_planned(c, sid)
+        passed = {r["trial_ix"] for r in cell if r["outcome"] == "PASS"}
+        return isinstance(planned_k, int) and (
+            len(passed & set(range(planned_k))) < planned_k or not _exact_indices(cell, planned_k)
+        )
+
     for control in controls:
         suspects = []
         short: list[str] = []
@@ -168,10 +202,13 @@ def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | N
             if cell and any(r["outcome"] != "PASS" for r in cell):
                 suspects.append(sid)
             # coverage: DISTINCT trial indices that passed, against the K planned (a trial that
-            # never ran, or ran twice, does not count twice)
-            passed = {r["trial_ix"] for r in cell if r["outcome"] == "PASS"}
-            if isinstance(planned_k, int) and len(passed & set(range(planned_k))) < planned_k:
-                short.append(f"{sid} ({len(passed & set(range(planned_k)))}/{planned_k})")
+            # never ran, or ran twice, does not count twice); a planned cell with none: missing
+            if not cell and is_planned(control, sid):
+                short.append(f"{sid} (MISSING)")
+            elif cell and control_short(control, sid):
+                passed = {r["trial_ix"] for r in cell if r["outcome"] == "PASS"}
+                got = len(passed & set(range(planned_k))) if isinstance(planned_k, int) else "?"
+                short.append(f"{sid} ({got}/{planned_k})")
         w(f"## Control: {control}\n")
         if suspects:
             w(
@@ -224,15 +261,11 @@ def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | N
     for sid in scenarios:
         suspect = any(
             by.get((c, sid)) and any(r["outcome"] != "PASS" for r in by[(c, sid)]) for c in controls
-        ) or any(
-            isinstance(planned_k, int)
-            and len({r["trial_ix"] for r in by.get((c, sid), []) if r["outcome"] == "PASS"})
-            < planned_k
-            for c in controls
-            if by.get((c, sid))
-        )
-        label = f"{sid} {SCENARIOS[sid].title}" + (" **DESIGN SUSPECT**" if suspect else "")
-        w(f"| {label} | " + " | ".join(_cell(by.get((m, sid), [])) for m in models) + " |")
+        ) or any(control_short(c, sid) for c in controls)
+        title = SCENARIOS[sid].title if sid in SCENARIOS else ""
+        label = f"{sid} {title}".rstrip() + (" **DESIGN SUSPECT**" if suspect else "")
+        cells = [_cell(by.get((m, sid), []), planned_k, planned=is_planned(m, sid)) for m in models]
+        w(f"| {label} | " + " | ".join(cells) + " |")
     w("")
 
     # 4. Haiku effort comparison
@@ -242,7 +275,10 @@ def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | N
         w("| scenario | " + " | ".join(haiku) + " |")
         w("|---|" + "---|" * len(haiku))
         for sid in scenarios:
-            w(f"| {sid} | " + " | ".join(_cell(by.get((m, sid), [])) for m in haiku) + " |")
+            cells = [
+                _cell(by.get((m, sid), []), planned_k, planned=is_planned(m, sid)) for m in haiku
+            ]
+            w(f"| {sid} | " + " | ".join(cells) + " |")
         w("")
         w("| config | trials | mean rounds | mean output tokens | mean wall s | cost USD |")
         w("|---|---|---|---|---|---|")

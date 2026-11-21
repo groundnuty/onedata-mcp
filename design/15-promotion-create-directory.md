@@ -1,6 +1,6 @@
 # Promotion record: `create_directory`
 
-Status: **in progress** (2026-11-20; external review addressed, see below). Gate 1 is done. Gate 2 is done except for `make conformance`, which has not been run. Gate 3's live test is built but has not been run. Gate 4's scenarios are built and unit-tested on the fake federation, but the run has not happened. The validation federation is on hold, so nothing here touched a live Onedata. The tool stays `experimental` until gates 2–4 are complete. It moves to `STABLE` in the PR that completes this record.
+Status: **in progress** (2026-11-20; external review addressed, see below). Gate 1 is done. Gate 2 is done (`make conformance` passed on the integrated server, 2026-11-21). Gate 3's live test is built but has not been run. Gate 4's scenarios are built and unit-tested on the fake federation, but the run has not happened. The validation federation is on hold, so nothing here touched a live Onedata. The tool stays `experimental` until gates 2–4 are complete. It moves to `STABLE` in the PR that completes this record.
 
 The short commit ids below are **branch commits** on `feat/promote-file-tools`. A squash merge leaves them unreachable from `master`. **The anchor is the surface hash.**
 
@@ -58,7 +58,7 @@ The tests are in `test/unit/api/test_create_directory.py`, through the API and t
 
 The 25.0 error bodies are unverified, as in design/13; the live test prints them. Paths are resolved with the three tools' own lookup, so the stable tools keep the shared resolver unchanged.
 
-## Gate 2: surface review (done except `make conformance`, branch commits `a9f3b12` and `49370ff`)
+## Gate 2: surface review (done, branch commits `a9f3b12` and `49370ff`)
 
 `test_the_description_follows_the_surface_rules` covers the first three:
 
@@ -66,7 +66,7 @@ The 25.0 error bodies are unverified, as in design/13; the live test prints them
 - **Names no tool that may not be offered alongside it:** it named `create_file`, which is not offered under `ONEDATA_MCP_MATURITY=experimental` or a hand-written selection. **Fixed:** removed.
 - **Cites no document the model cannot read:** it cited `research/empirical-mcp-server-findings.md M-11`, and the REST call and a Python exception name. **Fixed:** removed.
 - **Errors tell the caller how to fix the call:** done in gate 1.
-- **`make conformance`: TODO.**
+- **`make conformance`: passed** on the integrated server (the integration branch `feat/promotion-harness` at `501c867`, which carries all five packages), run 2026-11-21 (`conformance-results/20261121T010707Z`) with `@modelcontextprotocol/conformance@0.1.16`, the version `make conformance` now pins: 12 passed, 20 failed, every failure expected (`conformance-baseline.yaml`: scenarios that need prompts, resources, completion, sampling, elicitation or the suite's own test tools, none of which this server has), and the baseline check passed. Conformance tests the protocol, not one tool, so this one run serves design/11–15.
 
 ### Stable `create_file` points to this tool (reported; not changed)
 

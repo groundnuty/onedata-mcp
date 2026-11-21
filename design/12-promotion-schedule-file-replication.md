@@ -1,6 +1,6 @@
 # Promotion record: `schedule_file_replication`
 
-Status: **in progress** (2026-11-20). Gate 1 is done. Gate 2 is done except for `make conformance`, which has not been run. Gate 3's live test is built but has not been run. Gate 4's scenarios are built and unit-tested on the fake federation, but the run has not happened. The validation federation is on hold, so nothing here touched a live Onedata. The tool stays `experimental` until gates 2–4 are complete. It moves to `STABLE` in the PR that completes this record.
+Status: **in progress** (2026-11-20). Gate 1 is done. Gate 2 is done (`make conformance` passed on the integrated server, 2026-11-21). Gate 3's live test is built but has not been run. Gate 4's scenarios are built and unit-tested on the fake federation, but the run has not happened. The validation federation is on hold, so nothing here touched a live Onedata. The tool stays `experimental` until gates 2–4 are complete. It moves to `STABLE` in the PR that completes this record.
 
 The short commit ids below are **branch commits** on `feat/promote-schedule-file-replication`. A squash merge leaves them unreachable from `master`. **The anchor is the surface hash.**
 
@@ -66,7 +66,7 @@ Every error path a model can trigger, and what the model now reads. The tests ar
 - **Unverified bodies.** The hints are keyed on the HTTP status, with the error id, errno and `details.key` as a fallback. The real 25.0 bodies are **unverified**: the unit tests use plausible shapes, and the live test prints the real ones.
 - **Error texts and tools.** A hint names no other tool: it lists the providers itself. The description names none either.
 
-## Gate 2: surface review (done except `make conformance`, branch commits `d00354e` and `e1fcd00`)
+## Gate 2: surface review (done, branch commits `d00354e` and `e1fcd00`)
 
 Checked against the protocol's rules. `test_the_description_follows_the_surface_rules` covers the first four.
 
@@ -78,7 +78,7 @@ Checked against the protocol's rules. `test_the_description_follows_the_surface_
 - **Cites no document the model cannot read:** yes.
 - **The field descriptions are unchanged.** `file_id_or_path` reads "File id or path in format /<space_name>/<path_to_file>". That shows the leading `/` as the sibling file tools' fields do. Their "Paths must start with '/'" is an error text, given by the file module when the client offers no MCP roots. It is not a description, so gate 1 adds it here as an error, and the schema stays as it was. The triage's other path note, that this tool takes no MCP `ctx`, is left as it is. Resolving relative paths against MCP roots would be a behaviour change beyond a defect fix, and the explicit error covers the case.
 - **Errors tell the caller how to fix the call:** done in gate 1.
-- **`make conformance`: TODO.** It needs `npx` and a local port, and was not run here.
+- **`make conformance`: passed** on the integrated server (the integration branch `feat/promotion-harness` at `501c867`, which carries all five packages), run 2026-11-21 (`conformance-results/20261121T010707Z`) with `@modelcontextprotocol/conformance@0.1.16`, the version `make conformance` now pins: 12 passed, 20 failed, every failure expected (`conformance-baseline.yaml`: scenarios that need prompts, resources, completion, sampling, elicitation or the suite's own test tools, none of which this server has), and the baseline check passed. Conformance tests the protocol, not one tool, so this one run serves design/11–15.
 
 ## Gate 3: live check (built in branch commits `b3f714d` and `429bec1`, not run)
 
@@ -202,7 +202,7 @@ Classify every non-pass before anything counts. The classes are harness or oracl
 
 This file. To complete it:
 
-1. Fill in the TODOs of gates 2 to 4: conformance, the live results and the panel's results.
+1. Fill in the TODOs of gates 3 and 4: the live results and the panel's results.
 2. Then, in the same PR, move `schedule_file_replication` from `EXPERIMENTAL` to `STABLE` in `onedata_mcp/tool_maturity.py`, and change its tier in README's tool table.
 
 ## Also on this branch

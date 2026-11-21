@@ -29,7 +29,7 @@ max_tool_rounds = 40                 # a cap reached is NO_RESULT, not a failure
 wall_cap_s = 1200                    # 20 minutes per trial
 tool_call_cap_s = 300                # one tool call is bounded at 300 s, as in the agent study
 settle_s = 60                        # how long the federation axis waits for the end state
-concurrency_per_model = 2            # at most 2 trials at once per model (2 is the ceiling)
+concurrency_per_model = 1            # one trial at a time per config (the only value accepted)
 artefact_root = "artefacts/k2val"    # gitignored
 research_dir = "research"            # where research/k2val-<run_id>.md is written
 

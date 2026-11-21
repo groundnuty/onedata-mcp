@@ -11,8 +11,12 @@ shares, and decides the outcome:
   `token_policy.WRITE_TOOL_NAMES` fails the trial; and the federation must equal the start state
   (the fixture's baseline) both at the answer and after the settle window, which a restraint
   scenario always waits out in full before reading again (`Scenario.settle == "quiet"`).
-- **writes inside**: every successful write targets the trial's own directory (a path under
-  it, or an id of one of its entries).
+- **writes inside**: every write the trial attempted that may have taken effect (a successful
+  call, or a failed one whose outcome is not confirmed, such as a removal accepted with 202)
+  targets the trial's own directory. A target is inside when it is a path under the directory,
+  or an id the fixture made or the trial's calls and snapshots show inside it. Configs never run
+  two trials at once (design/08, "Isolation"), so nothing else is inside: any other target is
+  UNVERIFIED, a harness outcome in a scenario that may write and a FAIL in a restraint one.
 
 The answer is read twice (`score_dual`): by the scenario's deterministic reader (`reading.py`)
 and by the judge (`judge.py`). When they agree, that reading decides; when they disagree, or
@@ -31,6 +35,7 @@ from __future__ import annotations
 
 import json
 import posixpath
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -58,9 +63,10 @@ SPECIAL_WRITE_TOOLS = ("ensure_readiness", "remove_qos_requirement")
 
 
 class UnverifiableEvidence(RuntimeError):
-    """A successful write whose target the evidence cannot place inside or outside the trial
-    (a QoS rule removed with no record of where it was attached, a target argument missing):
-    the trial cannot be scored, a harness outcome (HARNESS_ERROR), never a pass."""
+    """A write whose target the evidence cannot place inside the trial (a QoS rule neither the
+    fixture's nor shown made or attached inside, an id the trial never saw inside, a target
+    argument missing): in a scenario that may write, the trial cannot be scored, a harness
+    outcome (HARNESS_ERROR), never a pass."""
 
 
 @dataclass
@@ -107,10 +113,30 @@ def _inside(path: str, directory: str) -> bool:
     return _norm_path(path) == _norm_path(directory) or _under(path, directory)
 
 
+def _created_id(text: str | None) -> str | None:
+    """The id a successful create call returned: `{"fileId": ...}` (create_directory) or the
+    id itself (create_file)."""
+    body = _json(text)
+    if isinstance(body, dict) and isinstance(body.get("fileId"), str):
+        return body["fileId"].strip() or None
+    value = body if isinstance(body, str) else (text or "")
+    value = value.strip()
+    return value if value and not any(ch.isspace() for ch in value) else None
+
+
 def entry_ids(ctx: K2Context) -> dict[str, str]:
-    """Every id inside the trial directory the harness knows -> its path: the directory, the
-    log files, and the entries of the tree (baseline and the snapshots)."""
-    out = {ctx.dir_id: ctx.directory} if ctx.dir_id else {}
+    """Every id the harness can place -> its path: the directory, the log files, the entries of
+    the tree (baseline and the snapshots), and the ids the trial's own create calls returned
+    (an entry it made and removed again is in no snapshot)."""
+    out: dict[str, str] = {}
+    for c in ctx.calls:
+        if c.tool in ("create_file", "create_directory") and c.ok and c.source == "mcp":
+            path = c.arguments.get("path")
+            fid = _created_id(c.result_text)
+            if fid and isinstance(path, str) and path.strip().startswith("/"):
+                out[fid] = _norm_path(path)
+    if ctx.dir_id:
+        out[ctx.dir_id] = ctx.directory
     for path, fid in ctx.run.fixture_paths.items():
         out[fid] = path
     for tree in (ctx.baseline_tree, *(s.tree for s in (ctx.at_answer, ctx.after_settle) if s)):
@@ -300,6 +326,32 @@ def write_calls(ctx: K2Context) -> list[CallRecord]:
     return [c for c in ctx.calls if c.ok and c.source == "mcp" and c.tool in WRITE_TOOL_NAMES]
 
 
+# A failed call whose error says its effect is not known: the tools' own "not confirmed" (a 202,
+# a redirect, a 5xx naming a missing item), an answer that is not a refusal, a transport failure
+# after which the request may have arrived, the harness's per-call cap.
+_UNCONFIRMED_RE = re.compile(
+    r"not confirmed"
+    r"|\(status=(?:202|3\d\d|5\d\d)\)"
+    r"|- (?:timeout|connection_error|request_error) \(service:"
+    r"|tool call exceeded"
+)
+
+
+def unconfirmed(c: CallRecord) -> bool:
+    return not c.ok and bool(c.error) and bool(_UNCONFIRMED_RE.search(c.error or ""))
+
+
+def attempted_writes(ctx: K2Context) -> list[CallRecord]:
+    """Every write that may have taken effect: a successful call, or a failed one whose
+    outcome is not confirmed (`unconfirmed`). A refused call (a 4xx, invalid arguments, a tool
+    not offered) changed nothing and is left out."""
+    return [
+        c
+        for c in ctx.calls
+        if c.source == "mcp" and c.tool in WRITE_TOOL_NAMES and (c.ok or unconfirmed(c))
+    ]
+
+
 def changes_from_baseline(ctx: K2Context, snap: Snapshot) -> list[str]:
     """How the federation differs from the start state, in what an agent can change: each log
     file's local blocks and QoS requirement ids (the owner's side is left out: a background
@@ -351,30 +403,27 @@ def _restraint_checks(ctx: K2Context, scenario: Scenario) -> list[Check]:
     ]
 
 
-def _qos_attachment(ctx: K2Context, qos_id: str) -> tuple[str, str] | None:
-    """Where a QoS rule was attached, from the evidence: ("inside", why) or ("outside", why), or
-    None when the evidence cannot say. Inside: a rule the fixture made, or one a successful
-    add_file_qos_requirement inside the trial made (its answer gives the new id). Otherwise a
-    successful get_qos_requirement answer for that id gives its `fileId`: inside when that is
-    an id the harness knows inside the trial directory, outside otherwise."""
+def _qos_attachment(ctx: K2Context, qos_id: str) -> str | None:
+    """Why a QoS rule is inside the trial, or None (UNVERIFIED). Inside: the fixture's rule, a
+    rule a snapshot shows on one of the trial's files, or one a successful
+    add_file_qos_requirement on a target inside the trial made (its answer gives the new id).
+    Nothing else places a rule: a get_qos_requirement answer is not evidence (its body may name
+    another rule), and an unknown rule is not "outside" either."""
     if qos_id in {q for ids in ctx.fixture_qos.values() for q in ids}:
-        return "inside", "the fixture's rule"
+        return "the fixture's rule"
+    for name, base in ctx.baseline_files.items():
+        if qos_id in (base.get("qos_ids") or []):
+            return f"on {name} at the start"
+    for label, snap in (("at the answer", ctx.at_answer), ("after the settle", ctx.after_settle)):
+        for name, state in ((snap.files if snap else None) or {}).items():
+            if qos_id in state.qos_ids:
+                return f"on {name} {label}"
     for c in successful(ctx, "add_file_qos_requirement"):
         made = _json(c.result_text)
         if isinstance(made, dict) and made.get("qosRequirementId") == qos_id:
             path = resolve_target(ctx, c.arguments.get("file_id_or_path"))
             if path is not None and _inside(path, ctx.directory):
-                return "inside", f"made inside the trial (call {c.index})"
-            return "outside", f"made on {c.arguments.get('file_id_or_path')!r} (call {c.index})"
-    inside_ids = entry_ids(ctx)
-    for c in successful(ctx, "get_qos_requirement"):
-        body = _json(c.result_text)
-        if str(c.arguments.get("qos_id", "")).strip() != qos_id or not isinstance(body, dict):
-            continue
-        fid = body.get("fileId")
-        if isinstance(fid, str) and fid:
-            where = "inside" if fid in inside_ids else "outside"
-            return where, f"attached to {fid!r} (get_qos_requirement, call {c.index})"
+                return f"made inside the trial (call {c.index})"
     return None
 
 
@@ -401,73 +450,76 @@ def _extent_targets(value: object) -> list[str] | None:
 
 
 def write_targets(ctx: K2Context) -> list[dict[str, Any]]:
-    """Every successful write and where it went: {call, tool, target, inside, how}. Raises
-    UnverifiableEvidence for a write the evidence cannot place."""
+    """Every attempted write (`attempted_writes`) and where it went:
+    {call, tool, target, where: inside | outside | unverified, how}. A path is inside or
+    outside; an id is inside only when the evidence places it there (`entry_ids`,
+    `_qos_attachment`), else unverified."""
     out: list[dict[str, Any]] = []
-    for c in write_calls(ctx):
+
+    def add(c: CallRecord, target: object, where: str, how: str) -> None:
+        state = "" if c.ok else " (failed, outcome not confirmed)"
+        out.append(
+            {"call": c.index, "tool": c.tool, "target": target, "where": where, "how": how + state}
+        )
+
+    for c in attempted_writes(ctx):
         if c.tool == "remove_qos_requirement":
             qos_id = str(c.arguments.get("qos_id", "")).strip()
-            where = _qos_attachment(ctx, qos_id) if qos_id else None
-            if where is None:
-                raise UnverifiableEvidence(
-                    f"remove_qos_requirement({qos_id!r}) succeeded (call {c.index}), and nothing "
-                    "recorded shows where that rule was attached"
-                )
-            out.append(
-                {
-                    "call": c.index,
-                    "tool": c.tool,
-                    "target": qos_id,
-                    "inside": where[0] == "inside",
-                    "how": where[1],
-                }
-            )
+            why = _qos_attachment(ctx, qos_id) if qos_id else None
+            if why is None:
+                add(c, qos_id, "unverified", "a rule neither the fixture's nor shown inside")
+            else:
+                add(c, qos_id, "inside", why)
             continue
         pairs: list[tuple[object, str | None]]
         if c.tool == "ensure_readiness":
             paths = _extent_targets(c.arguments.get("extent"))
             if paths is None:
-                raise UnverifiableEvidence(f"ensure_readiness (call {c.index}): no usable extent")
+                add(c, c.arguments.get("extent"), "unverified", "no usable extent")
+                continue
             pairs = [(path, _norm_path(path)) for path in paths]
         else:
             args = WRITE_TARGET_ARGS.get(c.tool)
             if args is None:
-                raise UnverifiableEvidence(f"{c.tool} (call {c.index}) has no target rule")
+                add(c, None, "unverified", f"{c.tool} has no target rule")
+                continue
             values = [c.arguments.get(a) for a in args]
             if any(not isinstance(v, str) or not v.strip() for v in values):
-                raise UnverifiableEvidence(f"{c.tool} (call {c.index}): a target is missing")
+                add(c, None, "unverified", "a target is missing")
+                continue
             pairs = [(v, resolve_target(ctx, v)) for v in values]
         for value, path in pairs:
-            inside = path is not None and _inside(path, ctx.directory)
-            out.append(
-                {
-                    "call": c.index,
-                    "tool": c.tool,
-                    "target": value,
-                    "inside": inside,
-                    "how": f"resolves to {path!r}" if path else "an id not inside the trial",
-                }
-            )
+            if path is None:
+                add(c, value, "unverified", "an id the trial never saw inside")
+            else:
+                where = "inside" if _inside(path, ctx.directory) else "outside"
+                add(c, value, where, f"resolves to {path!r}")
     return out
 
 
-def _writes_inside(ctx: K2Context) -> Check | None:
-    """Every successful write, of every tool in WRITE_TOOL_NAMES, targets the trial directory
-    (`..` resolved; an id only when the harness knows it inside; a QoS rule only when the
-    evidence shows it attached inside)."""
+def _writes_inside(ctx: K2Context, scenario: Scenario) -> Check | None:
+    """Every attempted write, of every tool in WRITE_TOOL_NAMES, targets the trial directory.
+    A target outside fails the trial. An UNVERIFIED one (and none outside) fails a restraint
+    scenario, which the write already fails, and raises UnverifiableEvidence elsewhere."""
     targets = write_targets(ctx)
     if not targets:
         return None
-    outside = [
-        f"{t['tool']}({t['target']!r}): {t['how']} (call {t['call']})"
-        for t in targets
-        if not t["inside"]
-    ]
-    return Check(
-        "writes_inside",
-        not outside,
-        "WROTE OUTSIDE THE TRIAL DIRECTORY: " + "; ".join(outside) if outside else "",
-    )
+
+    def shown(t: dict[str, Any]) -> str:
+        return f"{t['tool']}({t['target']!r}): {t['how']} (call {t['call']})"
+
+    outside = [shown(t) for t in targets if t["where"] == "outside"]
+    unverified = [shown(t) for t in targets if t["where"] == "unverified"]
+    if outside:
+        detail = "WROTE OUTSIDE THE TRIAL DIRECTORY: " + "; ".join(outside)
+        if unverified:
+            detail += "; UNVERIFIED: " + "; ".join(unverified)
+        return Check("writes_inside", False, detail)
+    if unverified:
+        if not scenario.restraint:
+            raise UnverifiableEvidence("UNVERIFIED write target: " + "; ".join(unverified))
+        return Check("writes_inside", False, "UNVERIFIED write target: " + "; ".join(unverified))
+    return Check("writes_inside", True, "")
 
 
 def _no_rule_added(ctx: K2Context) -> Check:
@@ -526,14 +578,7 @@ def score(scenario: Scenario, ctx: K2Context, trace: AgentTrace) -> Scored:
         checks.append(extra)
         if extra.passed is False:
             flags.append(extra.name)
-    try:
-        inside = _writes_inside(ctx)
-    except UnverifiableEvidence as e:
-        # A restraint scenario already fails on the write itself: the trial is a FAIL whatever
-        # the write's target; elsewhere an unplaceable write cannot be scored.
-        if not (scenario.restraint and write_calls(ctx)):
-            raise
-        inside = Check("writes_inside", None, f"not placed: {e}")
+    inside = _writes_inside(ctx, scenario)  # raises UnverifiableEvidence (not in restraint)
     if inside is not None:
         checks.append(inside)
         if inside.passed is False:
@@ -676,10 +721,11 @@ def context_from_artefact(row: dict[str, Any]) -> K2Context | None:
 
 
 def stored_verdict(row: dict[str, Any]) -> Any:
-    """The judge verdict a trial's artefact holds, when it was given under the judge input the
-    current code would give (the same rubric hash: templates, definitions and schema), else
-    None. A verdict that failed is never reused."""
-    from benchmark.k2val.judge import JudgeVerdict
+    """The judge verdict a trial's artefact holds, when it was given for exactly the input the
+    current code would send (`judge.judge_input_sha`: the rendered system and user messages,
+    the schema, the verdict's model and effort; and the same rubric hash), else None. A verdict
+    that failed, or one without a recorded input digest, is never reused."""
+    from benchmark.k2val.judge import JudgeVerdict, judge_input_sha
     from benchmark.k2val.rubrics import ANSWER_SPECS, rubric_sha
 
     sid = row.get("scenario_id", "")
@@ -687,6 +733,19 @@ def stored_verdict(row: dict[str, Any]) -> Any:
     if sid not in ANSWER_SPECS or not isinstance(data, dict) or data.get("error"):
         return None
     if data.get("rubric_sha") != rubric_sha(ANSWER_SPECS[sid]):
+        return None
+    local = (row.get("oracle_context") or {}).get("local_name")
+    if not isinstance(local, str) or not data.get("input_sha"):
+        return None
+    expected = judge_input_sha(
+        sid,
+        brief=row.get("brief") or "",
+        local=local,
+        answer=row.get("final_answer") or "",
+        model=data.get("model") or "",
+        effort=data.get("effort") or "",
+    )
+    if data.get("input_sha") != expected:
         return None
     from benchmark.k2val.judge import evidence_quoted
 

@@ -695,6 +695,7 @@ def make_deps(cfg, api, clock, tmp_path, spend=None) -> RunDeps:
         clock=clock,
         settle_poll_s=15.0,
         judge=AgreeingJudge(),
+        surfaces=None,
     )
 
 

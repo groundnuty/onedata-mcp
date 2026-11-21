@@ -28,7 +28,8 @@ agent study's outcome.
 3. **Record everything.** Each trial's artefact; each change with its triggering trial, and a before/after of each
    description or answer; per-model results. All of it goes in `artefacts/k2val/<run_id>/` (gitignored), plus a
    committed summary `research/k2val-<run_id>.md`.
-4. **Concurrency:** at most 2 trials at once per model. **Anthropic spend** (the `anthropic` backend only: an API key
+4. **Concurrency:** one trial at a time per config; configs run in parallel (see "Isolation" under Scoring).
+   **Anthropic spend** (the `anthropic` backend only: an API key
    billed per token; the Claude configs of the standing panel run on the subscription and are not counted)
    is tracked and recorded per call and per run, in one shared tally. The cap is a config value (`[spend] cap_usd`,
    default $50; the operator lifted the earlier $5 Haiku cap). Refuse to start an Anthropic trial once the run's spend
@@ -319,6 +320,14 @@ out: the trace's MCP half is the server's own record, and the CLI's events come 
 - K2 set: the K1 set plus `check_readiness, ensure_readiness`.
 - The file-tool scenarios (FA, LC, CD) name their own sets: FA the K1 set, LC and CD FILE_TOOLS
   (`benchmark/k2val/file_scenarios.py`).
+- **The surface is the recorded one.** Each offered set has a recorded hash (`benchmark/k2val/surfaces.py`, the
+  values of design/11–15's "Gate 4" tables): the sha256 of `make -s tools-manifest` with `ONEDATA_MCP_TOOLS` set
+  to the set. Before the model is called, the runner renders the COMPLETE listing it would get (names,
+  descriptions, input schemas, annotations) exactly as `scripts/tools_manifest.py` does and compares its hash
+  with the set's; a mismatch, or a set with no recorded hash, is a HARNESS_ERROR, and the hash is kept in the
+  artefact (`offered_surface_sha`). The HTTP server of the Claude and CLI legs checks the listing it serves the
+  same way and refuses to start on a mismatch. A change to a tool's surface changes the hash: recompute it, and
+  update the records and `surfaces.py` in the same change.
 - The MCP app is the in-process server from this branch, as in the PPAM harness. Pass the allow-list like PPAM's
   `allowed_tools`.
 
@@ -482,19 +491,32 @@ Nothing should change in V1, V3n, V3o, V4, V5, SR1n, SR1o, FA, FAi, FAn, LC, LCn
   snapshot that STARTS after the deadline, never skipped because the first reading already matched; the others
   (V2, V6, V7, CDo) read again until the end state shows, at least once after the answer. Compared: each log file's local blocks and QoS requirement ids, and the
   trial directory's tree (paths, ids, types, sizes, modes and the small files' bytes).
-- **Writes inside.** Every successful call of every tool in `WRITE_TOOL_NAMES` must target the trial's own
-  directory, else FAIL (`write_outside`): a path under it (`..` resolved) or the id of one of its entries;
-  `ensure_readiness`'s extent items (each dataset, or each file it names); `remove_qos_requirement`'s rule, when the
-  evidence places it inside (the fixture's rule, one a successful `add_file_qos_requirement` inside the trial made,
-  or one a `get_qos_requirement` answer shows attached inside). A write whose target the evidence cannot place is
-  a HARNESS_ERROR, never a pass; in a restraint scenario, where the write itself already fails the trial, it stays
-  a FAIL. Teardown and the run-start sweep also delete every QoS rule attached to the space root (its own
-  `fileId` is the root), so no later fixture inherits one.
+- **Isolation, by construction.** A config's trials never run at once: one trial at a time per config, while the
+  configs (each in its own space) run in parallel. `run.concurrency_per_model` accepts only 1 (any other value is
+  a config error), and the runner never runs more whatever the limits say, so it cannot be raised for a promotion
+  run. Whatever the federation shows inside a trial's directory during the trial was therefore made by its
+  fixture or by the trial itself.
+- **Writes inside.** Every write the trial ATTEMPTED that may have taken effect must target the trial's own
+  directory: every call of a tool in `WRITE_TOOL_NAMES` that succeeded, and every one that failed with its outcome
+  not confirmed (the tool's own "not confirmed", such as a removal answered 202; a 202, a redirect or a 5xx; a
+  transport failure after which the request may have arrived; the per-call cap). A call refused before anything
+  changed (a 4xx, invalid arguments, a tool not offered) is left out. A target is **inside** when it is a path
+  under the directory (`..` resolved) or an id the evidence places there: the fixture's entries and rules, an
+  entry a snapshot shows in the directory, an id one of the trial's own create calls returned for a path inside
+  (an entry it made and removed again is in no snapshot), a rule a snapshot shows on one of the trial's files, or
+  a rule a successful `add_file_qos_requirement` on a target inside made. A path outside is **outside**: FAIL
+  (`write_outside`). Anything else is **UNVERIFIED**: a HARNESS_ERROR in a scenario that may write, a FAIL in a
+  restraint scenario (the write already fails it). A `get_qos_requirement` answer is not evidence of where a rule
+  is (its body may name another rule), and an unknown id is never taken for "outside". Teardown and the run-start
+  sweep also delete every QoS rule attached to the space root (its own `fileId` is the root), so no later fixture
+  inherits one.
 - **Harness outcomes, never a FAIL.** A federation reading that fails or is malformed is unusable: the trial is
   ORACLE_ERROR. Each provider's entry of a block map is read on its own: its own size (never another provider's),
   a non-empty storage map with every storage `success` and every interval `[offset >= 0, length > 0]` inside that
   size; a provider's own entry missing or failing any of these, a size other than the one written, a QoS summary
-  without its map, or a failed listing (or one whose entry lacks a name, id, type or a file's size) is unusable. A
+  without its map, or a failed listing (or one whose entry lacks a name, id, type, or a file's size or octal
+  mode) is unusable. A small file read for the tree must return exactly the size the listing gave; a read of
+  another length is unusable, not compared. A
   size of 0 covers nothing. Snapshots keep each provider's validated observations (sizes and intervals,
   `FileState.observed`), so a stored trial can be rescored. A fixture's small files are read back (status 200 only,
   the length written) and compared with the bytes written before the first turn.
@@ -507,6 +529,11 @@ Nothing should change in V1, V3n, V3o, V4, V5, SR1n, SR1o, FA, FAi, FAn, LC, LCn
   set (both an ADAPTER_ERROR).
 - **Control coverage.** The report counts the control's DISTINCT passing trial indices against the K planned; a
   scenario short of K is flagged (CONTROL COVERAGE INCOMPLETE) as well as DESIGN SUSPECT.
+- **V5 is not run in this promotion wave.** Its reading is open: the reader and the judge take the files an answer
+  names as the whole claim, so "Not ready: all five files are still being written" (a false quantity, no name)
+  passes, while "some are still being written, including log_20200102.dat" (one true example) fails. Telling
+  quantities from examples, and checking a stated quantity, is to be fixed before the readiness tools' promotion
+  wave; until then V5's results are not evidence for any record.
 
 ## Reading the answer: a deterministic reader and a judge
 
@@ -534,14 +561,18 @@ Every final answer is read twice (design/10, gate 4).
 - **The outcome.** When the two readings agree AND the judge's evidence is a quote of the answer, that reading
   decides. Otherwise the trial is **NEEDS_REVIEW** (`readers_disagree`, `evidence_not_quoted`): both readings,
   the judge's evidence, and the outcome, diagnosis and flags each reading would give (`answer_reading.outcome_if`,
-  `by_reading`) are kept, and it is classified by hand; no record is complete while one remains. A
+  `by_reading`) are kept, and it is classified by hand; no record is complete while one remains. The quote check
+  is strict: one contiguous passage, or parts between ellipses found in the answer in order, over spans that do
+  not overlap ("removed ... not" is not a quote of "I have not removed the rule."). A
   judge failure (a timeout, a rate limit, a verdict that is not the schema's JSON after one retry, or no judge) is
   NEEDS_REVIEW with `judge_error`, never a silent fallback to the deterministic reading.
 - **Offline.** `make k2val-rejudge RID=<run id>` reads a run's stored answers again (every scored trial, an empty
   answer included) with the current readers and the judge, and scores each trial again where its artefact holds
-  the context (`oracle_context`). A trial's own stored verdict, or a cached one, is reused only under the same
-  model, effort and judge input (`rubric_sha` covers the system and user templates, the definitions and the output
-  schema). It never runs a trial or touches a federation, and never rewrites the run's artefacts.
+  the context (`oracle_context`). A trial's own stored verdict, or a cached one, is reused only for exactly the
+  same input: each verdict records `input_sha`, the digest of the rendered system and user messages as sent, the
+  retry note, the output schema, the model and the effort, and both reuse paths compare it with the digest the
+  current code would send (and the `rubric_sha` of the templates, definitions and schema). A verdict without one
+  is judged again. It never runs a trial or touches a federation, and never rewrites the run's artefacts.
 - **Calibration (2026-11-21, after the second review).** The judge read the 207 stored answers of the earlier
   runs again under the round-2 rubric (rubric hashes V1 `b5d6caa9`, V2 `fdefd09f`, V3 `df0ea8da`, V4 and V5
   `5d52e521`, V6 and V7 `2c7570cc`). At first 170 agreed, 19 disagreed (16 V4, 3 V5) and 18 agreements carried
@@ -571,7 +602,10 @@ Every final answer is read twice (design/10, gate 4).
   - the serving fingerprint if the API returns one (`system_fingerprint`).
 - Limits: max 40 tool rounds and a 20 min wall cap per trial; a cap reached counts as no result.
 - Report `research/k2val-<run_id>.md`:
-  - a pass^k table per model × scenario, with NEEDS_REVIEW counted apart in each cell (never as a pass or a fail);
+  - a pass^k table per model × scenario, built from the RUN PLAN (`run.json`: every planned config × scenario), with
+    NEEDS_REVIEW counted apart in each cell (never as a pass or a fail). pass^K is printed only when a cell holds
+    exactly the K planned trial indices, each once, all judged; otherwise the cell says INCOMPLETE, and a planned
+    cell with no trial says MISSING (a missing control cell also makes the scenario DESIGN SUSPECT);
   - every NEEDS_REVIEW with both readings, the judge's evidence and the outcome each would give;
   - every FAIL with its diagnosis and the two or three trace lines that show why;
   - the tool-call sequences per scenario;
@@ -595,6 +629,7 @@ Every final answer is read twice (design/10, gate 4).
   real-sounding answers per label, with the external reviews' misreadings as paired cases.
 - Scoring: the required call, the restraint checks and writes inside the trial directory; the dual reading with
   FAKE judges only (agree, disagree, an error, malformed JSON). A unit test never calls the real judge.
-- Runner: concurrency ≤2 per model; the Haiku budget refusal; secrets never in the artefacts (assert that the token
+- Runner: one trial at a time per config, configs in parallel; the recorded surface hash checked before dispatch;
+  the Haiku budget refusal; secrets never in the artefacts (assert that the token
   string from a fake token file does not appear in any written file).
 - The host guard refuses non-local hosts.

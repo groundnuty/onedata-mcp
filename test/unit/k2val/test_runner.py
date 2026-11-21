@@ -96,6 +96,7 @@ def make_deps(
     cfg, api, clock, tmp_path, script_for, *, app=None, spend=None, settle_poll_s=15.0, **kw
 ) -> RunDeps:
     kw.setdefault("judge", AgreeingJudge())
+    kw.setdefault("surfaces", None)  # the fake app has no schemas; test_surfaces covers the check
     adapters: dict[str, ScriptedAdapter] = {}
 
     def factory(conf, on_cost):
@@ -631,9 +632,12 @@ async def test_other_models_do_not_use_the_anthropic_budget(cfg, api, fed, clock
 
 
 @pytest.mark.asyncio
-async def test_at_most_two_trials_at_once_per_model_and_models_run_in_parallel(
-    cfg, api, fed, clock, tmp_path
+@pytest.mark.parametrize("asked", [1, 4], ids=["config", "limits-raised-in-code"])
+async def test_one_trial_at_a_time_per_config_and_configs_run_in_parallel(
+    cfg, api, fed, clock, tmp_path, asked
 ) -> None:
+    """Isolation by construction (design/08): a config's trials never overlap, even when the
+    limits are raised past the config's guard in code."""
     live: dict[str, int] = {}
     peak: dict[str, int] = {}
     total_peak = 0
@@ -650,14 +654,15 @@ async def test_at_most_two_trials_at_once_per_model_and_models_run_in_parallel(
 
         return script
 
+    cfg = replace(cfg, limits=replace(cfg.limits, concurrency_per_model=asked))
     deps = make_deps(cfg, api, clock, tmp_path, script_for)
     models = [cfg.models["glm"], cfg.models["qwen36"]]
 
     arts = await run_sweep(deps, models, [SCENARIOS["V2"]], 4)
 
     assert len(arts) == 8 and all(a.outcome in ("PASS", "FAIL") for a in arts)
-    assert peak == {"glm": 2, "qwen36": 2}  # never more than 2 of one model, and 2 is used
-    assert total_peak > 2  # the two models overlapped
+    assert peak == {"glm": 1, "qwen36": 1}  # never two trials of one config at once
+    assert total_peak == 2  # the two configs overlapped
     # two trials of one model share a space but not a directory
     assert len({a.directory for a in arts}) == 8
 

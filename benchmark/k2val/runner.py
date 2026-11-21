@@ -6,9 +6,10 @@ snapshot the federation right after the final answer, let it settle, judge with 
 oracle, tear the fixture down. Every trial yields one artefact, whatever happens; a cap reached
 is `NO_RESULT`, never a `FAIL`.
 
-Concurrency: at most two trials at once per config; configs run in parallel (each has its own
-space, so they cannot touch each other's fixtures). Two trials of one config share the space
-but not a directory, and each tears down only its own.
+Concurrency: one trial at a time per config; configs run in parallel (each has its own space,
+so they cannot touch each other's fixtures). A config's trials share its space, so they never
+overlap: whatever the federation shows during a trial was done by that trial or was there
+before it (design/08, "Isolation"). Each trial tears down only its own directory.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import asyncio
 import hashlib
 import time
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,7 @@ from typing import Any
 from benchmark._runtime_types import AgentTrace, RunContext, ToolCall
 from benchmark.k2val.artefact import K2TrialArtefact, write_trial
 from benchmark.k2val.clock import REAL_CLOCK, Clock
-from benchmark.k2val.config import K2valConfig, ModelConf
+from benchmark.k2val.config import MAX_CONCURRENCY_PER_MODEL, K2valConfig, ModelConf
 from benchmark.k2val.federation import FedApi
 from benchmark.k2val.fixtures import BuiltFixture, FixtureBuilder, FixtureSpec
 from benchmark.k2val.legs import AdapterFactory
@@ -41,6 +42,7 @@ from benchmark.k2val.scoring import (
 from benchmark.k2val.secrets import redact, say
 from benchmark.k2val.snapshot import Snapshot, UnusableSnapshot, take_snapshot
 from benchmark.k2val.spend import SpendTracker
+from benchmark.k2val.surfaces import RECORDED_SURFACES, surface_problem
 
 TOOL_RESULT_CAP = 8 * 1024
 # A dispatch that ends without an answer for one of these reasons is a cap reached.
@@ -90,6 +92,12 @@ class RunDeps:
     notes: list[str] = field(default_factory=list)
     # The second reader of every answer (judge.py); None: every judged trial is NEEDS_REVIEW.
     judge: Any = None
+    # The recorded surface hash of each offered set (surfaces.py): before the model is called,
+    # the complete listing it would get must hash to its set's recorded value. None (unit tests
+    # with a fake app only) skips the check.
+    surfaces: Mapping[frozenset[str], tuple[str, str]] | None = field(
+        default_factory=lambda: RECORDED_SURFACES
+    )
 
 
 def _tools_for(deps: RunDeps, scenario: Scenario) -> frozenset[str]:
@@ -226,8 +234,14 @@ async def run_trial(
         )
         # The surface the model gets is the scenario's, exactly (design/10: a tool that answers
         # the task without the one under promotion must not be there).
-        offered = sorted(t.name for t in await rec_app.list_tools())
-        if problem := _surface_problem(scenario, tools, offered):
+        listing = await rec_app.list_tools()
+        offered = sorted(t.name for t in listing)
+        surface_sha: str | None = None
+        problem = _surface_problem(scenario, tools, offered)
+        if problem is None and deps.surfaces is not None:
+            # names are not enough: the descriptions and schemas must be the recorded ones
+            surface_sha, problem = surface_problem(listing, frozenset(offered), deps.surfaces)
+        if problem:
             return persist(
                 artefact(
                     "HARNESS_ERROR",
@@ -235,6 +249,7 @@ async def run_trial(
                     fixture_started_at=fixture.started_at,
                     fixture_ready_at=fixture.ready_at,
                     offered_tools=tuple(offered),
+                    offered_surface_sha=surface_sha,
                 )
             )
         try:
@@ -313,6 +328,7 @@ async def run_trial(
             "calls": tuple(r.to_json() for r in records),
             "directory": directory,
             "offered_tools": tuple(offered),
+            "offered_surface_sha": surface_sha,
         }
         writer_record = fixture.writer.record() if fixture.writer else None
         common["writer"] = writer_record
@@ -499,12 +515,14 @@ async def run_sweep(
     *,
     on_trial: Callable[[K2TrialArtefact], None] | None = None,
 ) -> list[K2TrialArtefact]:
-    """Every model x scenario x trial. At most `concurrency_per_model` trials of one model
-    at once; models run in parallel."""
+    """Every model x scenario x trial. One trial of a model at a time (never more than
+    MAX_CONCURRENCY_PER_MODEL, whatever the limits say); models run in parallel."""
     out: list[K2TrialArtefact] = []
 
     async def one_model(conf: ModelConf) -> None:
-        sem = asyncio.Semaphore(deps.cfg.limits.concurrency_per_model)
+        sem = asyncio.Semaphore(
+            max(1, min(deps.cfg.limits.concurrency_per_model, MAX_CONCURRENCY_PER_MODEL))
+        )
         builder = FixtureBuilder(deps.fed, conf.space, deps.clock)
         try:
             problems = await builder.sweep_space()

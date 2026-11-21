@@ -25,6 +25,7 @@ the effort and the rubric's hash.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import shutil
@@ -75,6 +76,9 @@ class JudgeVerdict:
     model: str = ""
     effort: str = ""
     rubric_sha: str = ""
+    # `input_sha`: the digest of what this verdict's call sent (the rendered system and user
+    # messages, the schema, the model, the effort); a verdict is reused only for the same one
+    input_sha: str = ""
     attempts: int = 0
     raw: list[str] = field(default_factory=list)
     seconds: float = 0.0
@@ -89,6 +93,7 @@ class JudgeVerdict:
             "model": self.model,
             "effort": self.effort,
             "rubric_sha": self.rubric_sha,
+            "input_sha": self.input_sha,
             "attempts": self.attempts,
             "raw": self.raw,
             "seconds": round(self.seconds, 2),
@@ -106,11 +111,45 @@ class JudgeVerdict:
             model=data.get("model") or "",
             effort=data.get("effort") or "",
             rubric_sha=data.get("rubric_sha") or "",
+            input_sha=data.get("input_sha") or "",
             attempts=int(data.get("attempts") or 0),
             raw=list(data.get("raw") or []),
             seconds=float(data.get("seconds") or 0.0),
             evidence_quoted=data.get("evidence_quoted"),
         )
+
+
+def _input_sha(system: str, user: str, schema: dict, model: str, effort: str) -> str:
+    payload = json.dumps(
+        {
+            "system": system,
+            "user": user,
+            "retry_note": RETRY_NOTE,
+            "schema": schema,
+            "model": model,
+            "effort": effort,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def judge_input_sha(
+    scenario_id: str, *, brief: str, local: str, answer: str, model: str, effort: str
+) -> str:
+    """The digest of the judge's input for this answer, rendered as `ClaudeSdkJudge` sends it:
+    the system message (the rubric with the brief and the site), the user message (the answer),
+    the retry note's template, the output schema, the model and the effort. A stored or cached
+    verdict is reused only when its `input_sha` equals this."""
+    spec = ANSWER_SPECS[scenario_id]
+    return _input_sha(
+        rubric(spec, brief=brief, local=local),
+        user_message(answer),
+        output_schema(spec),
+        model,
+        effort,
+    )
 
 
 class Judge(Protocol):
@@ -180,17 +219,31 @@ _ELLIPSIS = re.compile(r"\.\.\.|…|\[\.\.\.\]")
 
 
 def evidence_quoted(evidence: str, answer: str) -> bool:
-    """The evidence is a passage of the answer: each part of it between ellipses is found in the
-    answer (whitespace, emphasis and case aside). An empty answer has only empty evidence."""
+    """The evidence is a passage of the answer: one contiguous quote, or parts between ellipses
+    found in the answer IN ORDER over spans that do not overlap (whitespace, emphasis and case
+    aside), so "removed ... not" is not a quote of "I have not removed the rule.". An empty
+    answer has only empty evidence."""
     if not answer.strip():
         return not evidence.strip()
     flat_answer = _flat(answer)
     for candidate in (evidence, _unescaped(evidence)):
         parts = [_flat(p).strip(" .,;:\"'“”") for p in _ELLIPSIS.split(candidate)]
         parts = [p for p in parts if p]
-        if parts and all(p in flat_answer for p in parts):
+        if parts and _in_order(parts, flat_answer):
             return True
     return False
+
+
+def _in_order(parts: list[str], text: str) -> bool:
+    """Each part found after the end of the one before (the leftmost match of each is the
+    earliest-ending one, so a greedy scan finds an ordering whenever one exists)."""
+    at = 0
+    for part in parts:
+        found = text.find(part, at)
+        if found < 0:
+            return False
+        at = found + len(part)
+    return True
 
 
 def _unescaped(evidence: str) -> str:
@@ -232,6 +285,9 @@ class ClaudeSdkJudge:
         )
         system = rubric(spec, brief=brief, local=local)
         prompt = user_message(answer)
+        verdict.input_sha = _input_sha(
+            system, prompt, output_schema(spec), self.conf.model, self.conf.effort
+        )
         t0 = time.monotonic()
         async with self._sem:
             why = ""

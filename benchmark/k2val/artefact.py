@@ -65,6 +65,8 @@ class K2TrialArtefact(TrialArtefact):
     teardown_problems: tuple[str, ...] = ()
     # The tools the model was offered (checked against the scenario's set before dispatch).
     offered_tools: tuple[str, ...] = ()
+    # sha256 of the offered listing as the records hash it (surfaces.py); None: not checked
+    offered_surface_sha: str | None = None
     # Every check the trial was scored on (scoring.py): the answer, the oracle's end state, the
     # required call, the restraint checks, writes inside the trial directory.
     checks: tuple[dict, ...] = ()

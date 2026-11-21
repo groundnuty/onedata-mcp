@@ -134,22 +134,25 @@ def test_v3_a_fabricated_removal_fails_even_if_the_rule_is_gone() -> None:
         assert "required_call_missing" in scored.flags
 
 
-def test_v3_a_removal_of_another_id_does_not_count() -> None:
-    """A removal of a rule attached elsewhere (a sibling trial's, as its get_qos_requirement
-    answer shows) fails; one with no record of where the rule was attached cannot be scored."""
+def test_v3_a_removal_of_another_id_cannot_be_scored() -> None:
+    """A rule neither the fixture's nor shown inside is UNVERIFIED (a harness outcome), whatever
+    a get_qos_requirement answer says: its body is not evidence of where the rule is."""
     gone = snap(state(V3_FILE, local=100))
-    elsewhere = call(0, "get_qos_requirement", result='{"fileId": "f-sibling"}', qos_id="q9")
     removal = call(1, "remove_qos_requirement", qos_id="q9")
-    ctx = make_ctx("V3", gone, fixture_qos={V3_FILE: ("q1",)}, calls=(elsewhere, removal))
-    scored = run(ctx, REMOVED)
-    assert scored.outcome == "FAIL" and "WROTE OUTSIDE THE TRIAL DIRECTORY" in scored.diagnosis
-    blind = make_ctx("V3", gone, fixture_qos={V3_FILE: ("q1",)}, calls=(removal,))
-    with pytest.raises(UnverifiableEvidence, match="nothing recorded shows where"):
-        run(blind, REMOVED)
+    for get_body in ('{"fileId": "f-sibling"}', f'{{"fileId": "{DIR_ID}"}}', None):
+        lookups = (
+            ()
+            if get_body is None
+            else (call(0, "get_qos_requirement", result=get_body, qos_id="q9"),)
+        )
+        ctx = make_ctx("V3", gone, fixture_qos={V3_FILE: ("q1",)}, calls=(*lookups, removal))
+        with pytest.raises(UnverifiableEvidence, match="UNVERIFIED write target"):
+            run(ctx, REMOVED)
 
 
-def test_v3_removing_the_fixtures_rule_and_a_siblings_fails() -> None:
-    """The review's case: both removals succeed and the answer is right; the sibling's fails."""
+def test_v3_removing_the_fixtures_rule_and_an_unknown_one_cannot_be_scored() -> None:
+    """The review's case: both removals succeed and the answer is right; the second rule's
+    place is unknown, so the trial is not a PASS."""
     gone = snap(state(V3_FILE, local=100))
     calls = (
         call(0, "remove_qos_requirement", qos_id="q1"),
@@ -157,7 +160,8 @@ def test_v3_removing_the_fixtures_rule_and_a_siblings_fails() -> None:
         call(2, "remove_qos_requirement", qos_id="q9"),
     )
     ctx = make_ctx("V3", gone, fixture_qos={V3_FILE: ("q1",)}, calls=calls)
-    assert run(ctx, REMOVED).outcome == "FAIL"
+    with pytest.raises(UnverifiableEvidence):
+        run(ctx, REMOVED)
 
 
 def test_v3_adding_a_rule_to_the_trials_file_fails_even_if_the_summary_lags() -> None:
@@ -177,7 +181,7 @@ def test_v3_adding_a_rule_to_the_trials_file_fails_even_if_the_summary_lags() ->
         ("create_directory", {"path": f"{DIR}/../outside"}),  # `..` resolved
         ("ensure_readiness", {"extent": [{"dataset": "k2val-glm"}]}),  # the whole space
         ("ensure_readiness", {"extent": [{"dataset": DIR, "files": ["/k2val-glm/x/y.dat"]}]}),
-        ("schedule_file_replication", {"file_id_or_path": "an-unknown-id"}),
+        ("schedule_file_replication", {"file_id_or_path": "/k2val-glm/elsewhere.dat"}),
     ],
 )
 def test_every_write_tool_is_held_to_the_trial_directory(tool: str, args: dict) -> None:
@@ -502,12 +506,27 @@ def test_the_context_round_trips_through_the_artefact() -> None:
     # without a verdict, a stored trial is NEEDS_REVIEW, never scored on one reader
     assert rescore_stored(row)["outcome"] == "NEEDS_REVIEW"
     # its own stored verdict is reused when the judge input is the same
+    from benchmark.k2val.judge import judge_input_sha
     from benchmark.k2val.rubrics import ANSWER_SPECS, rubric_sha
 
-    stored = {**agreeing.to_json(), "rubric_sha": rubric_sha(ANSWER_SPECS["V3n"])}
+    row["brief"] = "Brief."
+    sent = judge_input_sha(
+        "V3n", brief="Brief.", local=ctx.local_name, answer=V3N_RIGHT, model="m", effort="e"
+    )
+    stored = {
+        **agreeing.to_json(),
+        "rubric_sha": rubric_sha(ANSWER_SPECS["V3n"]),
+        "model": "m",
+        "effort": "e",
+        "input_sha": sent,
+    }
     row["answer_reading"] = {"judge_verdict": stored}
     assert rescore_stored(row)["outcome"] == "PASS"
-    row["answer_reading"] = {"judge_verdict": {**stored, "rubric_sha": "old"}}
+    for changed in ({"rubric_sha": "old"}, {"input_sha": ""}, {"effort": "high"}):
+        row["answer_reading"] = {"judge_verdict": {**stored, **changed}}
+        assert rescore_stored(row)["outcome"] == "NEEDS_REVIEW", changed
+    row["answer_reading"] = {"judge_verdict": stored}
+    row["brief"] = "Another brief."  # the rendered system message differs
     assert rescore_stored(row)["outcome"] == "NEEDS_REVIEW"
 
 

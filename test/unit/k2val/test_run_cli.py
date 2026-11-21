@@ -192,7 +192,7 @@ def test_rejudge_reads_stored_answers_offline_with_cached_verdicts(tmp_path, mon
     import json
 
     from benchmark.k2val import rejudge
-    from benchmark.k2val.judge import JudgeConf, JudgeVerdict
+    from benchmark.k2val.judge import JudgeConf, JudgeVerdict, judge_input_sha
 
     run_dir = tmp_path / "R1"
     run_dir.mkdir()
@@ -219,10 +219,24 @@ def test_rejudge_reads_stored_answers_offline_with_cached_verdicts(tmp_path, mon
     key = rejudge.cache_key(
         "V3n", rows[0]["brief"], "vistula-dc", rows[0]["final_answer"], JudgeConf()
     )
+    sent = judge_input_sha(
+        "V3n",
+        brief=rows[0]["brief"],
+        local="vistula-dc",
+        answer=rows[0]["final_answer"],
+        model=JudgeConf().model,
+        effort=JudgeConf().effort,
+    )
     cache.put(
         key,
         trials[0].key,
-        JudgeVerdict("V3n", value="NO_RULE", evidence="no placement rule", evidence_quoted=True),
+        JudgeVerdict(
+            "V3n",
+            value="NO_RULE",
+            evidence="no placement rule",
+            evidence_quoted=True,
+            input_sha=sent,
+        ),
     )
 
     def no_judge(*a, **k):

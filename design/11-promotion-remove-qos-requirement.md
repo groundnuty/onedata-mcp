@@ -1,6 +1,6 @@
 # Promotion record: `remove_qos_requirement`
 
-Status: **in progress** (2026-11-20). Gate 1 is done, and was redone after two external reviews (see [External review](#external-review)). Gate 2 is done except for `make conformance`, which has not been run. Gate 3's live test is built but has not been run. Gate 4's scenarios are built and unit-tested on the fake federation, but the run has not happened. The validation federation is on hold, so nothing here touched a live Onedata. The tool stays `experimental` until gates 2–4 are complete. It moves to `STABLE` in the PR that completes this record.
+Status: **in progress** (2026-11-20). Gate 1 is done, and was redone after two external reviews (see [External review](#external-review)). Gate 2 is done (`make conformance` passed on the integrated server, 2026-11-21). Gate 3's live test is built but has not been run. Gate 4's scenarios are built and unit-tested on the fake federation, but the run has not happened. The validation federation is on hold, so nothing here touched a live Onedata. The tool stays `experimental` until gates 2–4 are complete. It moves to `STABLE` in the PR that completes this record.
 
 The short commit ids below are **branch commits** on `feat/promote-remove-qos-requirement`; the fixes that answer the external review are on `fix/qos-review-findings`. A squash merge leaves them unreachable from `master`. **The anchor is the surface hash.**
 
@@ -74,7 +74,7 @@ A *structured* Onedata error is a JSON body whose `error.id` is `notFound` or wh
 - The protocol's "empty result" path has no separate case for a removal. Removing an id that names nothing is the unknown-id path above.
 - `get_qos_requirement`, a stable tool, shares the id guard. See [its own section](#get_qos_requirement-a-stable-tool-changed-on-this-branch).
 
-## Gate 2: surface review (done except `make conformance`, branch commit `ac6141a`)
+## Gate 2: surface review (done, branch commit `ac6141a`)
 
 Checked against the protocol's rules; `test_the_description_follows_the_surface_rules` covers the first three:
 
@@ -82,7 +82,7 @@ Checked against the protocol's rules; `test_the_description_follows_the_surface_
 - **Names no tool that may not be offered alongside it:** yes. The description and the `qos_id` field name no tool.
 - **Cites no document the model cannot read:** yes.
 - **Errors tell the caller how to fix the call:** done in gate 1. The first version of the error text named `get_file_qos_summary`, which is not offered in a hand-written `ONEDATA_MCP_TOOLS` and may not be under `ONEDATA_MCP_MATURITY`. After the external review the text names no tool: it says a file's requirement ids are "the keys of `requirements` in its QoS summary".
-- **`make conformance`: TODO.** It needs `npx` and a local port, and was not run here. Command: `make conformance`.
+- **`make conformance`: passed** on the integrated server (the integration branch `feat/promotion-harness` at `501c867`, which carries all five packages), run 2026-11-21 (`conformance-results/20261121T010707Z`) with `@modelcontextprotocol/conformance@0.1.16`, the version `make conformance` now pins: 12 passed, 20 failed, every failure expected (`conformance-baseline.yaml`: scenarios that need prompts, resources, completion, sampling, elicitation or the suite's own test tools, none of which this server has), and the baseline check passed. Conformance tests the protocol, not one tool, so this one run serves design/11–15.
 - **Inherited requirements:** a file's QoS summary also lists requirements inherited from ancestor directories, and removing such an id removes the directory's requirement for every file under it. **Fixed before the gate-4 run:** the description now says so.
 
 ## Gate 3: live check (built in branch commit `d5f7ff5`, reworked on `fix/qos-review-findings`, not run)
@@ -187,7 +187,7 @@ Classify every non-pass before anything counts, every NEEDS_REVIEW first (which 
 
 This file. To complete it:
 
-1. Fill in the TODOs of gates 2 to 4: conformance, the live results and the panel's results.
+1. Fill in the TODOs of gates 3 and 4: the live results and the panel's results.
 2. Check that every row of [External review](#external-review) is closed, and that the items listed as open there are done.
 3. Run `get_qos_requirement`'s smoke re-run (below) and record it.
 4. Then, in the same PR, move `remove_qos_requirement` from `EXPERIMENTAL` to `STABLE` in `onedata_mcp/tool_maturity.py`, and change its tier in README's tool table.
@@ -207,7 +207,7 @@ Its `tools/list` entry (name, description, input schema, annotations) is unchang
 
 ## External review
 
-Two external frontier models reviewed the package before the validation run, each through a jailed wrapper (gate 5 of design/10). Codex gave 13 findings and Gemini 9, numbered as in their reports. Neither ran `make conformance`, the surface hashes or a live Onedata. The hashes were recomputed above; conformance and the live test are still open.
+Two external frontier models reviewed the package before the validation run, each through a jailed wrapper (gate 5 of design/10). Codex gave 13 findings and Gemini 9, numbered as in their reports. Neither ran `make conformance`, the surface hashes or a live Onedata. The hashes were recomputed above; conformance has since passed (gate 2) and the live test is still open.
 
 The status is one of: **fixed in this branch** (`fix/qos-review-findings`); **harness: resolved in the harness change** (the oracles, runner, fixtures, scenario coverage and protocol, which are not tool code); or **open**, with what is missing.
 
@@ -236,7 +236,7 @@ The status is one of: **fixed in this branch** (`fix/qos-review-findings`); **ha
 | 1 | BLOCKING | The V3 oracle ignores the federation's end state for `mcp_pass`, and `at_answer` | harness: resolved in the harness change |
 | 2 | BLOCKING | V3's `claims_removed` has false positives and false negatives | harness: resolved in the harness change |
 | 3 | BLOCKING | The V3n and V3o answer readers misclassify realistic answers | harness: resolved in the harness change |
-| 4 | BLOCKING | Gates 2 and 3 are unrun; V3n and V3o have no settle wait; local coverage is missing from the V3 variants' `mcp_pass` | settle wait and local coverage: harness: resolved in the harness change. `make conformance` and the live test are **open** (the federation is on hold) |
+| 4 | BLOCKING | Gates 2 and 3 are unrun; V3n and V3o have no settle wait; local coverage is missing from the V3 variants' `mcp_pass` | settle wait and local coverage: harness: resolved in the harness change. `make conformance`: passed (gate 2, 2026-11-21). The live test is **open** (the federation is on hold) |
 | 5 | MAJOR | Over-broad 404 and 400 hint mapping | fixed in this branch |
 | 6 | MAJOR | `get_qos_requirement` was changed without being recorded (6.1); the id is not stripped and is under-validated (6.2) | fixed in this branch (6.1: this record; 6.2: the id guard) |
 | 7 | MAJOR | The live cleanup can delete ancestor rules; no live check of a file id, of a 403, or of the status | fixed in this branch for the cleanup, the file id and the status. The live 403 case is **open**: it needs a token without `space_manage_qos`, and the permission hint is covered by unit tests only |

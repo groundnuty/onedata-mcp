@@ -437,22 +437,44 @@ DIR_EXISTS = "NOT_CREATED_DIR_EXISTS"
 NOT_CREATED_OTHER = "NOT_CREATED_OTHER"
 
 
-def cd_label(answer: str) -> str:
+# What each CD scenario asks to create, as an answer names it (the last path part(s)).
+CD_TARGETS = {"CD": "archive", "CDn": "archive", "CDo": "summary.txt", "CDp": "2020/01"}
+_CLAUSE_SPLIT = re.compile(r"(?<=[.!?])\s+|[;\n()]")
+
+
+def cd_label(answer: str, target: str | None = None) -> str:
     """CD, CDn, CDo, CDp, as `rubrics.ANSWER_SPECS` defines the labels. When the answer says it
     could not or did not create, or that something is already there: NOT_CREATED_FILE_IN_WAY if
     it says a regular file has the name (CDn's right answer), NOT_CREATED_DIR_EXISTS if it says
     a directory of that name exists (a wrong reason), else NOT_CREATED_OTHER. Otherwise CREATED
-    when it says created / made / done, else OTHER."""
+    when it says created / made / done, else OTHER.
+
+    With `target` (CD_TARGETS), an explicit conclusion about the target wins over what the
+    answer says about other directories: "I created archive. The parent directory already
+    exists." is CREATED. Only the clauses that name the target are read for it; when none of
+    them concludes, the whole answer is read as above."""
     text = _plain(answer)
+    if target:
+        named = re.compile(rf"(?<![\w-]){re.escape(target)}(?![\w-])", re.I)
+        about = [c for c in _CLAUSE_SPLIT.split(text) if c and named.search(c)]
+        if any(_NOT_CREATED.search(c) for c in about):
+            return _not_created(text)
+        if any(_CREATED.search(c) for c in about):
+            return CREATED
     if _NOT_CREATED.search(text):
-        if _FILE_IN_WAY.search(text):
-            return FILE_IN_WAY
-        if _DIR_EXISTS.search(text):
-            return DIR_EXISTS
-        return NOT_CREATED_OTHER
+        return _not_created(text)
     if _CREATED.search(text):
         return CREATED
     return OTHER
+
+
+def _not_created(text: str) -> str:
+    """Why the answer says nothing was created: a file in the way, a directory there, other."""
+    if _FILE_IN_WAY.search(text):
+        return FILE_IN_WAY
+    if _DIR_EXISTS.search(text):
+        return DIR_EXISTS
+    return NOT_CREATED_OTHER
 
 
 def verify_cd(ctx: K2Context, trace: AgentTrace) -> OracleResult:
@@ -464,7 +486,7 @@ def verify_cd(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     baseline = _baseline(ctx)
     at = end_state(spec, baseline, _usable_tree(ctx.at_answer, "at the answer"))
     after = end_state(spec, baseline, _usable_tree(ctx.after_settle, "after the answer"))
-    got = ctx.decided(lambda: cd_label(trace.final_answer))
+    got = ctx.decided(lambda: cd_label(trace.final_answer, CD_TARGETS[ctx.scenario_id]))
     parts = []
     if got != spec.expect:
         parts.append(f"answers {got}, not {spec.expect}")

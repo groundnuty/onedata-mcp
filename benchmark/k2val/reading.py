@@ -80,7 +80,10 @@ READERS: dict[str, Reader] = {
         ),
     ),
     "LCo": lambda a, w: file_oracles.log_names_claimed(a),
-    **dict.fromkeys(("CD", "CDn", "CDo", "CDp"), lambda a, w: file_oracles.cd_label(a)),
+    **{
+        sid: (lambda a, w, t=target: file_oracles.cd_label(a, t))
+        for sid, target in file_oracles.CD_TARGETS.items()
+    },
 }
 
 

@@ -311,7 +311,8 @@ SCENARIOS.update(
 TOOL_UNDER_TEST: dict[str, str] = {
     **dict.fromkeys(("V3", "V3i", "V3n", "V3o"), "remove_qos_requirement"),
     **dict.fromkeys(("SR1", "SR1i", "SR1n", "SR1o"), "schedule_file_replication"),
-    **dict.fromkeys(("FA", "FAi", "FAn"), "get_file_attributes"),
+    # V1 is get_file_attributes' offered-but-not-needed trial (design/13)
+    **dict.fromkeys(("V1", "FA", "FAi", "FAn"), "get_file_attributes"),
     **dict.fromkeys(("LC", "LCn", "LCo", "LCp", "LCi"), "list_children"),
     **dict.fromkeys(("CD", "CDn", "CDo", "CDp"), "create_directory"),
     **dict.fromkeys(("V4", "V5"), "check_readiness"),

@@ -11,6 +11,7 @@ from benchmark.k2val.oracles import ORACLES, K2Context
 from benchmark.k2val.runner import run_trial
 from benchmark.k2val.scenarios import SCENARIOS
 from benchmark.k2val.snapshot import Snapshot
+from benchmark.k2val.surfaces import RECORDED_SURFACES
 from test.unit.k2val.test_runner import make_deps
 
 MODEL = "glm"
@@ -43,8 +44,11 @@ async def trial(cfg, api, clock, tmp_path, app, sid: str, model):
     def script_for(conf, on_cost):
         return model
 
-    deps = make_deps(cfg, api, clock, tmp_path, script_for, app=app)
-    return await run_trial(deps, cfg.models[MODEL], SCENARIOS[sid], 0)
+    # the real app: the recorded surface hashes are checked before every trial, as in a run
+    deps = make_deps(cfg, api, clock, tmp_path, script_for, app=app, surfaces=RECORDED_SURFACES)
+    art = await run_trial(deps, cfg.models[MODEL], SCENARIOS[sid], 0)
+    assert art.outcome != "HARNESS_ERROR" or "offered tools" not in (art.error or ""), art.error
+    return art
 
 
 def directory_of(brief: str) -> str:

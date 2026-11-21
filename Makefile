@@ -103,7 +103,7 @@ help:
 	@echo "    valfed-files-live  the gated live test of the three file tools, in omcp-live"
 	@echo ""
 	@echo "  MCP-protocol validation  (paper-grade artifacts)"
-	@echo "    conformance        run modelcontextprotocol/conformance suite v0.1.16+"
+	@echo "    conformance        run modelcontextprotocol/conformance suite 0.1.16 (pinned)"
 	@echo "                       against onedata-mcp on a temp HTTP transport;"
 	@echo "                       output → conformance-results/<timestamp>/"
 	@echo "    inspect-smoke      run modelcontextprotocol/inspector --cli"
@@ -494,7 +494,9 @@ valfed-files-live:
 # scripts/with-http-server.sh), run an external validator against it,
 # and tear the server down. Both produce paper-citable artifacts:
 #
-#   conformance     — modelcontextprotocol/conformance v0.1.16+
+#   conformance     — modelcontextprotocol/conformance 0.1.16 (pinned: a
+#                     new suite version may add scenarios the baseline
+#                     does not list, so a bump is a deliberate change)
 #                     (March 2026, Anthropic-canonical protocol suite).
 #                     Validates JSON-RPC, capability negotiation,
 #                     spec compliance. Output: conformance-results/.
@@ -515,7 +517,7 @@ conformance:
 	mkdir -p "$${OUTDIR}"; \
 	echo "Conformance run → $${OUTDIR}"; \
 	scripts/with-http-server.sh --port $(MCP_CONFORMANCE_PORT) -- \
-	  npx -y @modelcontextprotocol/conformance@latest server \
+	  npx -y @modelcontextprotocol/conformance@0.1.16 server \
 	    --url __MCP_URL__ \
 	    --expected-failures conformance-baseline.yaml \
 	    --output-dir "$${OUTDIR}" 2>&1 | tee "$${OUTDIR}/run.log"; \

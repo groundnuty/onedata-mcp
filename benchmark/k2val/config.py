@@ -41,8 +41,20 @@ CLI_BACKENDS = ("codex", "agy")
 # forwards the string unchanged.
 CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 CLAUDE_THINKING_MODES = ("adaptive", "disabled")
-# Hard ceiling of the guard: a config may lower the concurrency per model, never raise it.
-MAX_CONCURRENCY_PER_MODEL = 2
+# Trials of one config never overlap (design/08, "Isolation"): its trials share its space, and
+# one trial's writes must not be read as another's. Configs still run in parallel. A config
+# that asks for more is refused, and the runner never runs more whatever the limits say.
+MAX_CONCURRENCY_PER_MODEL = 1
+
+
+def _concurrency(run: dict) -> int:
+    value = int(run.get("concurrency_per_model", MAX_CONCURRENCY_PER_MODEL))
+    if value != MAX_CONCURRENCY_PER_MODEL:
+        raise ConfigError(
+            f"run.concurrency_per_model must be {MAX_CONCURRENCY_PER_MODEL} (got {value}): "
+            "trials of one config never run at once (design/08, Isolation)"
+        )
+    return value
 
 
 class ConfigError(ValueError):
@@ -359,10 +371,7 @@ def parse_config(raw: dict[str, Any], *, path: Path | None = None) -> K2valConfi
         wall_cap_s=float(run.get("wall_cap_s", 1200)),
         tool_call_cap_s=float(run.get("tool_call_cap_s", 300)),
         settle_s=float(run.get("settle_s", 60)),
-        concurrency_per_model=min(
-            int(run.get("concurrency_per_model", MAX_CONCURRENCY_PER_MODEL)),
-            MAX_CONCURRENCY_PER_MODEL,
-        ),
+        concurrency_per_model=_concurrency(run),
     )
     spend_raw = _table(raw, "spend")
     spend = SpendConf(

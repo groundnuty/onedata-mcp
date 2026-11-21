@@ -1,6 +1,6 @@
 # Promotion record: `get_file_attributes`
 
-Status: **in progress** (2026-11-20; external review addressed, see below). Gate 1 is done. Gate 2 is done except for `make conformance`, which has not been run. Gate 3's live test is built but has not been run. Gate 4's scenarios are built and unit-tested on the fake federation, but the run has not happened. The validation federation is on hold, so nothing here touched a live Onedata. The tool stays `experimental` until gates 2–4 are complete. It moves to `STABLE` in the PR that completes this record.
+Status: **in progress** (2026-11-20; external review addressed, see below). Gate 1 is done. Gate 2 is done (`make conformance` passed on the integrated server, 2026-11-21). Gate 3's live test is built but has not been run. Gate 4's scenarios are built and unit-tested on the fake federation, but the run has not happened. The validation federation is on hold, so nothing here touched a live Onedata. The tool stays `experimental` until gates 2–4 are complete. It moves to `STABLE` in the PR that completes this record.
 
 The short commit ids below are **branch commits** on `feat/promote-file-tools`. A squash merge leaves them unreachable from `master`. **The anchor is the surface hash.**
 
@@ -64,7 +64,7 @@ Every error path a model can trigger, and what the model now reads. The tests ar
 - Paths are resolved with the three tools' own lookup. The stable tools keep `get_file_id`, whose shared mapping still reads `spaceNotSupportedBy` as a missing space; changing it would need their own gates.
 - Gate 1 also asks for list caps: `attributes` was the tool's only list, and it had none.
 
-## Gate 2: surface review (done except `make conformance`, branch commit `a77989b`)
+## Gate 2: surface review (done, branch commit `a77989b`)
 
 Checked against the protocol's rules; `test_the_description_follows_the_surface_rules` covers the first three:
 
@@ -72,7 +72,7 @@ Checked against the protocol's rules; `test_the_description_follows_the_surface_
 - **Names no tool that may not be offered alongside it:** yes. **Cites no document:** yes.
 - **Says it works for directories:** it did not ("path to the file"). Fixed in the description and the field.
 - **Errors tell the caller how to fix the call:** done in gate 1.
-- **`make conformance`: TODO.** It needs `npx` and a local port, and was not run here.
+- **`make conformance`: passed** on the integrated server (the integration branch `feat/promotion-harness` at `501c867`, which carries all five packages), run 2026-11-21 (`conformance-results/20261121T010707Z`) with `@modelcontextprotocol/conformance@0.1.16`, the version `make conformance` now pins: 12 passed, 20 failed, every failure expected (`conformance-baseline.yaml`: scenarios that need prompts, resources, completion, sampling, elicitation or the suite's own test tools, none of which this server has), and the baseline check passed. Conformance tests the protocol, not one tool, so this one run serves design/11–15.
 - **Reported, not changed:** two stable tools' texts name this tool: `get_file_metadata`'s description, and `list_files_recursively`'s `attributes` field ("Use the same allowed values as in get_file_attributes"). Under `ONEDATA_MCP_MATURITY=stable` they point to a tool that is not offered; promoting this tool fixes that for the stable tier. Changing their wording would cost them a smoke re-run.
 - **Not stated:** the unit of the times. The swagger says seconds, but its examples have 13 digits. The live test prints a real value before anything is said.
 
@@ -210,7 +210,7 @@ Two further external reviews (Codex and Gemini, round 2) of the whole promotion 
 
 This file. To complete it:
 
-1. Fill in the TODOs of gates 2 to 4: conformance, the live results and the panel's results.
+1. Fill in the TODOs of gates 3 and 4: the live results and the panel's results.
 2. Then, in the same PR, move `get_file_attributes` from `EXPERIMENTAL` to `STABLE` in `onedata_mcp/tool_maturity.py`, and change its tier in README's tool table. `test/unit/test_tool_maturity.py` lists it among the experimental tools; update that test in the same PR.
 
 ## Decisions for the operator
