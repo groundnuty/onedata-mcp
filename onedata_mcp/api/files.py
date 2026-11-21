@@ -456,7 +456,7 @@ async def download_file_with_meta(file_id_or_path: str) -> tuple[bytes, str | No
         # Same host-free answer as `request()`: no URL, address, port or library text.
         raise transport_failure(exc, config, "GET", content_path) from None
 
-    if response.is_error:
+    if not 200 <= response.status_code < 300:  # a redirect is not file data either
         raise OnedataApiError(
             http_failure_message(
                 config, "GET", content_path, response.status_code, decode_response_body(response)
@@ -859,7 +859,7 @@ async def move_file(
     except Exception as exc:
         raise transport_failure(exc, config, "PUT", cdmi_path, label="CDMI move failed") from None
 
-    if response.is_error:
+    if not 200 <= response.status_code < 300:  # a redirect is not a completed move
         raise OnedataApiError(
             http_failure_message(
                 config,

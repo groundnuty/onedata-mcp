@@ -506,8 +506,8 @@ async def test_remove_qos_requirement_other_errors_are_passed_on_unchanged(
 async def test_remove_qos_requirement_a_redirect_is_not_a_removal(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, status: int
 ) -> None:
-    """httpx follows no redirect and does not count a 3xx as an error: it would read as success
-    while the requirement is still there."""
+    """No redirect is followed, and `request` raises on any status outside 2xx: the answer says
+    that the removal is not confirmed, never an empty success."""
     _set_env(monkeypatch)
     qid = "c84f669f9522c46976fee490d80651f0"
     httpx_mock.add_response(
@@ -527,20 +527,54 @@ async def test_remove_qos_requirement_a_redirect_is_not_a_removal(
     assert "removal is not confirmed" in text and "may still exist" in text
     assert WHERE in text
     assert "elsewhere" not in text and "<html>" not in text and "https://" not in text
-    assert err.response == {"status_code": status, "body": None}
+    assert err.response["status_code"] == status
     assert len(httpx_mock.get_requests()) == 1  # not followed
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [200, 202, 204])
-async def test_remove_qos_requirement_any_2xx_is_a_success(
+async def test_remove_qos_requirement_a_204_is_the_success(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    qid = "c84f669f9522c46976fee490d80651f0"
+    httpx_mock.add_response(method="DELETE", url=f"{QOS_URL}/{qid}", status_code=204)
+
+    assert await qos.remove_qos_requirement(qid) is None
+
+
+@pytest.mark.asyncio
+async def test_remove_qos_requirement_a_202_is_accepted_but_the_removal_is_not_confirmed(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """The swagger documents 204 only. A 202 does not say that the requirement is gone."""
+    _set_env(monkeypatch)
+    qid = "c84f669f9522c46976fee490d80651f0"
+    httpx_mock.add_response(method="DELETE", url=f"{QOS_URL}/{qid}", status_code=202)
+
+    with pytest.raises(OnedataApiError) as excinfo:
+        await qos.remove_qos_requirement(qid)
+
+    text = str(excinfo.value)
+    assert text.startswith("Onedata answered 202 (accepted), not 204: the removal was accepted")
+    assert "is not confirmed" in text and "may still exist" in text and WHERE in text
+    assert excinfo.value.response == {"status_code": 202, "body": None}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [200, 201, 206])
+async def test_remove_qos_requirement_any_other_2xx_is_not_a_confirmed_removal(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, status: int
 ) -> None:
     _set_env(monkeypatch)
     qid = "c84f669f9522c46976fee490d80651f0"
     httpx_mock.add_response(method="DELETE", url=f"{QOS_URL}/{qid}", status_code=status)
 
-    assert await qos.remove_qos_requirement(qid) is None
+    with pytest.raises(OnedataApiError) as excinfo:
+        await qos.remove_qos_requirement(qid)
+
+    text = str(excinfo.value)
+    assert text.startswith(f"Onedata answered {status}, not 204: the removal is not confirmed")
+    assert "accepted" not in text.split(" [", 1)[0]
 
 
 HOSTS = ("oneprovider.example", "onezone.example")
@@ -552,7 +586,7 @@ def _hostname_bearing(status_error_id: str, errno: str | None = None) -> dict:
     error: dict = {
         "id": status_error_id,
         "description": (
-            "Failed at oneprovider.example:443 (zone onezone.example, peer peer-b.site-b.pl), "
+            "Failed at oneprovider.example:443 (zone onezone.example), "
             "see https://oneprovider.example/api/v3/oneprovider/qos_requirements/x and "
             "http://other.example/y"
         ),
@@ -594,9 +628,8 @@ async def test_remove_qos_requirement_the_complete_message_holds_no_host_url_or_
     for host in HOSTS:
         assert host not in text
     assert "other.example" not in text and "://" not in text
-    # a peer's domain, as a field value and as a bare name in the description
+    # a peer's domain, in the fields that carry one
     assert PEER_DOMAIN not in text and "cluster.local" not in text
-    assert "peer-b" not in text and "site-b.pl" not in text
     assert len(text) <= MAX_ERROR_CHARS
     assert LONG_ID not in text and "a" * 129 not in text
     assert text.count("a" * 80) <= 2  # the hint's echo and the path's: each cut short
