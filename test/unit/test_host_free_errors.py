@@ -1411,7 +1411,7 @@ async def test_a_qos_expression_survives_the_redaction(
             "v1.2.3 25.0 1.2.3.4 10.0.0.1:8443 192.0.2.7",
         ),
         ("storage.type region.geo e.g. i.e.", "storage.type region.geo e.g. i.e."),
-        ("/space/dir.v2.pl/file.example.org", "/space/dir.v2.pl/file.example.org"),
+        ("/space/dir.v2.ext/file.example.org", "/space/dir.v2.ext/file.example.org"),
         # a URL is masked, with its sentence punctuation kept; a configured host is replaced
         ("see https://peer.site-b.example:8443/x.", "see <address>."),
         (

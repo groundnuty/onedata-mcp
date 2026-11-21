@@ -835,7 +835,7 @@ async def test_a_provider_whose_name_redaction_would_change_is_still_matched_by_
             "spaceId": SPACE_ID,
             "providers": [
                 {"providerId": "pHost0123456789abcdef", "providerName": HOST},
-                {"providerId": "pOther0123456789abcdef", "providerName": "vistula-dc"},
+                {"providerId": "pOther0123456789abcdef", "providerName": "site-a"},
             ],
         },
     )
@@ -862,7 +862,7 @@ async def test_a_target_that_reads_like_the_placeholder_for_a_nameless_provider_
             "providers": [
                 {"providerId": "pNameless0123456789ab"},
                 {"providerId": "pEmpty0123456789abcde", "providerName": ""},
-                {"providerId": "pOther0123456789abcdef", "providerName": "vistula-dc"},
+                {"providerId": "pOther0123456789abcdef", "providerName": "site-a"},
             ],
         },
     )
@@ -873,4 +873,4 @@ async def test_a_target_that_reads_like_the_placeholder_for_a_nameless_provider_
     hint = text.split(" [", 1)[0]
     assert "(no name) (id 'pNameless0123456789ab')" in hint
     assert "(no name) (id 'pEmpty0123456789abcde')" in hint
-    assert "vistula-dc (id 'pOther0123456789abcdef')" in hint
+    assert "site-a (id 'pOther0123456789abcdef')" in hint
