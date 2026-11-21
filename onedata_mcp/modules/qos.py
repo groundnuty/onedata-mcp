@@ -80,6 +80,9 @@ def register_module(mcp: FastMCP) -> None:
                     for k in ("expression", "replicas_num", "fulfilled", "qosRequirementId"):
                         if k in detail:
                             base[k] = detail[k]
+                    # Onedata 25.0 names it replicasNum; the description promises replicas_num.
+                    if "replicas_num" not in base and "replicasNum" in detail:
+                        base["replicas_num"] = detail["replicasNum"]
             enriched[qid] = base
         out = dict(summary)
         out["requirements"] = enriched

@@ -249,3 +249,24 @@ async def test_get_qos_requirement_refuses_the_same_ids_with_a_hint(
     assert ok.is_error is False  # the surrounding whitespace was stripped: the id was found
     assert ok.structured_content["qosRequirementId"] == QID
     assert len(httpx_mock.get_requests()) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_summary_carries_replicas_num_from_25_0s_replicas_num(
+    qos_mcp: FastMCP, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """get_file_qos_summary's description promises `replicas_num` per rule; Onedata 25.0's
+    requirement record names it `replicasNum` (seen live 2026-11-21)."""
+
+    async def summary(_: str) -> dict:
+        return {"status": "fulfilled", "requirements": {QID: "fulfilled"}}
+
+    async def detail(qid: str) -> dict:
+        return {"qosRequirementId": qid, "expression": "anyStorage", "replicasNum": 2}
+
+    monkeypatch.setattr(qos_module, "get_file_qos_summary", summary)
+    monkeypatch.setattr(qos_module, "get_qos_requirement", detail)
+    async with Client(qos_mcp) as client:
+        result = await client.call_tool("get_file_qos_summary", {"file_id_or_path": "/space/f"})
+    rule = result.structured_content["requirements"][QID]
+    assert rule["replicas_num"] == 2 and rule["expression"] == "anyStorage"
