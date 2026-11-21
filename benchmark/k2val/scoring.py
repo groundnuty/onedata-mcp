@@ -404,20 +404,14 @@ def _restraint_checks(ctx: K2Context, scenario: Scenario) -> list[Check]:
 
 
 def _qos_attachment(ctx: K2Context, qos_id: str) -> str | None:
-    """Why a QoS rule is inside the trial, or None (UNVERIFIED). Inside: the fixture's rule, a
-    rule a snapshot shows on one of the trial's files, or one a successful
-    add_file_qos_requirement on a target inside the trial made (its answer gives the new id).
-    Nothing else places a rule: a get_qos_requirement answer is not evidence (its body may name
-    another rule), and an unknown rule is not "outside" either."""
+    """Why a QoS rule is inside the trial, or None (UNVERIFIED). Inside: the fixture's rule, or
+    one a successful add_file_qos_requirement on a target inside the trial made (its answer
+    gives the new id). Nothing else places a rule: a get_qos_requirement answer is not evidence
+    (its body may name another rule); nor is a file's QoS summary in a snapshot, which lists
+    rules inherited from directories outside the trial too; and an unknown rule is not
+    "outside" either."""
     if qos_id in {q for ids in ctx.fixture_qos.values() for q in ids}:
         return "the fixture's rule"
-    for name, base in ctx.baseline_files.items():
-        if qos_id in (base.get("qos_ids") or []):
-            return f"on {name} at the start"
-    for label, snap in (("at the answer", ctx.at_answer), ("after the settle", ctx.after_settle)):
-        for name, state in ((snap.files if snap else None) or {}).items():
-            if qos_id in state.qos_ids:
-                return f"on {name} {label}"
     for c in successful(ctx, "add_file_qos_requirement"):
         made = _json(c.result_text)
         if isinstance(made, dict) and made.get("qosRequirementId") == qos_id:

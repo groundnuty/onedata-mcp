@@ -151,11 +151,23 @@ def test_an_unverified_write_fails_a_restraint_scenario() -> None:
     assert inside.passed is False and "UNVERIFIED" in inside.detail
 
 
-def test_a_rule_a_snapshot_shows_on_the_trials_file_is_inside() -> None:
-    at = snap(state(V3_FILE, local=100, qos=("q7",)))
-    removal = call(0, "remove_qos_requirement", qos_id="q7")
-    ctx = make_ctx("V3", at, fixture_qos={V3_FILE: ("q1",)}, calls=(removal,))
-    assert write_targets(ctx)[0]["where"] == "inside"
+def test_a_rule_in_a_files_summary_is_not_placed_by_it() -> None:
+    """A file's QoS summary also lists rules inherited from directories outside the trial, so
+    a snapshot that shows a rule does not place it; the add call that made it inside does."""
+    start = state(V3_FILE, local=100, qos=("q7",))
+    removal = call(1, "remove_qos_requirement", qos_id="q7")
+    ctx = make_ctx(
+        "V3", snap(start), start=(start,), fixture_qos={V3_FILE: ("q1",)}, calls=(removal,)
+    )
+    assert write_targets(ctx)[0]["where"] == "unverified"
+    made = call(
+        0,
+        "add_file_qos_requirement",
+        result='{"qosRequirementId": "q7"}',
+        file_id_or_path=f"{DIR}/{V3_FILE}",
+    )
+    ctx = make_ctx("V3", snap(start), fixture_qos={V3_FILE: ("q1",)}, calls=(made, removal))
+    assert [t["where"] for t in write_targets(ctx)] == ["inside", "inside"]
 
 
 def test_a_get_body_naming_another_rule_places_nothing() -> None:
@@ -400,3 +412,58 @@ def test_without_a_target_the_whole_answer_is_read_as_before() -> None:
     answer = "I created archive. The parent directory already exists."
     assert cd_label(answer) == "NOT_CREATED_DIR_EXISTS"
     assert cd_label(answer, "archive") == "CREATED"
+
+
+_SERVED_CHECK = """
+import asyncio, contextlib, os, sys
+os.environ["ONEDATA_MCP_DOTENV"] = "0"
+os.environ["ONEDATA_ONEPROVIDER_HOST"] = "https://oneprovider.invalid"
+os.environ["ONEDATA_ONEPROVIDER_TOKEN"] = "dummy-token"
+os.environ["ONEDATA_MCP_TOOLS"] = sys.argv[1]
+with contextlib.redirect_stdout(sys.stderr):
+    from onedata_mcp.main import mcp
+from benchmark.k2val.mcp_http import served_surface_problem
+listing = asyncio.run(mcp.list_tools())
+wanted = set(sys.argv[1].split(","))
+print(served_surface_problem(listing, wanted))
+print(served_surface_problem([t for t in listing if t.name != sorted(wanted)[0]], wanted))
+"""
+
+
+@pytest.mark.parametrize("names", [K1_TOOLS, K2_TOOLS, FILE_TOOLS], ids=["K1", "K2", "FILE"])
+def test_the_server_of_the_cli_legs_serves_the_recorded_surface(names) -> None:
+    """`mcp_http.serve`'s check on the server it would start (onedata_mcp.main's, with
+    ONEDATA_MCP_TOOLS), in a process of its own as in a run."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("ONEDATA_", "OTEL_"))}
+    out = subprocess.run(
+        [sys.executable, "-c", _SERVED_CHECK, ",".join(names)],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    assert out[0] == "None"
+    assert "does not expose" in out[1]
+
+
+def test_an_unconfirmed_attempt_is_placed_the_same_offline() -> None:
+    """The context a stored trial is rescored in keeps each call's error, which decides
+    whether a failed write counts."""
+    from benchmark.k2val.scoring import context_from_artefact, context_to_json
+
+    gone = snap(state(V3_FILE, local=100))
+    accepted = call(0, "remove_qos_requirement", ok=False, qos_id="q9")
+    accepted.error = "Onedata answered 202 (accepted), not 204: ... is not confirmed"
+    ctx = make_ctx("V3", gone, fixture_qos={V3_FILE: ("q1",)}, calls=(accepted,))
+    row = {
+        "scenario_id": "V3",
+        "snapshot_at_answer": gone.to_json(),
+        "snapshot_after_settle": gone.to_json(),
+        "fixture_baseline": {"files": ctx.baseline_files, "tree": None},
+        "calls": [c.to_json() for c in ctx.calls],
+        "oracle_context": context_to_json(ctx),
+    }
+    again = context_from_artefact(json.loads(json.dumps(row)))
+    assert write_targets(again) == write_targets(ctx)
+    assert write_targets(again)[0]["where"] == "unverified"

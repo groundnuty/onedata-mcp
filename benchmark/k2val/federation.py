@@ -28,7 +28,9 @@ Role = Literal["owner", "local"]
 POLL_S = 2.0
 # what `FedApi.tree` asks of each entry (the file-tool scenarios, design/13-15)
 TREE_ATTRIBUTES = ("fileId", "name", "type", "size", "posixPermissions")
-_MODE_RE = re.compile(r"[0-7]{3,4}")
+# `posixPermissions`: "POSIX file permissions as string expressing octal notation" (swagger;
+# a shared file in public mode shows the last digit only)
+_MODE_RE = re.compile(r"[0-7]{1,4}")
 # A listing of more pages than this is malformed (at 1000 entries a page, no trial comes near).
 MAX_LISTING_PAGES = 20
 
