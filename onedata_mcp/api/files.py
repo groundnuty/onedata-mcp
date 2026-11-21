@@ -423,6 +423,15 @@ async def list_children(
                 "entries to list."
             )
             raise _with_hint(hint, e) from e
+        status = (e.response or {}).get("status_code") if isinstance(e.response, dict) else None
+        if token is not None and isinstance(status, int) and status >= 500:
+            # Onedata 25.0 answers a made-up or stale page token with 500 internalServerError
+            # (seen live 2026-11-21); the uncertainty stays, but the token is the likely cause.
+            hint = (
+                "The provider failed on this page token. A token is valid only as returned in "
+                "the previous page's nextPageToken; to start over, list again without a token."
+            )
+            raise _with_hint(hint, e) from e
         replacement = await _file_error(e, parent_id_or_path, "list")
         if replacement is e:
             raise

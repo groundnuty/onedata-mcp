@@ -54,8 +54,8 @@ WHAT = "the live file-tools test writes files and directories"
 # What a made-up pagination token must answer. The swagger lists 400 ("Invalid request") for the
 # listing and gives no error id. TODO(first live run): confirm the status, and set the id from
 # what the first run prints; an unrelated server error then cannot pass as "a bad token".
-BAD_TOKEN_STATUS = 400
-BAD_TOKEN_ERROR_ID: str | None = None
+BAD_TOKEN_STATUS = 500  # seen live, 25.0, 2026-11-21
+BAD_TOKEN_ERROR_ID: str | None = "internalServerError"  # seen live, 2026-11-21
 
 pytestmark = pytest.mark.skipif(
     os.environ.get(ENABLE) != "1", reason=f"live test: set {ENABLE}=1 (local Compose only)"
@@ -360,6 +360,7 @@ async def test_listing_errors_and_an_empty_directory_as_the_model_reads_them(
     print(f"a made-up token answered: is_error={result.is_error} {text}")
     assert result.is_error is True, text
     assert "rejected" not in text and "reports nothing" not in text  # no id hint
+    assert "valid only as returned in the previous page's nextPageToken" in text
     # The status and the error id are pinned, so that an unrelated failure (a server error, a
     # gateway page) cannot pass as "a bad token". The status is the swagger's; the id is
     # TODO(first live run): see BAD_TOKEN_ERROR_ID.

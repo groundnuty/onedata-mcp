@@ -493,6 +493,33 @@ async def test_a_bad_token_passes_onedatas_error_on(httpx_mock: HTTPXMock) -> No
 
 
 @pytest.mark.asyncio
+async def test_a_server_error_on_a_page_token_says_how_to_start_over(httpx_mock: HTTPXMock) -> None:
+    """Onedata 25.0 answers a made-up or stale token with 500 internalServerError (seen live)."""
+    httpx_mock.add_response(
+        method="GET", url=f"{API}/data/{DIR}/children", **onedata_error(500, "internalServerError")
+    )
+
+    with pytest.raises(OnedataApiError) as caught:
+        await files.list_children(DIR, limit=10, offset=0, token="garbage")
+
+    text = str(caught.value)
+    assert "valid only as returned in the previous page's nextPageToken" in text
+    assert "without a token" in text and "internalServerError" in text
+
+
+@pytest.mark.asyncio
+async def test_a_server_error_without_a_token_gets_no_token_hint(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        method="GET", url=f"{API}/data/{DIR}/children", **onedata_error(500, "internalServerError")
+    )
+
+    with pytest.raises(OnedataApiError) as caught:
+        await files.list_children(DIR, limit=10, offset=0)
+
+    assert "nextPageToken" not in str(caught.value)
+
+
+@pytest.mark.asyncio
 async def test_an_empty_directory_is_an_empty_last_page(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(method="GET", url=f"{API}/data/{DIR}/children", json=PAGE)
 
