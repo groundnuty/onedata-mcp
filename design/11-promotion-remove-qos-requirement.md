@@ -54,20 +54,20 @@ A *structured* Onedata error is a JSON body whose `error.id` is `notFound` or wh
 | An unrecognised 400 (including a file id passed as the id) | "Onedata rejected … as a QoS requirement id" | "Onedata answered 400 without saying the requirement is missing; check that `<id>` is a QoS requirement id (a file id is not one) and the provider", and the pointer. It does not blame the id for a POSIX or domain error. |
 | A 5xx that carries `notFound` or `enoent` | Took the not-found branch | "Onedata answered 5xx and mentioned a missing item; that does not show that the requirement is gone, so the removal is not confirmed" |
 | Any other 5xx, a 401, transport errors | Unchanged | Unchanged. Nothing for the caller to fix. |
-| A redirect (3xx) | **Defect:** HTTPX does not count a 3xx as an error, so the tool returned an empty success while the requirement was still there | An error: "Onedata answered 3xx, not 204: … the removal is not confirmed and the requirement may still exist". Only a 2xx is a success. The redirect's page and target are never shown. |
+| A redirect (3xx) | **Defect:** a 3xx was returned as an empty success while the requirement was still there | An error: "Onedata answered 3xx, not 204: … the removal is not confirmed and the requirement may still exist". `request` now raises on any non-2xx, for every tool. The redirect's page and target are never shown. |
 | A path, an empty id, `.` or `..` | Sent as is: `..` resolved to a `DELETE` on the API root, and a path to `//space/...` | Refused before any request, with the pointer to where the ids are |
 | Whitespace around the id | Sent as `%20`, naming another id | Stripped; the stripped id is used |
 | Whitespace inside the id, a control character, `=` (a QoS expression passed as an id), a backslash | Sent | Refused before any request, saying what the value looks like, with the pointer |
 | `?` or `#` in the id | **Defect:** the path was cut short, which removed the requirement named by the part before it | The id is percent-encoded |
 | Permission: a 403, or a 400 or 404 carrying `forbidden`, `eacces` or `eperm` | Onedata's message only | Says the token may lack the privilege to manage QoS in the space this requirement belongs to (`space_manage_qos`), or be read-only; that a retry with this id will not help; and that a requirement in a space where the token has the privilege is not affected |
-| Success (2xx; 204 is documented) | Empty answer | Empty answer; the description says so (gate 2) |
+| Success (204, as documented) | Empty answer | Empty answer; the description says so (gate 2). A 202 is an error ("accepted but removal not confirmed"), and so is any other 2xx. |
 
 - Which statuses and error ids a 25.0 provider really answers is **unverified**: the swagger lists 400, 403, 404 and 500 with the generic body only. The unit tests use plausible shapes. The live test asserts that an unknown id fails with a 400 or 404 and that the hint fits the body, and prints the real answers.
 - **Host-free, bounded errors** (the change is in `onedata_mcp/utils.py`, so it applies to every tool). With or without `ONEDATA_MCP_NODE_NAMES`, no error text a model reads names a host or carries a URL:
   - the Onezone and Oneprovider hosts this server is configured with are replaced by `onezone` and `oneprovider` (a node-list entry for the same host wins);
   - a URL is masked;
-  - the value of a domain-bearing field of the error (`serviceDomain`, which every 25.0 error carries in its `ctx` and which names the service that answered, a peer provider included; also `domain`, `domainName`, `subdomain`, `host`, `hostname`, `fqdn`) reads `a provider`, whatever it holds;
-  - a bare host name in a description (a dotted name whose last label is a top-level domain, as in `peer.site.example.com:8443`) is masked. File names, versions, IP addresses, QoS expressions and attribute names are not: `providerId=abc & anyStorage` and `geo=PL` pass untouched. Two labels ending in a country code that is also a file extension (`script.py`, `README.md`) pass; three or more labels are a host name.
+  - the value of a domain-bearing field of the error (`serviceDomain`, which every 25.0 error carries in its `ctx` and which names the service that answered, a peer provider included; also `domain`, `domainName`, `subdomain`, `host`, `hostname`, `fqdn`) reads the declared name when the whole value is one known node, else `a provider`;
+  - a host name written into the free text of a description is NOT masked unless it is a configured host, a listed node or part of a URL (the residual recorded under the External review);
   - `host=` and `port=` pairs are still masked only with a node list. An IP address that no field names as a host passes.
   - The message is bounded to 2000 characters, cut after the redaction, and a path segment (an id) is echoed at no more than 128 characters.
   - This fixes a leak; it does not change what a tool means (design/10). The tests that pinned "no list, so byte for byte" were rewritten to the new rule.
@@ -259,7 +259,7 @@ Two further external reviews (Codex and Gemini, round 2) of the whole promotion 
 
 **Residual (known, accepted).** A peer host written into the free text of an error description, or into any field that is not domain-bearing, is not masked unless it is a configured host, a listed node or part of a URL. Guessing hosts from the shape of a word was removed because it rewrote attribute and file names; a deploy that must hide its peers lists them in `ONEDATA_MCP_NODE_NAMES`. A unit test pins this (`test_an_unlisted_host_name_in_free_text_is_not_masked_a_known_residual`).
 
-**This list supersedes four statements in gate 1 above**, which are left as written because this round changes only the External review sections: (1) the bullet that a bare host name in a description is masked; (2) the bullet that a domain-bearing field reads `a provider` whatever it holds (now: the declared name of a known node, else `a provider`); (3) the table row "Success (2xx; 204 is documented)" (now: 204 only); (4) in the redirect row, that "HTTPX does not count a 3xx as an error" is now only a fact about HTTPX: `request` raises on it.
+Gate 1 above was updated to match this round (redaction, 204-only success, redirects).
 
 ## Also on this branch
 
