@@ -17,6 +17,7 @@ import ssl
 import time
 import traceback
 from collections.abc import Callable
+from urllib.parse import quote
 
 import httpx
 import pytest
@@ -1535,3 +1536,40 @@ async def test_a_peer_providers_domain_does_not_reach_the_invalid_space_error(
 
     assert str(excinfo.value).startswith("This provider does not support the space of file id")
     assert PEER_SITE not in str(excinfo.value) and PEER_DOMAIN not in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encoded", [False, True], ids=["plain", "percent-encoded"])
+async def test_a_node_name_in_the_request_path_is_replaced_in_an_http_failure(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, encoded: bool
+) -> None:
+    """A caller may pass a node's name where an id or a path belongs; the path an error shows
+    goes through the same rules as the body, before it is shortened."""
+    _set_env(monkeypatch)
+    _set_node_names(monkeypatch)
+    arg = f"/space/{NODE_FQDN}:{NODE_PORT}/x"
+    shown = quote(arg, safe="") if encoded else arg.lstrip("/")
+    httpx_mock.add_response(status_code=404, json={"error": {"id": "notFound"}})
+    with pytest.raises(OnedataApiError) as excinfo:
+        await request(get_oneprovider_config(), "POST", f"/lookup-file-id/{shown}")
+
+    text = str(excinfo.value)
+    _assert_host_free(text)
+    assert "oneprovider-a" in text
+
+
+@pytest.mark.asyncio
+async def test_a_node_name_in_the_request_path_is_replaced_in_a_transport_failure(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    _set_node_names(monkeypatch)
+    httpx_mock.add_exception(httpx.ConnectError(POOL_TEXT))
+    with pytest.raises(OnedataApiError) as excinfo:
+        await request(
+            get_oneprovider_config(), "GET", f"/data/{quote(NODE_IP, safe='')}/{'d' * 300}"
+        )
+
+    text = str(excinfo.value)
+    _assert_host_free(text)
+    assert "oneprovider-a" in text and "d" * 129 not in text

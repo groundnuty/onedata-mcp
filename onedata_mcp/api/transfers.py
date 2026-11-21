@@ -21,7 +21,7 @@ import re
 from typing import Any, Literal
 from urllib.parse import quote
 
-from onedata_mcp.api.files import _normalize_path_to_file_id, _unconfirmed_hint
+from onedata_mcp.api.files import _is_unconfirmed_not_found, _unconfirmed_hint
 from onedata_mcp.api.spaces import resolve_space_id_or_name
 from onedata_mcp.config import get_oneprovider_config
 from onedata_mcp.utils import OnedataApiError, bound_message, redact_endpoints, request
@@ -332,10 +332,40 @@ def _is_client_error(status: Any) -> bool:
     return isinstance(status, int) and 400 <= status < 500
 
 
-def _is_server_error(error: OnedataApiError) -> bool:
-    response = error.response if isinstance(error.response, dict) else {}
-    status = response.get("status_code")
-    return isinstance(status, int) and status >= 500
+async def _lookup_path(path: str) -> str:
+    """The file id of a path (`POST /lookup-file-id/<path>`), status-aware like the promoted file
+    tools' own lookup: only a structured not-found on a 4xx is `Path "..." not found`. Anything
+    else, a 5xx whatever its body says included, passes on as the provider's own error: never
+    the shared stable resolver's "Space ... does not exist" (it reads `spaceNotSupportedBy`
+    on any status as a missing space; that resolver keeps its mapping for the stable tools)."""
+    try:
+        response = await request(
+            get_oneprovider_config(), "POST", f"/lookup-file-id/{quote(path, safe='')}"
+        )
+    except OnedataApiError as error:
+        status, error_id, errno, _ = _error_parts(error)
+        if _is_client_error(status) and (errno == "enoent" or error_id == "notFound"):
+            raise FileNotFoundError(f'Path "{path}" not found') from error
+        raise
+    return response["body"]["fileId"]
+
+
+def _lookup_error_hint(shown_file: str, error: OnedataApiError) -> str | None:
+    """A failed path lookup: the permission hint; on a 4xx `spaceNotSupportedBy`, that this
+    provider does not support the file's space (the space may still exist); on a 5xx that
+    mentions a missing item, that the provider failed and the file may also not exist; else
+    None (the error passes on unchanged)."""
+    if hint := _permission_hint(shown_file, error):
+        return hint
+    status, error_id, _, _ = _error_parts(error)
+    if _is_client_error(status) and error_id == "spaceNotSupportedBy":
+        return (
+            f"This provider does not support the space of {shown_file}, so it cannot resolve "
+            "the path here; the space may still exist. Check the path's space name."
+        )
+    if _is_unconfirmed_not_found(error):
+        return _unconfirmed_hint(shown_file, error)
+    return None
 
 
 def _permission_hint(shown_file: str, error: OnedataApiError) -> str | None:
@@ -460,18 +490,9 @@ async def schedule_file_replication(
     file_arg, target = file_id_or_path.strip(), target_provider_id.strip()
     _check_replication_args(file_arg, target)
     try:
-        file_id = await _normalize_path_to_file_id(file_arg)
-    except FileNotFoundError as missing:
-        # The shared lookup maps an `enoent` on ANY status to "not found". On a 5xx that is not
-        # established (the provider failed): say so. The stable tools that share the lookup keep
-        # its mapping (design/10: their own gates); the cause carries the status.
-        cause = missing.__cause__
-        if isinstance(cause, OnedataApiError) and _is_server_error(cause):
-            hint = _unconfirmed_hint(_shown(file_arg), cause)
-            raise _hinted(hint, cause) from cause
-        raise
-    except OnedataApiError as error:  # the path lookup: only a permission error has a hint
-        hint = _permission_hint(_shown(file_arg), error)
+        file_id = await _lookup_path(file_arg) if file_arg.startswith("/") else file_arg
+    except OnedataApiError as error:  # the path lookup, status-aware (`_lookup_path`)
+        hint = _lookup_error_hint(_shown(file_arg), error)
         if hint is None:
             raise
         raise _hinted(hint, error) from error

@@ -10,7 +10,7 @@ import ssl
 import time
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import httpx
 
@@ -184,7 +184,7 @@ def transport_failure(
         exc_info=exc,
     )
     return OnedataApiError(
-        f"{label}: {method} {shorten_path(path)} - {kind} (service: {config.service})",
+        f"{label}: {method} {shown_path(path, config)} - {kind} (service: {config.service})",
         response=None,
         kind=kind,
         service=config.service,
@@ -398,6 +398,22 @@ def shorten_path(path: str) -> str:
     )
 
 
+def shown_path(path: str, config: OnedataConfig) -> str:
+    """The request path as an error shows it: a configured host or listed node in it (a caller
+    may pass one where an id or a path belongs) replaced by the endpoint rules first, then each
+    overlong segment cut short."""
+    return shorten_path("/".join(_redacted_segment(seg, config) for seg in path.split("/")))
+
+
+def _redacted_segment(segment: str, config: OnedataConfig) -> str:
+    """One path segment with the endpoint rules applied to it as decoded (a path argument is
+    sent percent-encoded, so `%2Fnode17` would hide the name's boundary); a segment no rule
+    touches is kept byte for byte."""
+    decoded = unquote(segment)
+    redacted = redact_endpoints(decoded, config)
+    return segment if redacted == decoded else quote(redacted, safe="<>")
+
+
 def http_failure_message(
     config: OnedataConfig,
     method: str,
@@ -419,7 +435,9 @@ def http_failure_message(
         detail = redact_json_text(_format_body_for_log(body), config)
     else:
         detail = f"http_{status} (service: {config.service})"
-    return bound_message(f"{label}: {method} {shorten_path(path)} (status={status}) - {detail}")
+    return bound_message(
+        f"{label}: {method} {shown_path(path, config)} (status={status}) - {detail}"
+    )
 
 
 def decode_response_body(response: httpx.Response) -> Any:

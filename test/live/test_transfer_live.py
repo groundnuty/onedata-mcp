@@ -169,7 +169,7 @@ async def _write_at_source(
         if await fed.lookup("local", path) != file_id:
             return False
         dist = await fed.distribution("local", file_id)
-        return dist.size == size and dist.size_known and dist.bytes_of(local_id) == 0
+        return _local_at(dist, local_id, size) and dist.bytes_of(local_id) == 0
 
     await fed.wait_until(
         local_sees_it_and_holds_none,
@@ -199,6 +199,12 @@ def _status(transfer: dict) -> str:
     return "no status field"
 
 
+def _local_at(dist, local_id: str, size: int) -> bool:
+    """The local provider's OWN entry is readable and gives the expected size: only then do its
+    bytes mean anything (an unreadable entry is not "0 bytes", another entry's size not its)."""
+    return dist.readable(local_id) and dist.size_of(local_id) == size
+
+
 @dataclass
 class Poll:
     """One poll: the transfer's status, read first, then the local block map, read after it."""
@@ -207,6 +213,8 @@ class Poll:
     status: str
     local_bytes: int
     covered: bool
+    # the local entry was readable at the expected size; an unreadable poll is no evidence
+    local_readable: bool = True
 
 
 @dataclass
@@ -215,12 +223,17 @@ class Timeline:
     polls: list[Poll] = field(default_factory=list)
 
     @property
+    def readable(self) -> list[Poll]:
+        """The polls that count as evidence: the local entry readable at the expected size."""
+        return [p for p in self.polls if p.local_readable]
+
+    @property
     def whole_at(self) -> float | None:
-        return next((p.at for p in self.polls if p.covered), None)
+        return next((p.at for p in self.readable if p.covered), None)
 
     @property
     def partial(self) -> list[Poll]:
-        return [p for p in self.polls if 0 < p.local_bytes < self.size]
+        return [p for p in self.readable if 0 < p.local_bytes < self.size]
 
     @property
     def first_completed(self) -> Poll | None:
@@ -230,11 +243,14 @@ class Timeline:
     def completed_before_whole(self) -> list[Poll]:
         """Polls whose status read completed while the block map, read AFTER that status on the
         same poll, did not yet cover the file: the status certainly came first."""
-        return [p for p in self.polls if p.status.endswith("=completed") and not p.covered]
+        return [p for p in self.readable if p.status.endswith("=completed") and not p.covered]
 
     def report(self) -> list[str]:
         whole = self.whole_at
-        lines = [f"[{self.size} B] polls: {len(self.polls)}, every {POLL_S} s"]
+        lines = [
+            f"[{self.size} B] polls: {len(self.polls)}, every {POLL_S} s, "
+            f"{len(self.polls) - len(self.readable)} unreadable (not counted)"
+        ]
         if whole is not None:
             lines.append(
                 f"[{self.size} B] whole at the local provider {whole:.2f} s after the schedule "
@@ -274,7 +290,14 @@ async def _follow(
         status = _status(_payload(result, text)) if result.is_error is False else "unreadable"
         dist = await fed.distribution("local", file_id)  # the judge: the local block map
         at = time.monotonic() - began
-        poll = Poll(at, status, dist.bytes_of(local_id), dist.covers(local_id))
+        readable = _local_at(dist, local_id, size)
+        poll = Poll(
+            at,
+            status,
+            dist.bytes_of(local_id) if readable else -1,
+            readable and dist.covers(local_id),
+            readable,
+        )
         timeline.polls.append(poll)
         if poll.covered:
             return timeline
@@ -356,7 +379,9 @@ async def test_an_unknown_target_provider_fails_with_the_provider_hint_and_copie
     ), text
     await asyncio.sleep(NOTHING_COPIED_WAIT_S)
     local_id = await fed.provider_id("local")
-    assert (await fed.distribution("local", file_id)).bytes_of(local_id) == 0
+    dist = await fed.distribution("local", file_id)
+    assert _local_at(dist, local_id, FILE_SIZE), "the local entry is unreadable: no evidence"
+    assert dist.bytes_of(local_id) == 0
 
 
 @pytest.mark.asyncio

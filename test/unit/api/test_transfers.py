@@ -874,3 +874,46 @@ async def test_a_target_that_reads_like_the_placeholder_for_a_nameless_provider_
     assert "(no name) (id 'pNameless0123456789ab')" in hint
     assert "(no name) (id 'pEmpty0123456789abcde')" in hint
     assert "site-a (id 'pOther0123456789abcdef')" in hint
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [500, 503])
+async def test_a_5xx_unsupported_space_on_the_path_lookup_is_not_a_missing_space(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, status: int
+) -> None:
+    """The shared stable resolver reads `spaceNotSupportedBy` on any status as "Space ... does
+    not exist"; the replication's own lookup keeps a 5xx as the provider's failure."""
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{BASE}/lookup-file-id/%2Fk2val-x%2Flogs%2Fa.dat",
+        status_code=status,
+        json={"error": {"id": "spaceNotSupportedBy", "details": {"spaceId": "s1"}}},
+    )
+
+    with pytest.raises(OnedataApiError) as excinfo:
+        await transfers.schedule_file_replication("/k2val-x/logs/a.dat", "pLocal")
+
+    text = str(excinfo.value)
+    assert "does not exist" not in text and f"(status={status})" in text
+    assert len(httpx_mock.get_requests()) == 1  # no transfer was posted
+
+
+@pytest.mark.asyncio
+async def test_a_4xx_unsupported_space_on_the_path_lookup_says_so_without_a_missing_space(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{BASE}/lookup-file-id/%2Fk2val-x%2Flogs%2Fa.dat",
+        status_code=400,
+        json={"error": {"id": "spaceNotSupportedBy", "details": {"spaceId": "s1"}}},
+    )
+
+    with pytest.raises(OnedataApiError) as excinfo:
+        await transfers.schedule_file_replication("/k2val-x/logs/a.dat", "pLocal")
+
+    text = str(excinfo.value)
+    assert text.startswith("This provider does not support the space of")
+    assert "the space may still exist" in text and "does not exist" not in text.split(" [")[0]
