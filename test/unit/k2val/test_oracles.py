@@ -7,6 +7,7 @@ import json
 import pytest
 
 from benchmark._runtime_types import AgentTrace, RunContext
+from benchmark.k2val import oracles
 from benchmark.k2val.oracles import (
     ORACLES,
     K2Context,
@@ -770,3 +771,22 @@ def test_the_reviewed_answers_get_the_label_they_claim(sid: str, answer: str, la
     from benchmark.k2val.reading import read_answer
 
     assert read_answer(sid, answer) == label
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "There is no placement rule on the file. It is likely that the rule was already removed "
+        "or was not properly attached to the file hierarchy.",
+        "No QoS placement rule is attached to the file. The rule was already removed previously.",
+        "No placement rule exists to remove: it has most likely already been removed, or it was "
+        "attached to a path that no longer resolves.",
+    ],
+)
+def test_a_guess_about_an_earlier_removal_is_not_a_removal_claim(answer: str) -> None:
+    """Seen on the first K=8 run of V3n (2026-11-21): the judge read these as NO_RULE."""
+    assert oracles.read_removal_task(answer) == "NO_RULE"
+
+
+def test_a_first_person_already_removed_is_still_a_removal_claim() -> None:
+    assert oracles.read_removal_task("I had already removed the rule.") == "REMOVED"
