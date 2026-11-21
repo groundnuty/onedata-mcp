@@ -159,6 +159,208 @@ async def test_listing_a_regular_file_says_only_a_directory_has_entries(
     )
 
 
+# --- 25.0 lists a regular file as its own only entry (it does not answer enotdir) ----------------
+
+A_FILE = "/Alpha/seed.txt"
+FILE_ENTRY = {"type": "REG", "size": 5, "path": A_FILE, "name": "seed.txt"}
+FILE_IS_NOT_A_DIRECTORY = (
+    "'/Alpha/seed.txt' is a regular file, not a directory; it has no children."
+)
+
+
+def children_page(*entries: dict, last: bool = True, token: str | None = None) -> dict:
+    return {"json": {"children": list(entries), "isLast": last, "nextPageToken": token}}
+
+
+def type_reads(httpx_mock: HTTPXMock) -> list:
+    """The reads of the target's own type: `GET /data/{id}`, not `/children`."""
+    return [
+        r
+        for r in httpx_mock.get_requests()
+        if r.method == "GET" and r.url.path.endswith(f"/data/{DIR}")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_regular_file_listed_as_its_own_only_child_is_refused(
+    httpx_mock: HTTPXMock,
+) -> None:
+    """The entry's `path` is the requested path: a directory never lists itself, so no further
+    request is needed."""
+    httpx_mock.add_response(method="POST", url=lookup_url(A_FILE), json={"fileId": DIR})
+    httpx_mock.add_response(
+        method="GET", url=f"{API}/data/{DIR}/children", **children_page(FILE_ENTRY)
+    )
+
+    with pytest.raises(NotADirectoryError) as caught:
+        await files.list_children(A_FILE, limit=10, offset=0)
+
+    assert str(caught.value) == FILE_IS_NOT_A_DIRECTORY
+    assert type_reads(httpx_mock) == []
+
+
+@pytest.mark.asyncio
+async def test_a_file_given_by_id_is_told_from_a_one_file_directory_by_its_type(
+    httpx_mock: HTTPXMock,
+) -> None:
+    """No requested path to compare with: the target's own type decides."""
+    httpx_mock.add_response(
+        method="GET", url=f"{API}/data/{DIR}/children", **children_page(FILE_ENTRY)
+    )
+    httpx_mock.add_response(method="GET", url=f"{API}/data/{DIR}", json={"type": "REG"})
+
+    with pytest.raises(NotADirectoryError) as caught:
+        await files.list_children(DIR, limit=10, offset=0)
+
+    assert str(caught.value) == f"'{DIR}' is a regular file, not a directory; it has no children."
+
+
+@pytest.mark.asyncio
+async def test_a_file_is_found_without_the_path_attribute_too(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(method="POST", url=lookup_url(A_FILE), json={"fileId": DIR})
+    httpx_mock.add_response(
+        method="GET", url=f"{API}/data/{DIR}/children", **children_page({"name": "seed.txt"})
+    )
+    httpx_mock.add_response(method="GET", url=f"{API}/data/{DIR}", json={"type": "REG"})
+
+    with pytest.raises(NotADirectoryError) as caught:
+        await files.list_children(A_FILE, attributes=["name"], limit=10, offset=0)
+
+    assert str(caught.value) == FILE_IS_NOT_A_DIRECTORY
+
+
+@pytest.mark.asyncio
+async def test_a_directory_with_one_file_is_listed_without_a_type_read_when_the_path_differs(
+    httpx_mock: HTTPXMock,
+) -> None:
+    """A directory never lists itself: an entry whose path is not the requested one is its
+    child, and nothing more is read."""
+    entry = {"type": "REG", "path": "/Alpha/d/seed.txt", "name": "seed.txt"}
+    httpx_mock.add_response(method="POST", url=lookup_url("/Alpha/d"), json={"fileId": DIR})
+    httpx_mock.add_response(method="GET", url=f"{API}/data/{DIR}/children", **children_page(entry))
+
+    page = await files.list_children("/Alpha/d", limit=10, offset=0)
+
+    assert page["children"] == [entry]
+    assert type_reads(httpx_mock) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asked", ["/Alpha/seed.txt/", "/Alpha//seed.txt", "/Alpha/./seed.txt"])
+async def test_the_requested_path_is_compared_in_its_canonical_form(
+    httpx_mock: HTTPXMock, asked: str
+) -> None:
+    httpx_mock.add_response(method="POST", url=lookup_url(asked), json={"fileId": DIR})
+    httpx_mock.add_response(
+        method="GET", url=f"{API}/data/{DIR}/children", **children_page(FILE_ENTRY)
+    )
+
+    with pytest.raises(NotADirectoryError) as caught:
+        await files.list_children(asked, limit=10, offset=0)
+
+    assert str(caught.value) == f"{asked!r} is a regular file, not a directory; it has no children."
+    assert type_reads(httpx_mock) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["DIR", "REG"])
+async def test_a_single_untyped_entry_without_a_path_is_told_by_the_targets_type(
+    httpx_mock: HTTPXMock, kind: str
+) -> None:
+    entry = {"name": "seed.txt"}
+    httpx_mock.add_response(method="POST", url=lookup_url("/Alpha/d"), json={"fileId": DIR})
+    httpx_mock.add_response(method="GET", url=f"{API}/data/{DIR}/children", **children_page(entry))
+    httpx_mock.add_response(method="GET", url=f"{API}/data/{DIR}", json={"type": kind})
+
+    if kind == "REG":
+        with pytest.raises(NotADirectoryError):
+            await files.list_children("/Alpha/d", limit=10, offset=0)
+    else:
+        assert (await files.list_children("/Alpha/d", limit=10, offset=0))["children"] == [entry]
+    assert len(type_reads(httpx_mock)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_directory_with_one_subdirectory_is_listed_without_a_type_read(
+    httpx_mock: HTTPXMock,
+) -> None:
+    """A regular file's own entry is of type REG: another type cannot be one."""
+    entry = {"type": "DIR", "path": "/Alpha/d/sub", "name": "sub"}
+    httpx_mock.add_response(method="POST", url=lookup_url("/Alpha/d"), json={"fileId": DIR})
+    httpx_mock.add_response(method="GET", url=f"{API}/data/{DIR}/children", **children_page(entry))
+
+    page = await files.list_children("/Alpha/d", limit=10, offset=0)
+
+    assert page["children"] == [entry]
+    assert type_reads(httpx_mock) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "page",
+    [
+        children_page(),
+        children_page({"type": "REG", "name": "a"}, {"type": "REG", "name": "b"}),
+    ],
+    ids=["empty", "two-entries"],
+)
+async def test_a_page_without_exactly_one_entry_is_not_a_file(
+    httpx_mock: HTTPXMock, page: dict
+) -> None:
+    httpx_mock.add_response(method="GET", url=f"{API}/data/{DIR}/children", **page)
+
+    result = await files.list_children(DIR, limit=10, offset=0)
+
+    assert result["children"] == page["json"]["children"]
+    assert type_reads(httpx_mock) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("paging", [{"offset": 10}, {"offset": 0, "token": "t1"}])
+async def test_a_later_page_with_one_entry_is_not_taken_for_a_file(
+    httpx_mock: HTTPXMock, paging: dict
+) -> None:
+    """The last page of a long listing may hold one entry; a file only lists itself first."""
+    httpx_mock.add_response(
+        method="GET", url=f"{API}/data/{DIR}/children", **children_page(FILE_ENTRY)
+    )
+
+    result = await files.list_children(DIR, limit=10, **paging)
+
+    assert result["children"] == [FILE_ENTRY]
+    assert type_reads(httpx_mock) == []
+
+
+@pytest.mark.asyncio
+async def test_a_type_that_cannot_be_read_leaves_the_listing_as_it_is(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        method="GET", url=f"{API}/data/{DIR}/children", **children_page({"name": "seed.txt"})
+    )
+    httpx_mock.add_response(method="GET", url=f"{API}/data/{DIR}", **onedata_error(500, "internal"))
+
+    result = await files.list_children(DIR, limit=10, offset=0)
+
+    assert result["children"] == [{"name": "seed.txt"}]
+
+
+@pytest.mark.asyncio
+async def test_the_model_reads_that_a_regular_file_has_no_children(
+    mcp: FastMCP, httpx_mock: HTTPXMock
+) -> None:
+    httpx_mock.add_response(method="POST", url=lookup_url(A_FILE), json={"fileId": DIR})
+    httpx_mock.add_response(
+        method="GET", url=f"{API}/data/{DIR}/children", **children_page(FILE_ENTRY)
+    )
+
+    is_error, text = await call(mcp, {"parent_id_or_path": A_FILE})
+
+    assert is_error is True
+    assert FILE_IS_NOT_A_DIRECTORY in text
+    assert "provider.example" not in text
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [500, 502])
 @pytest.mark.parametrize("error", [("notFound", None), ("posix", "enoent")], ids=["id", "errno"])

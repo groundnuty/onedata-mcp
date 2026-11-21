@@ -335,9 +335,10 @@ async def test_listing_errors_and_an_empty_directory_as_the_model_reads_them(
         files_mcp, "list_children", {"parent_id_or_path": f"{probe}/seed.txt"}
     )
     print(f"listing a regular file answered: is_error={result.is_error} {text}")
-    # TODO(first live run): pin 25.0's status and error id, printed above. Expected: enotdir.
+    # 25.0 does not refuse: it lists the file as its own only child (first live run, 2026-11-21).
+    # The tool detects that and refuses, so a model never reads "the directory holds seed.txt".
     assert result.is_error is True, text
-    assert "is not a directory: only a directory has entries to list" in text
+    assert f"'{probe}/seed.txt' is a regular file, not a directory; it has no children" in text
 
     result, text = await _call(
         files_mcp, "list_children", {"parent_id_or_path": f"{probe}/no-such-dir"}
@@ -438,9 +439,14 @@ async def test_nested_paths_and_their_failures(files_mcp: FastMCP, probe: str) -
 
     result, text = await _call(files_mcp, "create_directory", {"path": f"{probe}/seed.txt/sub"})
     print(f"a regular file on the path answered: {text}")
-    # TODO(first live run): pin 25.0's answer, printed above. Expected: enotdir.
+    # 25.0 answers 400 posix `eacces`, not `enotdir` (first live run, 2026-11-21); the tool reads
+    # the components of the path and names the regular file instead of hinting at permissions.
     assert result.is_error is True
-    assert "above the new directory is not a directory" in text
+    assert (
+        f"A component of the path, '{probe}/seed.txt', is a regular file, so nothing can be "
+        "created under it"
+    ) in text
+    assert "read-only" not in text
 
 
 @pytest.mark.asyncio

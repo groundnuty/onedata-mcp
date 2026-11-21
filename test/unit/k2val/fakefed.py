@@ -243,12 +243,21 @@ class FakeFed:
 
     def _children(self, fid: str, body: dict) -> httpx.Response:
         """One page, in name order, as 25.0 documents it: `limit`, then `token` (from the
-        previous page) or `offset`, never both."""
+        previous page) or `offset`, never both. A regular file lists itself as its only entry,
+        not an error (measured on 25.0)."""
         node = self.nodes.get(fid)
         if node is None:
             return error(400)
         if node.kind != "DIR":
-            return error(400, "enotdir")
+            attributes = body.get("attributes") or ["fileId", "name", "type"]
+            return httpx.Response(
+                200,
+                json={
+                    "children": [{a: self._attr(node, a) for a in attributes}],
+                    "isLast": True,
+                    "nextPageToken": None,
+                },
+            )
         if "token" in body and "offset" in body:
             self.offset_with_token += 1
             return httpx.Response(
@@ -379,7 +388,8 @@ class FakeFed:
     ) -> httpx.Response:
         """`PUT /data/{base}/path/{rel}?type=..&create_parents=..` (swagger
         create_file_at_path): parents made when asked, eexist on any existing last segment,
-        enotdir when a parent on the path is a regular file."""
+        eacces when a parent on the path is a regular file (measured on 25.0, which does not
+        send enotdir)."""
         if base not in self.nodes:
             return error(400)
         names = [unquote(part) for part in raw.split("/")]
@@ -396,7 +406,7 @@ class FakeFed:
                 found = Node(self.new_id("dir"), name, current, "DIR")
                 self.nodes[found.fid] = found
             elif found.kind != "DIR":
-                return error(400, "enotdir")
+                return error(400, "eacces")
             current = found.fid
         if any(k.name == names[-1] for k in self.kids(current)):
             return error(400, "eexist")
@@ -454,7 +464,7 @@ class FakeFed:
             json={
                 "qosRequirementId": qid,
                 "fileId": rule["fileId"],
-                "qosExpression": rule["expression"],
+                "expression": rule["expression"],  # 25.0's name, not the swagger's
                 "replicasNum": rule["replicasNum"],
                 "status": rule["status"],
             },

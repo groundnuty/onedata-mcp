@@ -1,4 +1,5 @@
 import json
+import posixpath
 from asyncio.log import logger
 from collections.abc import Iterable
 from typing import Any
@@ -391,7 +392,8 @@ async def list_children(
     `offset` "cannot be provided alongside the `token` parameter", so with a token no offset is
     sent, and a non-zero offset with a token is refused. A failure is raised with what this
     provider established about it (`_file_error`; not a directory), followed by Onedata's own
-    message."""
+    message. 25.0 lists a regular file as its own only entry instead of failing; that first
+    page is refused here (`_lists_itself`)."""
     config = get_oneprovider_config()
     requested_attributes = tuple[str, ...](attributes or DEFAULT_FILE_ATTRIBUTE_KEYS)
     _reject_deprecated_attributes(requested_attributes)
@@ -425,7 +427,56 @@ async def list_children(
         if replacement is e:
             raise
         raise replacement from e
-    return _strip_deprecated_fields_in_list(response["body"], "children")
+    body = response["body"]
+    if token is None and not offset and await _lists_itself(body, parent_id, parent_id_or_path):
+        raise NotADirectoryError(
+            f"{_shown(parent_id_or_path)} is a regular file, not a directory; it has no children."
+        )
+    return _strip_deprecated_fields_in_list(body, "children")
+
+
+async def _kind_of(file_id: str) -> str | None:
+    """The `type` of the file with this id (REG, DIR or SYMLNK); None if it cannot be read."""
+    try:
+        response = await request(
+            get_oneprovider_config(),
+            "GET",
+            f"/data/{quote(file_id, safe='')}",
+            json_body={"attributes": ["type"]},
+        )
+    except Exception:  # noqa: BLE001 - then nothing is said about what the target is
+        return None
+    body = response["body"]
+    kind = body.get("type") if isinstance(body, dict) else None
+    return kind if isinstance(kind, str) else None
+
+
+def _canonical_path(path: str) -> str:
+    """`path` without empty components, with `.` and `..` resolved: `/a//b/` is `/a/b`."""
+    return posixpath.normpath("/" + "/".join(part for part in path.split("/") if part))
+
+
+async def _lists_itself(body: Any, file_id: str, file_id_or_path: str) -> bool:
+    """Onedata 25.0 does not refuse to list a regular file: it answers with the file itself as
+    the only entry (measured live), which reads as "the directory holds a file of this name".
+    True when this first page is that: exactly one entry, which is the target.
+
+    A directory never lists itself, so when the target was given as a path and the entry has a
+    `path`, the two decide it with no further request: equal, it is the file; different, it is a
+    directory's own entry. Otherwise (the target was given as an id, or `path` was not asked
+    for) a single entry of type REG is confirmed by reading the target's own type, one request;
+    an entry of another type cannot be a regular file's own."""
+    children = body.get("children") if isinstance(body, dict) else None
+    if not isinstance(children, list) or len(children) != 1 or not isinstance(children[0], dict):
+        return False
+    entry = children[0]
+    kind = entry.get("type")
+    if isinstance(kind, str) and kind != "REG":
+        return False
+    path = entry.get("path")
+    if file_id_or_path.startswith("/") and isinstance(path, str):
+        return _canonical_path(path) == _canonical_path(file_id_or_path)
+    return await _kind_of(file_id) == "REG"
 
 
 async def list_files_recursively(
@@ -630,6 +681,31 @@ _EXISTING = {
     "SYMLNK": "a symbolic link, so no directory was created",
 }
 
+# The most components, counted from the space down, that `_regular_file_on` reads. Each costs
+# up to two requests, on an error path only.
+_MAX_COMPONENTS_READ = 8
+
+
+async def _regular_file_on(path: str) -> str | None:
+    """The first component of `path`, above its last, that is a regular file, as a path; None
+    when there is none or it cannot be established. Onedata 25.0 answers a creation under a
+    regular file with `eacces`, the same errno as a missing permission, so the errno alone does
+    not say which it was.
+
+    Walked from the space down, reading each component's type. It stops at the first one that is
+    not a directory, since a missing component means nothing below it exists, and a failed read
+    means nothing is established."""
+    space_name, *rest = path[1:].rstrip("/").split("/")
+    current = f"/{space_name}"
+    for part in rest[:-1][:_MAX_COMPONENTS_READ]:
+        current = f"{current}/{part}"
+        kind = await _type_at(current)
+        if kind == "REG":
+            return current
+        if kind != "DIR":
+            return None
+    return None
+
 
 async def _create_directory_error(
     error: OnedataApiError, path: str, create_parents: bool
@@ -642,7 +718,12 @@ async def _create_directory_error(
     not an existing entry. A missing parent needs a structured not-found on a 4xx status (with
     create_parents false); a bare 404 gets the possible causes; a 5xx that mentions a missing
     item gets the uncertain hint (the provider failed; a parent may also not exist; whether
-    anything was created is not known). Every errno or error id counts on a 4xx status only."""
+    anything was created is not known). Every errno or error id counts on a 4xx status only.
+
+    `eacces` is also what 25.0 answers for a creation under a regular file (`enotdir` is not
+    sent): the components of the path are then read, and one that is a regular file is named; the
+    permission hint is given only when none is. A 403 or `eperm` is a permission refusal as it
+    is, and nothing is read."""
     shown = _shown(path)
     eexist = _errno_is(error, "eexist")
     if eexist or _status(error) == 409:
@@ -661,6 +742,11 @@ async def _create_directory_error(
         hint = (
             f"A component of {shown} above the new directory is not a directory, so nothing "
             "was created."
+        )
+    elif _errno_is(error, "eacces") and (component := await _regular_file_on(path)):
+        hint = (
+            f"A component of the path, {_shown(component)}, is a regular file, so nothing can "
+            "be created under it."
         )
     elif _is_forbidden(error):
         hint = (

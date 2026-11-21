@@ -253,7 +253,6 @@ async def test_a_409_that_nothing_explains_is_a_conflict_not_an_existing_entry(
             True,
             "Not allowed to create '/Alpha/a.dat/sub': the token may be read-only",
         ),
-        (onedata_error(400, "posix", "eacces"), True, "Not allowed to create"),
     ],
 )
 async def test_failures_say_what_to_do(
@@ -269,6 +268,175 @@ async def test_failures_say_what_to_do(
     assert "status=" in str(caught.value)  # the underlying error is kept
     if not starts.startswith("The parent directory"):
         assert "parent directory of" not in str(caught.value)  # no missing-parent claim
+
+
+# --- eacces: a missing permission, or a regular file on the path (25.0 sends the same errno) ----
+
+PERMISSION_HINT = (
+    "Not allowed to create '{path}': the token may be read-only or have no write access in "
+    "this space. Calling again will not help."
+)
+
+
+def component(httpx_mock: HTTPXMock, path: str, file_id: str, kind: str | None) -> None:
+    """The path resolves to `file_id` whose type is `kind`; a kind of None is a failed read."""
+    httpx_mock.add_response(method="POST", url=lookup_url(path), json={"fileId": file_id})
+    if kind is None:
+        httpx_mock.add_response(
+            method="GET", url=f"{API}/data/{file_id}", **onedata_error(500, "internal")
+        )
+    else:
+        httpx_mock.add_response(method="GET", url=f"{API}/data/{file_id}", json={"type": kind})
+
+
+def attribute_reads(httpx_mock: HTTPXMock) -> list[str]:
+    return [r.url.path.rsplit("/", 1)[-1] for r in httpx_mock.get_requests() if r.method == "GET"]
+
+
+@pytest.mark.asyncio
+async def test_eacces_under_a_regular_file_names_the_file(httpx_mock: HTTPXMock) -> None:
+    """25.0's answer to creating under a regular file: `eacces`, not `enotdir`."""
+    root_lookup(httpx_mock)
+    httpx_mock.add_response(method="PUT", **onedata_error(400, "posix", "eacces"))
+    component(httpx_mock, "/Alpha/a.dat", "f1", "REG")
+
+    with pytest.raises(OnedataApiError) as caught:
+        await files.create_directory("/Alpha/a.dat/sub")
+
+    text = str(caught.value)
+    assert text.startswith(
+        "A component of the path, '/Alpha/a.dat', is a regular file, so nothing can be created "
+        "under it. [Onedata API request failed: PUT"
+    )
+    assert "read-only" not in text and "Calling again will not help" not in text
+    assert "status=400" in text  # Onedata's own message is kept
+
+
+@pytest.mark.asyncio
+async def test_the_regular_file_is_found_from_the_space_down_and_the_walk_stops_there(
+    httpx_mock: HTTPXMock,
+) -> None:
+    root_lookup(httpx_mock)
+    httpx_mock.add_response(method="PUT", **onedata_error(400, "posix", "eacces"))
+    component(httpx_mock, "/Alpha/d", "d1", "DIR")
+    component(httpx_mock, "/Alpha/d/a.dat", "f1", "REG")  # nothing below it is read
+
+    with pytest.raises(OnedataApiError) as caught:
+        await files.create_directory("/Alpha/d/a.dat/b/c")
+
+    assert str(caught.value).startswith("A component of the path, '/Alpha/d/a.dat', is a regular")
+    assert attribute_reads(httpx_mock) == ["d1", "f1"]
+
+
+@pytest.mark.asyncio
+async def test_eacces_over_directories_only_is_a_missing_permission(httpx_mock: HTTPXMock) -> None:
+    root_lookup(httpx_mock)
+    httpx_mock.add_response(method="PUT", **onedata_error(400, "posix", "eacces"))
+    component(httpx_mock, "/Alpha/d", "d1", "DIR")
+
+    with pytest.raises(OnedataApiError) as caught:
+        await files.create_directory("/Alpha/d/sub")
+
+    assert str(caught.value).startswith(PERMISSION_HINT.format(path="/Alpha/d/sub"))
+    assert "regular file" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_eacces_directly_under_the_space_reads_no_component(httpx_mock: HTTPXMock) -> None:
+    root_lookup(httpx_mock)
+    httpx_mock.add_response(method="PUT", **onedata_error(400, "posix", "eacces"))
+
+    with pytest.raises(OnedataApiError) as caught:
+        await files.create_directory("/Alpha/sub")
+
+    assert str(caught.value).startswith(PERMISSION_HINT.format(path="/Alpha/sub"))
+    assert attribute_reads(httpx_mock) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "unread",
+    ["not-found", "read-fails", "unknown-type"],
+)
+async def test_eacces_with_nothing_established_about_the_path_is_a_missing_permission(
+    httpx_mock: HTTPXMock, unread: str
+) -> None:
+    """A component that does not exist, cannot be read, or has no readable type establishes no
+    regular file: the permission hint stands."""
+    root_lookup(httpx_mock)
+    httpx_mock.add_response(method="PUT", **onedata_error(400, "posix", "eacces"))
+    if unread == "not-found":
+        httpx_mock.add_response(
+            method="POST", url=lookup_url("/Alpha/d"), **onedata_error(400, "posix", "enoent")
+        )
+    elif unread == "read-fails":
+        component(httpx_mock, "/Alpha/d", "d1", None)
+    else:
+        httpx_mock.add_response(method="POST", url=lookup_url("/Alpha/d"), json={"fileId": "d1"})
+        httpx_mock.add_response(method="GET", url=f"{API}/data/d1", json={})
+
+    with pytest.raises(OnedataApiError) as caught:
+        await files.create_directory("/Alpha/d/sub")
+
+    assert str(caught.value).startswith(PERMISSION_HINT.format(path="/Alpha/d/sub"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [onedata_error(403, "forbidden"), onedata_error(400, "posix", "eperm")],
+    ids=["403", "eperm"],
+)
+async def test_a_permission_refusal_other_than_eacces_reads_no_component(
+    httpx_mock: HTTPXMock, error: dict
+) -> None:
+    root_lookup(httpx_mock)
+    httpx_mock.add_response(method="PUT", **error)
+
+    with pytest.raises(OnedataApiError) as caught:
+        await files.create_directory("/Alpha/a.dat/sub")
+
+    assert str(caught.value).startswith(PERMISSION_HINT.format(path="/Alpha/a.dat/sub"))
+    assert attribute_reads(httpx_mock) == []
+
+
+@pytest.mark.asyncio
+async def test_eacces_on_a_5xx_gets_no_diagnosis_and_reads_no_component(
+    httpx_mock: HTTPXMock,
+) -> None:
+    root_lookup(httpx_mock)
+    httpx_mock.add_response(method="PUT", **onedata_error(500, "posix", "eacces"))
+
+    with pytest.raises(OnedataApiError) as caught:
+        await files.create_directory("/Alpha/a.dat/sub")
+
+    assert str(caught.value).startswith("Onedata API request failed: PUT")
+    assert attribute_reads(httpx_mock) == []
+
+
+@pytest.mark.asyncio
+async def test_a_success_reads_no_component(httpx_mock: HTTPXMock) -> None:
+    root_lookup(httpx_mock)
+    httpx_mock.add_response(method="PUT", status_code=201, json={"fileId": "n1"})
+
+    result = await files.create_directory("/Alpha/d/sub")
+
+    assert result == {"fileId": "n1", "path": "/Alpha/d/sub"}
+    assert attribute_reads(httpx_mock) == []
+
+
+@pytest.mark.asyncio
+async def test_the_model_reads_which_component_is_the_file(
+    mcp: FastMCP, httpx_mock: HTTPXMock
+) -> None:
+    root_lookup(httpx_mock)
+    httpx_mock.add_response(method="PUT", **onedata_error(400, "posix", "eacces"))
+    component(httpx_mock, "/Alpha/a.dat", "f1", "REG")
+
+    is_error, text = await call(mcp, {"path": "/Alpha/a.dat/sub"})
+
+    assert is_error is True
+    assert "A component of the path, '/Alpha/a.dat', is a regular file" in text
 
 
 @pytest.mark.asyncio
