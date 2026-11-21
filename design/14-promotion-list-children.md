@@ -48,7 +48,8 @@ The tests are in `test/unit/api/test_list_children.py`, through the API and thro
 | `offset` below 0 or above 500 | Sent | Refused by the schema |
 | `?`, `#` or `/` in an id | **Defect:** the path was cut short or became another endpoint | Percent-encoded |
 | An empty id, `.` or `..` | Sent: `/data/../children` is `/children` at the API root | Refused before any request |
-| The parent resolves but is not a directory (`enotdir` on the listing) | Onedata's message only | `The path '…' is not a directory: only a directory has entries to list.` |
+| The parent is a regular file | **Defect (seen live, 25.0, 2026-11-21):** Onedata does not refuse; it returns the file itself as the only child, so a model would read "the directory contains <file>" | `'…' is a regular file, not a directory; it has no children.` (detected on the first page by the single entry being the target, or one type read when the target was given by id) |
+| `enotdir` on the listing itself | Onedata's message only | `The path '…' is not a directory: only a directory has entries to list.` |
 | A component of the path is not a directory (`enotdir` while resolving `/s/file/child`) | Onedata's message only | `A component of path '…' before its last part is not a directory, so this provider cannot resolve the path.` (review, 6) |
 | An id that names nothing (a structured not-found), a malformed id, no access | Onedata's message only | The hints of design/13 (`This provider reports nothing at …`, `This provider rejected … as a file id`, `Not allowed to list … Calling again will not help.`), then Onedata's message |
 | A bare 404 (no structured body) | Onedata's message only | Its possible causes, not one of them (review, 5): `This provider answered 404 for … without saying why: it may not exist, its space may not be supported by this provider, or the token may not see it. Check …` |

@@ -264,3 +264,8 @@ Gate 1 above was updated to match this round (redaction, 204-only success, redir
 ## Also on this branch
 
 Branch commit `65df0b3` fixes a unit test that failed on master `4cd4c47`. Once the Claude configs moved to the subscription backend, they had no key file, and the test still expected every config to have one. `make check` was red on master before this branch.
+
+## Stable tool fixed alongside: `get_file_qos_summary` (2026-11-21)
+
+The first live run showed that Onedata 25.0 names a requirement's replica count `replicasNum`. `get_file_qos_summary`'s description promises `replicas_num` per rule, but its enrichment copied only a key named `replicas_num`, so models never received the count. The enrichment now maps `replicasNum` to `replicas_num` (unit-tested). This changes a stable tool's result shape, so under design/10 it needs the K=3 smoke re-run, which `get_file_qos_summary` already owes for its reworded description.
+

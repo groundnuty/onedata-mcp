@@ -113,11 +113,12 @@ The test is skipped unless `ONEDATA_MCP_LIVE_TRANSFER=1`. It refuses any provide
 - No poll read completed while the blocks, read after it on the same poll, did not yet cover the file.
 - A second schedule of a file being copied was accepted (no error, a transfer id returned), and the file was whole after 2.02 s.
 
-Still to record:
+Recorded on the first live run (2026-11-21, 5 passed):
 
-- the figures above under panel-like load (a K=8 run puts up to 12 trials on the two providers at once);
-- the unknown target's error text: its status, error id and details, and whether they carry `spaceId`;
-- the name-as-id error text.
+- an unknown target id: `400`, and the model reads `Cannot replicate to '<id>': no provider with that id supports the space of '<file>'. The providers that support the file's space are: local (id '…'), owner (id '…').`;
+- a provider's name passed as the id: `400`, and the model reads `Pass its id '…', not its name: 'local' is the name of a provider that supports the space of '<file>'. The providers that support the file's space are: …`.
+
+Still to record: the timing under panel-like load (trials of one config never run concurrently; configs run in parallel).
 
 **Act on them before the gate-4 run:**
 
