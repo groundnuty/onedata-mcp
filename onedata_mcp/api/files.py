@@ -1,4 +1,5 @@
 import json
+import posixpath
 from asyncio.log import logger
 from collections.abc import Iterable
 from typing import Any
@@ -127,21 +128,245 @@ async def get_file_id(path: str) -> str:
     return response["body"]["fileId"]
 
 
+# --- A file id in a request path, and errors a caller can act on --------------------------------
+#
+# Used by get_file_attributes, list_children and create_directory (design/13-15). The stable
+# tools that share `_normalize_path_to_file_id` keep their own handling: changing them needs
+# their own gates.
+
+_SHOWN_MAX = 80
+_HOW_TO_NAME_A_FILE = "Give a path, /<space_name>/<path>, or a file id."
+
+
+def _shown(value: str) -> str:
+    """The value as echoed in an error: quoted, and cut short if it is long."""
+    if len(value) <= _SHOWN_MAX:
+        return repr(value)
+    return repr(value[:_SHOWN_MAX]) + "..."
+
+
+def _target(file_id_or_path: str) -> str:
+    kind = "path" if file_id_or_path.startswith("/") else "file id"
+    return f"{kind} {_shown(file_id_or_path)}"
+
+
+def _id_in_path(file_id: str, file_id_or_path: str) -> str:
+    """The file id as one percent-encoded path segment.
+
+    Unencoded, a `?` or `#` in an id cuts the request path short, and a `/` adds segments. An
+    empty id, `.` or `..` is refused before any request: the HTTP client resolves dot segments
+    to another URL (`/data/..` is the API root)."""
+    if not file_id.strip():
+        raise ValueError(f"The file id or path is empty. {_HOW_TO_NAME_A_FILE}")
+    if file_id.strip() in {".", ".."}:
+        raise ValueError(
+            f"{_shown(file_id_or_path)} is not a file id or path. {_HOW_TO_NAME_A_FILE}"
+        )
+    return quote(file_id, safe="")
+
+
+def _status(error: OnedataApiError) -> int | None:
+    response = error.response if isinstance(error.response, dict) else {}
+    status = response.get("status_code")
+    return status if isinstance(status, int) else None
+
+
+# A specific diagnosis needs a structured Onedata error (an error id or an errno in the body) on
+# a 4xx status. The same body on a 5xx says the provider failed, not what the failure was
+# about: an `enoent` in a 500 does not show that the file is missing. A 5xx therefore gets
+# either no hint (the error as it is) or, for a not-found, the uncertain one
+# (`_unconfirmed_hint`), and never "not found" or "missing parent".
+
+
+def _is_client_error(error: OnedataApiError) -> bool:
+    status = _status(error)
+    return status is not None and 400 <= status < 500
+
+
+def _errno_is(error: OnedataApiError, errno: str) -> bool:
+    """The errno is `errno`, on a 4xx status."""
+    return _is_client_error(error) and error.errno == errno
+
+
+def _is_forbidden(error: OnedataApiError) -> bool:
+    return _status(error) == 403 or (
+        _is_client_error(error)
+        and (error.error_id == "forbidden" or error.errno in {"eacces", "eperm"})
+    )
+
+
+def _is_not_found(error: OnedataApiError) -> bool:
+    """A structured not-found on a 4xx status: an `enoent` errno or the `notFound` error id. A
+    bare 404 (no such body) is not one: a provider that cannot resolve or disclose a target
+    answers 404 too. A 5xx carrying one is `_is_unconfirmed_not_found`."""
+    return _is_client_error(error) and (error.errno == "enoent" or error.error_id == "notFound")
+
+
+def _is_unconfirmed_not_found(error: OnedataApiError) -> bool:
+    """A 5xx whose body mentions a missing item: the provider failed, and what is missing is
+    not established."""
+    status = _status(error)
+    return (
+        status is not None
+        and status >= 500
+        and (error.errno == "enoent" or error.error_id == "notFound")
+    )
+
+
+def _unconfirmed_hint(target: str, error: OnedataApiError, *, creating: bool = False) -> str:
+    """For a 5xx that mentions a missing item. It claims neither that the target is missing nor
+    (when creating) that nothing was created."""
+    status = _status(error)
+    if creating:
+        return (
+            f"This provider answered {status} and mentioned a missing item: the provider "
+            f"failed, and a parent of {target} may also not exist. It is not known whether "
+            "anything was created; check what exists at the path before calling again."
+        )
+    return (
+        f"This provider answered {status} and mentioned a missing item: the provider failed, "
+        f"and {target} may also not exist. That does not show which; check the path or id, "
+        "the space and the provider, and try again."
+    )
+
+
+def _is_bare_404(error: OnedataApiError) -> bool:
+    return _status(error) == 404 and not _is_not_found(error)
+
+
+def _rejects_the_id(error: OnedataApiError) -> bool:
+    """A 400 about the id itself (`badValueIdentifier`, or a bad value whose key is `id`), not
+    about another input such as an unknown attribute name, which passes on unchanged."""
+    if _status(error) != 400:
+        return False
+    body_error = error.body.get("error")
+    details = body_error.get("details") if isinstance(body_error, dict) else None
+    key = details.get("key") if isinstance(details, dict) else None
+    return error.error_id == "badValueIdentifier" or (
+        (error.error_id or "").startswith("badValue") and key == "id"
+    )
+
+
+async def _visible_spaces() -> str:
+    """` Spaces this token sees at this provider: "a", "b".`, or "" (best effort)."""
+    try:
+        names = sorted(
+            {s["name"] for s in await list_user_spaces() if isinstance(s.get("name"), str)}
+        )
+    except Exception:  # noqa: BLE001 - the hint is best effort
+        return ""
+    if not names:
+        return ""
+    return " Spaces this token sees at this provider: " + ", ".join(f'"{n}"' for n in names) + "."
+
+
+def _bare_404_hint(target: str, what: str) -> str:
+    return (
+        f"This provider answered 404 for {target} without saying why: {what}, its space may not "
+        "be supported by this provider, or the token may not see it. Check the path or id, the "
+        "space and the token's access."
+    )
+
+
+async def _file_error(
+    error: OnedataApiError, file_id_or_path: str, action: str, *, lookup: bool = False
+) -> Exception:
+    """What a failed call on a file or directory tells the caller, from what this provider
+    established; the error itself when there is nothing to add. A hint is followed by Onedata's
+    own message. Specific diagnoses need distinguishing evidence: a 403 or an access errno, a
+    structured not-found, `spaceNotSupportedBy`, an `enotdir` while resolving a path, an id
+    rejected as such. A bare 404 gets the possible causes, not one of them. `lookup`: the error
+    came from resolving the path."""
+    target = _target(file_id_or_path)
+    if _is_forbidden(error):
+        hint = (
+            f"Not allowed to {action} {target}: the token has no access to it. Calling again "
+            "will not help."
+        )
+    elif _is_client_error(error) and error.error_id == "spaceNotSupportedBy":
+        hint = (
+            f"This provider does not support the space of {target}, so it cannot {action} it "
+            f"here; the space may still exist.{await _visible_spaces()}"
+        )
+    elif lookup and _errno_is(error, "enotdir"):
+        hint = (
+            f"A component of {target} before its last part is not a directory, so this provider "
+            "cannot resolve the path."
+        )
+    elif lookup and _is_not_found(error):
+        return FileNotFoundError(f'Path "{file_id_or_path}" not found')
+    elif _is_not_found(error):
+        hint = (
+            f"This provider reports nothing at {target}: it may have been deleted, or the value "
+            f"is not a file id. {_HOW_TO_NAME_A_FILE}"
+        )
+    elif _rejects_the_id(error):
+        hint = f"This provider rejected {target} as a file id. {_HOW_TO_NAME_A_FILE}"
+    elif _is_bare_404(error):
+        hint = _bare_404_hint(target, "it may not exist")
+    elif _is_unconfirmed_not_found(error):
+        hint = _unconfirmed_hint(target, error)
+    else:
+        return error
+    return _with_hint(hint, error)
+
+
+def _with_hint(hint: str, error: OnedataApiError) -> OnedataApiError:
+    """The hint first, then Onedata's own message."""
+    return OnedataApiError(f"{hint} [{error}]", response=error.response)
+
+
+async def _lookup(path: str, action: str) -> str:
+    """The file id of `path` at this provider (`POST /lookup-file-id/{path}`), with failures
+    mapped by `_file_error` (a structured not-found is `Path "..." not found`). The stable tools
+    keep `get_file_id`, whose own mapping reads `spaceNotSupportedBy` as a missing space."""
+    try:
+        response = await request(
+            get_oneprovider_config(), "POST", f"/lookup-file-id/{quote(path, safe='')}"
+        )
+    except OnedataApiError as e:
+        replacement = await _file_error(e, path, action, lookup=True)
+        if replacement is e:
+            raise
+        raise replacement from e
+    return response["body"]["fileId"]
+
+
+async def _file_id_for(file_id_or_path: str, action: str) -> str:
+    """A path resolved with `_lookup`; an id as given."""
+    if file_id_or_path.startswith("/"):
+        return await _lookup(file_id_or_path, action)
+    return file_id_or_path
+
+
 async def get_file_attributes(
     file_id_or_path: str,
     *,
     attributes: Iterable[str] | None = DEFAULT_FILE_ATTRIBUTE_KEYS,
 ) -> dict[str, Any]:
+    """The attributes of a file or directory, given by path or id.
+
+    Without `attributes` (or with an empty list), the default set is asked for. A deprecated
+    attribute name is refused with its new name; a failure is raised with what this provider
+    established about it (`_file_error`), followed by Onedata's own message."""
     config = get_oneprovider_config()
     requested_attributes = tuple[str, ...](attributes or DEFAULT_FILE_ATTRIBUTE_KEYS)
+    _reject_deprecated_attributes(requested_attributes)
 
-    file_id = await _normalize_path_to_file_id(file_id_or_path)
-    response = await request(
-        config,
-        "GET",
-        f"/data/{file_id}",
-        json_body=({"attributes": list(requested_attributes)} if requested_attributes else None),
-    )
+    action = "read the attributes of"
+    file_id = await _file_id_for(file_id_or_path, action)
+    try:
+        response = await request(
+            config,
+            "GET",
+            f"/data/{_id_in_path(file_id, file_id_or_path)}",
+            json_body={"attributes": list(requested_attributes)},
+        )
+    except OnedataApiError as e:
+        replacement = await _file_error(e, file_id_or_path, action)
+        if replacement is e:
+            raise
+        raise replacement from e
     logger.debug(f"Fetched file attributes for file {file_id_or_path}: {response['body']}")
     return response["body"]
 
@@ -161,27 +386,106 @@ async def list_children(
     offset: int,
     token: str | None = None,
 ) -> dict[str, Any]:
+    """One page of a directory's entries, given by path or id.
+
+    `token` (a previous page's `nextPageToken`) and `offset` are exclusive: the swagger says
+    `offset` "cannot be provided alongside the `token` parameter", so with a token no offset is
+    sent, and a non-zero offset with a token is refused. A failure is raised with what this
+    provider established about it (`_file_error`; not a directory), followed by Onedata's own
+    message. 25.0 lists a regular file as its own only entry instead of failing; that first
+    page is refused here (`_lists_itself`)."""
     config = get_oneprovider_config()
-    parent_id = await _normalize_path_to_file_id(parent_id_or_path)
     requested_attributes = tuple[str, ...](attributes or DEFAULT_FILE_ATTRIBUTE_KEYS)
     _reject_deprecated_attributes(requested_attributes)
-    request_body: dict[str, Any] = {"limit": limit, "offset": offset}
+    if token is not None and offset:
+        raise ValueError(
+            "Pass token or offset, not both: token continues after the page it came with, "
+            "offset counts entries from the start of the directory."
+        )
+    request_body: dict[str, Any] = {"limit": limit, "attributes": list(requested_attributes)}
     if token is not None:
         request_body["token"] = token
-    if requested_attributes:
-        request_body["attributes"] = list(requested_attributes)
+    else:
+        request_body["offset"] = offset
 
+    parent_id = await _file_id_for(parent_id_or_path, "list")
     try:
         response = await request(
             config,
             "GET",
-            f"/data/{parent_id}/children",
+            f"/data/{_id_in_path(parent_id, parent_id_or_path)}/children",
             json_body=request_body,
         )
     except OnedataApiError as e:
-        await _raise_invalid_space_error_if_needed(e, parent_id_or_path)
-        raise
-    return _strip_deprecated_fields_in_list(response["body"], "children")
+        if _errno_is(e, "enotdir"):  # the target itself resolved, and is not a directory
+            hint = (
+                f"The {_target(parent_id_or_path)} is not a directory: only a directory has "
+                "entries to list."
+            )
+            raise _with_hint(hint, e) from e
+        status = (e.response or {}).get("status_code") if isinstance(e.response, dict) else None
+        if token is not None and isinstance(status, int) and status >= 500:
+            # Onedata 25.0 answers a made-up or stale page token with 500 internalServerError
+            # (seen live 2026-11-21); the uncertainty stays, but the token is the likely cause.
+            hint = (
+                "The provider failed on this page token. A token is valid only as returned in "
+                "the previous page's nextPageToken; to start over, list again without a token."
+            )
+            raise _with_hint(hint, e) from e
+        replacement = await _file_error(e, parent_id_or_path, "list")
+        if replacement is e:
+            raise
+        raise replacement from e
+    body = response["body"]
+    if token is None and not offset and await _lists_itself(body, parent_id, parent_id_or_path):
+        raise NotADirectoryError(
+            f"{_shown(parent_id_or_path)} is a regular file, not a directory; it has no children."
+        )
+    return _strip_deprecated_fields_in_list(body, "children")
+
+
+async def _kind_of(file_id: str) -> str | None:
+    """The `type` of the file with this id (REG, DIR or SYMLNK); None if it cannot be read."""
+    try:
+        response = await request(
+            get_oneprovider_config(),
+            "GET",
+            f"/data/{quote(file_id, safe='')}",
+            json_body={"attributes": ["type"]},
+        )
+    except Exception:  # noqa: BLE001 - then nothing is said about what the target is
+        return None
+    body = response["body"]
+    kind = body.get("type") if isinstance(body, dict) else None
+    return kind if isinstance(kind, str) else None
+
+
+def _canonical_path(path: str) -> str:
+    """`path` without empty components, with `.` and `..` resolved: `/a//b/` is `/a/b`."""
+    return posixpath.normpath("/" + "/".join(part for part in path.split("/") if part))
+
+
+async def _lists_itself(body: Any, file_id: str, file_id_or_path: str) -> bool:
+    """Onedata 25.0 does not refuse to list a regular file: it answers with the file itself as
+    the only entry (measured live), which reads as "the directory holds a file of this name".
+    True when this first page is that: exactly one entry, which is the target.
+
+    A directory never lists itself, so when the target was given as a path and the entry has a
+    `path`, the two decide it with no further request: equal, it is the file; different, it is a
+    directory's own entry. Otherwise (the target was given as an id, or `path` was not asked
+    for) a single entry of type REG is confirmed by reading the target's own type, one request;
+    an entry of another type cannot be a regular file's own."""
+    children = body.get("children") if isinstance(body, dict) else None
+    if not isinstance(children, list) or len(children) != 1 or not isinstance(children[0], dict):
+        return False
+    entry = children[0]
+    kind = entry.get("type")
+    if isinstance(kind, str) and kind != "REG":
+        return False
+    path = entry.get("path")
+    if file_id_or_path.startswith("/") and isinstance(path, str):
+        return _canonical_path(path) == _canonical_path(file_id_or_path)
+    return await _kind_of(file_id) == "REG"
 
 
 async def list_files_recursively(
@@ -261,7 +565,7 @@ async def download_file_with_meta(file_id_or_path: str) -> tuple[bytes, str | No
         # Same host-free answer as `request()`: no URL, address, port or library text.
         raise transport_failure(exc, config, "GET", content_path) from None
 
-    if response.is_error:
+    if not 200 <= response.status_code < 300:  # a redirect is not file data either
         raise OnedataApiError(
             http_failure_message(
                 config, "GET", content_path, response.status_code, decode_response_body(response)
@@ -335,46 +639,184 @@ async def create_file(path: str, content: str, *, create_parents: bool = False) 
         raise e
 
 
-async def create_directory(path: str, *, create_parents: bool = True) -> dict[str, Any]:
-    """Create a directory at the given /<space>/<path> location.
+_HOW_TO_NAME_A_DIRECTORY = "Give the new directory's full path, /<space_name>/<path_to_directory>."
 
-    Wraps ``PUT /data/{space_id}/path/{relative}?type=DIR&create_parents=...``
-    (Oneprovider 25.0 — see oneprovider-swagger paths/data/id/path.yaml,
-    operationId ``create_file_at_path``). Returns ``{fileId, path}``.
 
-    Raises ``FileExistsError`` if the path already exists. Raises
-    ``ValueError`` if ``path`` does not include a relative path under a
-    space root (i.e. the form must be ``/<space>/<dir...>``).
-
-    See research/empirical-mcp-server-findings.md M-11.
-    """
-    config = get_oneprovider_config()
-    normalized = path.strip("/")
-    if "/" not in normalized:
+def _directory_path(path: str) -> tuple[str, str]:
+    """(the space's name, the new directory's path under its root), or a ValueError saying what
+    to give. The path must be absolute: a relative one left unresolved (a client with an empty
+    list of roots) would otherwise read its first component as a space. The space component and
+    every later one must be a name: an empty, `.` or `..` component is refused, since in the
+    request path the HTTP client resolves `a/../b` to `b`, which would make the directory
+    somewhere else."""
+    if not path.startswith("/"):
         raise ValueError(
-            "path must be /<space_name>/<path_to_directory>; got: "
-            f"{path!r}. To target the space root, use the existing "
-            f"namespace tools instead — the root always exists."
+            "Paths must start with '/': use /<space_name>/<path_to_directory> "
+            f"(got {_shown(path)})."
         )
-    space_name, relative_path = normalized.split("/", 1)
-    if not relative_path:
-        raise ValueError("path must include a directory path under the space")
-    root_id = await get_file_id(f"/{space_name}")
-    encoded_path = quote(relative_path, safe="/")
+    body = path[1:].rstrip("/")
+    if not body:
+        raise ValueError(f"The path is empty. {_HOW_TO_NAME_A_DIRECTORY}")
+    space_name, *rest = body.split("/")
+    if space_name in ("", ".", ".."):
+        raise ValueError(
+            f"{_shown(path)} does not start with a space name. {_HOW_TO_NAME_A_DIRECTORY}"
+        )
+    if not rest:
+        raise ValueError(
+            f"{_shown(path)} is the root directory of a space, which always exists. "
+            f"{_HOW_TO_NAME_A_DIRECTORY}"
+        )
+    if any(part in ("", ".", "..") for part in rest):
+        raise ValueError(
+            f"{_shown(path)} has an empty, '.' or '..' component. {_HOW_TO_NAME_A_DIRECTORY}"
+        )
+    return space_name, "/".join(rest)
+
+
+async def _type_at(path: str) -> str | None:
+    """What is at `path` (REG, DIR or SYMLNK), for the "already exists" error; None if unknown."""
+    try:
+        found = await get_file_attributes(path, attributes=["type"])
+    except Exception:  # noqa: BLE001 - then nothing is said about what is there
+        return None
+    kind = found.get("type") if isinstance(found, dict) else None
+    return kind if isinstance(kind, str) else None
+
+
+_EXISTING = {
+    "DIR": "a directory, so nothing was created",
+    "REG": "a regular file, so no directory was created",
+    "SYMLNK": "a symbolic link, so no directory was created",
+}
+
+# The most components, counted from the space down, that `_regular_file_on` reads. Each costs
+# up to two requests, on an error path only.
+_MAX_COMPONENTS_READ = 8
+
+
+async def _regular_file_on(path: str) -> str | None:
+    """The first component of `path`, above its last, that is a regular file, as a path; None
+    when there is none or it cannot be established. Onedata 25.0 answers a creation under a
+    regular file with `eacces`, the same errno as a missing permission, so the errno alone does
+    not say which it was.
+
+    Walked from the space down, reading each component's type. It stops at the first one that is
+    not a directory, since a missing component means nothing below it exists, and a failed read
+    means nothing is established."""
+    space_name, *rest = path[1:].rstrip("/").split("/")
+    current = f"/{space_name}"
+    for part in rest[:-1][:_MAX_COMPONENTS_READ]:
+        current = f"{current}/{part}"
+        kind = await _type_at(current)
+        if kind == "REG":
+            return current
+        if kind != "DIR":
+            return None
+    return None
+
+
+async def _create_directory_error(
+    error: OnedataApiError, path: str, create_parents: bool
+) -> Exception:
+    """What a failed creation tells the caller, from what this provider established; the error
+    itself when there is nothing to add.
+
+    "Already exists" needs evidence: an `eexist` errno, or a 409 whose path then resolves. With
+    a type read at the path, it says what is there. A 409 that nothing explains is a conflict,
+    not an existing entry. A missing parent needs a structured not-found on a 4xx status (with
+    create_parents false); a bare 404 gets the possible causes; a 5xx that mentions a missing
+    item gets the uncertain hint (the provider failed; a parent may also not exist; whether
+    anything was created is not known). Every errno or error id counts on a 4xx status only.
+
+    `eacces` is also what 25.0 answers for a creation under a regular file (`enotdir` is not
+    sent): the components of the path are then read, and one that is a regular file is named; the
+    permission hint is given only when none is. A 403 or `eperm` is a permission refusal as it
+    is, and nothing is read."""
+    shown = _shown(path)
+    eexist = _errno_is(error, "eexist")
+    if eexist or _status(error) == 409:
+        kind = await _type_at(path)
+        if kind in _EXISTING:
+            return FileExistsError(f"{shown} already exists as {_EXISTING[kind]}.")
+        if eexist:
+            return FileExistsError(
+                f"Something already exists at {shown} (eexist), so no directory was created."
+            )
+        hint = (
+            f"This provider refused to create {shown} with a conflict (409) and did not say "
+            "why, so no directory was created. Check what is at the path."
+        )
+    elif _errno_is(error, "enotdir"):
+        hint = (
+            f"A component of {shown} above the new directory is not a directory, so nothing "
+            "was created."
+        )
+    elif _errno_is(error, "eacces") and (component := await _regular_file_on(path)):
+        hint = (
+            f"A component of the path, {_shown(component)}, is a regular file, so nothing can "
+            "be created under it."
+        )
+    elif _is_forbidden(error):
+        hint = (
+            f"Not allowed to create {shown}: the token may be read-only or have no write "
+            "access in this space. Calling again will not help."
+        )
+    elif _is_client_error(error) and error.error_id == "spaceNotSupportedBy":
+        hint = (
+            f"This provider does not support the space of {shown}, so nothing was created "
+            f"here; the space may still exist.{await _visible_spaces()}"
+        )
+    elif _is_not_found(error) and not create_parents:
+        hint = (
+            f"The parent directory of {shown} does not exist, so nothing was created. Create "
+            "it first, or call again with create_parents set to true."
+        )
+    elif _is_not_found(error):
+        hint = (
+            f"This provider reports part of {shown} missing although create_parents is true, "
+            "so nothing was created. Check the path."
+        )
+    elif _is_bare_404(error):
+        hint = _bare_404_hint(shown, "a parent may not exist") + " Nothing was created."
+    elif _is_unconfirmed_not_found(error):
+        hint = _unconfirmed_hint(shown, error, creating=True)
+    else:
+        return error
+    return _with_hint(hint, error)
+
+
+async def create_directory(path: str, *, create_parents: bool = True) -> dict[str, Any]:
+    """Create a directory at `/<space>/<path>`; returns `{fileId, path}`.
+
+    `PUT /data/{space root id}/path/{relative}?type=DIR&create_parents=..` (swagger
+    `create_file_at_path`). Every component of the relative path is percent-encoded, so a `?`
+    or `#` in a name is a character of the name. A path that cannot name a new directory is
+    refused before any request; a failure says what this provider established
+    (`_create_directory_error`)."""
+    space_name, relative = _directory_path(path)
+    config = get_oneprovider_config()
+    try:
+        root_id = await _lookup(f"/{space_name}", "create a directory in")
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"No space named {_shown(space_name)} is visible at this provider, so nothing was "
+            f"created.{await _visible_spaces()}"
+        ) from None
     try:
         response = await request(
             config,
             "PUT",
-            f"/data/{root_id}/path/{encoded_path}",
+            f"/data/{quote(root_id, safe='')}/path/{quote(relative, safe='/')}",
             params={"type": "DIR", "create_parents": create_parents},
         )
     except OnedataApiError as e:
-        if e.errno == "eexist":
-            raise FileExistsError(f"Directory {path} already exists") from e
-        logger.error(f"Error creating directory {path}: {e}")
-        raise
-    file_id = response["body"]["fileId"]
-    return {"fileId": file_id, "path": path}
+        logger.debug(f"Error creating directory {path}: {e}")
+        replacement = await _create_directory_error(e, path, create_parents)
+        if replacement is e:
+            raise
+        raise replacement from e
+    return {"fileId": response["body"]["fileId"], "path": path}
 
 
 def _looks_like_directory_intent(path: str, content: str) -> bool:
@@ -565,7 +1007,7 @@ async def move_file(
     except Exception as exc:
         raise transport_failure(exc, config, "PUT", cdmi_path, label="CDMI move failed") from None
 
-    if response.is_error:
+    if not 200 <= response.status_code < 300:  # a redirect is not a completed move
         raise OnedataApiError(
             http_failure_message(
                 config,

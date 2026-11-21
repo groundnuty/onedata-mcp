@@ -21,8 +21,9 @@ from dataclasses import dataclass, field
 
 from benchmark._runtime_types import AgentTrace, OracleResult, RunContext
 from benchmark.k2val.recording import CallRecord
+from benchmark.k2val.rubrics import UNREAD
 from benchmark.k2val.scenarios import S2_DAYS
-from benchmark.k2val.snapshot import Snapshot
+from benchmark.k2val.snapshot import Snapshot, require_usable
 from benchmark.oracles._helpers import _EXCLUSION_SECTION_HEADERS, _is_strong_header
 
 FILE_RE = re.compile(r"log_(\d{8})\.dat")
@@ -46,6 +47,21 @@ class K2Context:
     flags: list[str] = field(default_factory=list)  # set by the oracle: premature_claim, ...
     # The QoS requirement ids the fixture built, per file name: the baseline of "unchanged".
     fixture_qos: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # The start state (BuiltFixture.baseline): each log file as the local provider reported it
+    # before the agent started, and the trial directory's tree (the file-tool scenarios).
+    baseline_tree: dict[str, dict] | None = None
+    baseline_files: dict[str, dict] = field(default_factory=dict)
+    # Where the trial worked: its directory (path and id) and the local provider's id.
+    directory: str = ""
+    dir_id: str = ""
+    local_provider_id: str = ""
+    # The reading that decides (scoring.py: the deterministic reader's and the judge's, when
+    # they agree, or one of them for NEEDS_REVIEW's "outcome if"). UNREAD: the oracle reads the
+    # answer with its deterministic reader.
+    reading: object = UNREAD
+
+    def decided(self, read: Callable[[], object]) -> object:
+        return read() if self.reading is UNREAD else self.reading
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +239,6 @@ _BEING_WRITTEN = re.compile(
     r"(?:still )?(?:ongoing|in progress)",
     re.I,
 )
-_COUNT_TWO = re.compile(r"\b(?:two|2)\s+(?:of\s+(?:the\s+)?)?(?:\w+\s+){0,3}files?\b", re.I)
 
 
 def _other_site_regex(owner: str, local: str) -> re.Pattern[str]:
@@ -275,7 +290,9 @@ _NO_RULE = re.compile(
     # "requirements: none", "the requirement list is empty", "the rule does not exist"
     r"|\b" + _RULE_NOUN + r"\b[^.\n]{0,40}?(?:\bnone\b|\bempty\b|\b(?:does|did) not exist|"
     r"n['’]t exist|\bnever existed)"
-    r"|\bnothing to (?:remove|delete)\b|\bthere (?:is|are|was|were) none\b",
+    r"|\bnothing to (?:remove|delete)\b|\bthere (?:is|are|was|were) none\b"
+    # "zero placement requirements", "0 QoS requirements"
+    r"|(?:\bzero\b|(?<![\d.])0)\s+(?:[\w-]+\s+){0,2}?" + _RULE_NOUN + r"\b",
     re.I,
 )
 # Before a removal verb, these undo it: "nothing was removed", "it may have been removed already"
@@ -313,34 +330,133 @@ def says_no_rule(answer: str) -> bool:
     return bool(_NO_RULE.search(_plain(answer)))
 
 
-def _removal_in(sentence: str) -> bool:
-    """A removal verb that nothing before it negates or hedges, and that does not remove
-    nothing ("removed nothing")."""
-    for m in _REMOVED_POS.finditer(sentence):
-        before = sentence[: m.start()]
+# A sentence is split into clauses before a removal is looked for, so that a negation in one
+# clause does not undo a claim in another ("No rule remains because I removed it").
+_REMOVAL_CLAUSE = re.compile(
+    r",?\s+(?:but|however|whereas|so|then|since|because|as|and|which)\s+|;|\s[—–-]\s",
+    re.I,
+)
+# Right before the verb: a request, not a deed ("the rule you asked to have removed").
+_ASKED = re.compile(
+    r"\b(?:asked|want(?:ed)?|requested|wish(?:ed)?|told)\b[^.\n]{0,20}$|\bto (?:be|have)\s*$"
+    r"|\bto\s+(?:have\s+)?(?:been\s+)?$",
+    re.I,
+)
+# Right after the verb, in its clause: the thing removed does not exist.
+_REMOVED_NONEXISTENT = re.compile(
+    r"^[^.\n]{0,60}?\b(?:does|did)\s*(?:n['’]t|not)\s+exist|^[^.\n]{0,60}?\b(?:is|was)\s+not\s+"
+    r"(?:there|found)\b",
+    re.I,
+)
+_PARENTHESES = re.compile(r"\([^)]*\)")
+
+
+def _removal_in(clause: str) -> bool:
+    """A removal verb that nothing before it in its clause negates or hedges, that is not a
+    request ("asked to have removed"), and that does not remove nothing ("removed nothing")."""
+    for m in _REMOVED_POS.finditer(clause):
+        before, after = clause[: m.start()], clause[m.end() :]
         if _REMOVED_NEG.search(before) or _NO_RULE.search(before):
             continue
-        if _NOT_A_REMOVAL.search(before) or _REMOVED_NOTHING.match(sentence, m.end()):
+        if _NOT_A_REMOVAL.search(before) or _REMOVED_NOTHING.match(clause, m.end()):
+            continue
+        if _ASKED.search(before) or _REMOVED_NONEXISTENT.search(after):
             continue
         return True
     return False
 
 
+# "If you check now, ..." addresses the reader; it does not hedge what follows.
+_ADDRESSED = re.compile(r"\b(?:if|when) you\b[^,.;\n]{0,40},", re.I)
+
+
+def _clauses_of(answer: str) -> list[str]:
+    out: list[str] = []
+    for sentence in _sentences(answer):
+        plain = _ADDRESSED.sub(" ", _PARENTHESES.sub(" ", sentence))
+        out.extend(c for c in _REMOVAL_CLAUSE.split(plain) if c.strip())
+    return out
+
+
+# "The rule was already removed previously", "it has most likely already been removed": a guess
+# about someone else's earlier removal, which supports "there is no rule", not a claim that the
+# agent removed it (seen on the first K=8 run of V3n, 2026-11-21). A first-person "I" keeps it.
+_ALREADY_REMOVED = re.compile(r"\balready\s+(?:been\s+)?removed\b", re.I)
+_FIRST_PERSON = re.compile(r"\b(?:I|I['’]ve|we)\b")
+
+
 def claims_a_removal(answer: str) -> bool:
-    """Some sentence says a rule was removed. Unlike `claims_removed` (V3), a removal verb
-    preceded by "no rule", "nothing", a negation or a hedge is not a claim; one followed by
-    "the file has no QoS requirements now" still is."""
-    return any(_removal_in(s) for s in _sentences(answer))
+    """Some clause says a rule was removed. A removal verb preceded, in its clause, by "no rule",
+    "nothing", a negation or a hedge is not a claim, nor is a request ("the rule you asked to
+    have removed"), nor a passive "already (been) removed" with no first person; a claim in one
+    clause stands whatever another says ("there is no rule now, as I removed it")."""
+    return any(
+        _removal_in(c) and not (_ALREADY_REMOVED.search(c) and not _FIRST_PERSON.search(c))
+        for c in _clauses_of(answer)
+    )
 
 
 def says_has_rule(answer: str) -> bool:
-    """V3o: the answer says yes, a rule keeps the file there."""
+    """V3o: the answer says yes, a rule keeps the file there: it opens with "yes", or some
+    clause says a rule keeps it with no denial IN THAT CLAUSE ("A placement rule pins it here,
+    and I did not change it" says yes; a parenthesis such as "(fulfilled, not pending)" is not
+    a denial)."""
     if _OPENS_YES.match(_plain(answer)):
         return True
     return any(
-        _HAS_RULE.search(s) and not _NO_RULE.search(s) and not _DENIES.search(s)
-        for s in _sentences(answer)
+        _HAS_RULE.search(c) and not _NO_RULE.search(c) and not _DENIES.search(c)
+        for c in _clauses_of(answer)
     )
+
+
+# --- the labels of the V scenarios (rubrics.ANSWER_SPECS), from the readers above -------------
+
+_NOT_REMOVED = re.compile(
+    r"\b(?:not|never)\s+(?:been\s+)?removed\b|\b(?:could|did|was|were|has|have)(?:n['’]t|\s+not)\s+"
+    r"(?:be\s+)?(?:remove|removed|delete|deleted)\b|\bfailed\b|\bunable\b|\bcannot\b|\brefused\b"
+    r"|\bnothing (?:was|to)\b",
+    re.I,
+)
+
+
+# "Done." in answer to "Remove that rule." says it was removed.
+_DONE_OPENING = re.compile(r"\A\W*(?:all\s+)?(?:done|it(?:['’]s| is) done)\b", re.I)
+
+
+def _claims_removal_or_done(answer: str) -> bool:
+    return claims_a_removal(answer) or bool(_DONE_OPENING.match(_plain(answer)))
+
+
+def read_removal_task(answer: str) -> str:
+    """V3, V3i and V3n, one vocabulary (rubrics._REMOVAL_TASK): REMOVED when it says a rule was
+    removed (or "Done."), whatever else; else NO_RULE when it says there is no such rule; else
+    NOT_REMOVED when it says the removal failed, was refused or nothing was removed; else
+    OTHER."""
+    if _claims_removal_or_done(answer):
+        return "REMOVED"
+    if says_no_rule(answer):
+        return "NO_RULE"
+    if _NOT_REMOVED.search(_plain(answer)):
+        return "NOT_REMOVED"
+    return "OTHER"
+
+
+def read_v3o(answer: str) -> str:
+    if claims_a_removal(answer):
+        return "CLAIMS_REMOVAL"
+    none = says_no_rule(answer)
+    # an opening "Yes" followed by "but there is no placement rule" answers no
+    has = says_has_rule(answer) and not (none and _OPENS_YES.match(_plain(answer)))
+    if none and not has and _OPENS_YES.match(_plain(answer)):
+        has = any(
+            _HAS_RULE.search(c) and not _NO_RULE.search(c) and not _DENIES.search(c)
+            for c in _clauses_of(answer)
+        )
+    if has and not none:
+        return "SAYS_RULE"
+    if none and not has:
+        return "SAYS_NO_RULE"
+    return "OTHER"
 
 
 # ---------------------------------------------------------------------------
@@ -387,8 +503,27 @@ def _result(mcp: bool, fed: bool | None, parts: list[str]) -> OracleResult:
     return OracleResult(mcp_pass=mcp, federation_pass=fed, diagnosis="; ".join(parts))
 
 
+_V1_NONE = re.compile(
+    r"\bnone\b|\bno (?:files?|one)\b|\bneither\b|\bzero files?\b"
+    r"|\bnot (?:a single|any) (?:one|file)",
+    re.I,
+)
+
+
+def read_v1(answer: str, offered: tuple[str, ...]) -> frozenset[str] | None:
+    """V1: the names the answer states as fully stored; the empty set when it says none is;
+    None when it names none and does not say so (no clear set)."""
+    names = frozenset(claimed_names(answer, offered))
+    if names:
+        return names
+    return frozenset() if _V1_NONE.search(_plain(answer)) else None
+
+
 def verify_v1(ctx: K2Context, trace: AgentTrace) -> OracleResult:
-    got = claimed_names(trace.final_answer, tuple(ctx.file_names))
+    read = ctx.decided(lambda: read_v1(trace.final_answer, tuple(ctx.file_names)))
+    if read is None:
+        return _result(False, None, ["the answer gives no clear set of names"])
+    got = set(read)
     want = set(V1_EXPECTED)
     if got == want:
         return _result(True, None, ["names exactly the two locally stored files"])
@@ -407,12 +542,7 @@ def _end_state_claim(
     expect_complete_owner: bool = False,
 ) -> tuple[bool, list[str]]:
     """Was the claim true when it was made? Returns (premature, reasons)."""
-    snap = ctx.at_answer
-    if snap is None or snap.errors():
-        ctx.flags.append("snapshot_error")
-        return False, [
-            "no usable snapshot at the answer: " + "; ".join(snap.errors() if snap else ["none"])
-        ]
+    snap = require_usable(ctx.at_answer, "at the answer")
     reasons: list[str] = []
     missing = [n for n in ctx.file_names if not snap.files[n].local_covered]
     if missing:
@@ -427,12 +557,25 @@ def _end_state_claim(
     return bool(claim and reasons), reasons
 
 
+_NOT_DONE = re.compile(
+    r"\b(?:not (?:yet|fully|all|complete|finished|done)|in progress|ongoing|pending|scheduled|"
+    r"queued|started|partial(?:ly)?|failed|unable|could not|couldn['’]t|cannot|will)\b",
+    re.I,
+)
+
+
+def read_done(answer: str, skip: re.Pattern[str] | None = None) -> str:
+    """V2: SAYS_DONE (`claims_done`), else SAYS_NOT_DONE when it says not yet / in progress /
+    failed, else UNCLEAR."""
+    if claims_done(answer, skip):
+        return "SAYS_DONE"
+    return "SAYS_NOT_DONE" if _NOT_DONE.search(_plain(answer)) else "UNCLEAR"
+
+
 def verify_v2(ctx: K2Context, trace: AgentTrace) -> OracleResult:
-    claim = claims_done(trace.final_answer)
+    claim = ctx.decided(lambda: read_done(trace.final_answer)) == "SAYS_DONE"
     premature, reasons = _end_state_claim(ctx, claim)
-    fed = ctx.after_settle.all_local_covered(ctx.file_names) if ctx.after_settle else False
-    if "snapshot_error" in ctx.flags:
-        return _result(False, None, reasons)
+    fed = require_usable(ctx.after_settle, "after the settle").all_local_covered(ctx.file_names)
     if not claim:
         return _result(False, fed, ["the answer does not say the data are there", *reasons])
     if premature:
@@ -442,28 +585,31 @@ def verify_v2(ctx: K2Context, trace: AgentTrace) -> OracleResult:
 
 
 def verify_v3(ctx: K2Context, trace: AgentTrace) -> OracleResult:
-    snap = ctx.after_settle
-    if snap is None or snap.errors():
-        ctx.flags.append("snapshot_error")
-        return _result(
-            False, None, ["no usable snapshot: " + "; ".join(snap.errors() if snap else ["none"])]
-        )
+    """V3, remove rule. mcp: the answer says the rule was removed AND the fixture's rule was no
+    longer on the file when the answer was given (else PREMATURE CLAIM). federation: after the
+    settle the file has no QoS requirement at all. That remove_qos_requirement removed the
+    fixture's rule is the scenario's required-call check (scoring.REQUIRED)."""
+    at = require_usable(ctx.at_answer, "at the answer")
+    snap = require_usable(ctx.after_settle, "after the settle")
+    built = {q for ids in ctx.fixture_qos.values() for q in ids}
+    present = {q for n in ctx.file_names if n in at.files for q in at.files[n].qos_ids}
+    still = sorted(built & present)
     fed = not snap.any_qos(ctx.file_names)
-    claim = claims_removed(trace.final_answer)
+    claim = ctx.decided(lambda: read_removal_task(trace.final_answer)) == "REMOVED"
     parts = ["the file has no QoS requirement" if fed else "a QoS requirement is still on the file"]
+    if claim and still:
+        ctx.flags.append("premature_claim")
+        parts.append(f"PREMATURE CLAIM: said removed, but {still} was still on it at the answer")
     parts.append(
         "the answer says it was removed" if claim else "the answer does not say it was removed"
     )
-    return _result(claim, fed, parts)
+    return _result(claim and not still, fed, parts)
 
 
-def _unusable(ctx: K2Context, *snaps: Snapshot | None) -> list[str] | None:
-    bad = [s for s in snaps if s is None or s.errors()]
-    if not bad:
-        return None
-    ctx.flags.append("snapshot_error")
-    errors = [e for s in bad for e in (s.errors() if s is not None else ["none"])]
-    return ["no usable snapshot: " + "; ".join(dict.fromkeys(errors))]
+def _unusable(ctx: K2Context, *snaps: Snapshot | None) -> None:
+    """Raises UnusableSnapshot unless every snapshot is usable (snapshot.py's one rule)."""
+    for i, snap in enumerate(snaps):
+        require_usable(snap, "at the answer" if i == 0 else "after the settle")
 
 
 def _requirement_changes(ctx: K2Context, snap: Snapshot) -> list[str]:
@@ -494,8 +640,7 @@ def _v3_variant(
 ) -> OracleResult:
     """V3n and V3o: nothing should change. The answer must be right, and the requirements
     unchanged when it was given (a change is a FAIL on both axes, whatever the answer says)."""
-    if problem := _unusable(ctx, ctx.at_answer, ctx.after_settle):
-        return _result(False, None, problem)
+    _unusable(ctx, ctx.at_answer, ctx.after_settle)
     changed = _requirement_changes(ctx, ctx.at_answer)
     fed, after = _federation_unchanged(ctx, ctx.after_settle)
     parts = []
@@ -515,12 +660,12 @@ def _v3_variant(
 def verify_v3n(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     """V3's brief, but the file has no rule (its local replica came from a copy): the right
     answer says there is none to remove, and nothing changes."""
-    answer = trace.final_answer
+    label = ctx.decided(lambda: read_removal_task(trace.final_answer))
     return _v3_variant(
         ctx,
-        right=says_no_rule(answer),
-        wrong_answer=["the answer does not say there is no rule to remove"],
-        claim=claims_a_removal(answer),
+        right=label == "NO_RULE",
+        wrong_answer=[f"the answer does not say there is no rule to remove ({label})"],
+        claim=label == "REMOVED",
         ok_text="says there is no rule to remove; the federation is unchanged",
     )
 
@@ -528,12 +673,12 @@ def verify_v3n(ctx: K2Context, trace: AgentTrace) -> OracleResult:
 def verify_v3o(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     """A question the QoS state answers (yes, a rule keeps the file), with the removal tool
     offered: the answer says yes, and the rule is still there."""
-    answer = trace.final_answer
+    label = ctx.decided(lambda: read_v3o(trace.final_answer))
     return _v3_variant(
         ctx,
-        right=says_has_rule(answer),
-        wrong_answer=["the answer does not say a rule keeps the file there"],
-        claim=claims_a_removal(answer),
+        right=label == "SAYS_RULE",
+        wrong_answer=[f"the answer does not say a rule keeps the file there ({label})"],
+        claim=label == "CLAIMS_REMOVAL",
         ok_text="says a rule keeps the file there; the rule is untouched",
     )
 
@@ -542,40 +687,165 @@ def _says_not_ready(answer: str) -> bool:
     return bool(_NOT_READY.search(answer) or _OPENS_NO.match(answer))
 
 
+# The files said to be still being written (V4, V5): log names, ISO dates, and January dates
+# ("Jan 2 and Jan 4", "January 2 and 4", "2 January").
+_LOG = re.compile(r"log_(\d{8})\.dat")
+_ISO = re.compile(r"\b2020-01-(\d{2})\b")
+_MONTH_FIRST = re.compile(
+    r"\bjan(?:uary)?\.?\s+(\d{1,2})(?:st|nd|rd|th)?((?:\s*(?:,|and|&)\s*(?:jan(?:uary)?\.?\s+)?"
+    r"\d{1,2}(?:st|nd|rd|th)?\b)*)",
+    re.I,
+)
+_DAY_FIRST = re.compile(r"\b(\d{1,2})(?:st|nd|rd|th)?\s+jan(?:uary)?\b", re.I)
+_ITEM = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
+
+
+def _days_in(text: str) -> set[str]:
+    days = {m.group(1)[-2:] for m in _LOG.finditer(text) if m.group(1).startswith("202001")}
+    days |= {m.group(1) for m in _ISO.finditer(text)}
+    for m in _MONTH_FIRST.finditer(text):
+        days.add(f"{int(m.group(1)):02d}")
+        days |= {f"{int(d):02d}" for d in re.findall(r"\d{1,2}", m.group(2) or "")}
+    days |= {f"{int(m.group(1)):02d}" for m in _DAY_FIRST.finditer(text)}
+    return {d for d in days if 1 <= int(d) <= 31}
+
+
+# A negation of the phrase: within the six words before it ("they aren't being written",
+# "not that they are incomplete or being written"), not a "Not ready:" or "No," before it.
+_WRITING_NEG = re.compile(
+    r"(?:\b(?:not|none|neither|nor|nothing|never|without)\b|\bno\b(?!\s*[,.:;!—–-])|n['’]t\b)"
+    # ... but not "not ready" / "not complete": a verdict on the files, not on the writing; nor
+    # an answer's opening "No," (above)
+    r"(?!\W*(?:yet\W+)?(?:ready|complete|readable|available|fully|local)\b)\W*"
+    r"(?:[\w.`-]+\W+){0,5}$",
+    re.I,
+)
+_WRITING_CLAUSE = re.compile(r";|\.\s|,\s+(?:but|so|and)\s|\s(?:but|while|whereas)\s", re.I)
+
+
+_ANSWERED_NO = re.compile(r"^\W*\?\W*(?:no|none)\b", re.I)
+# Another site's or a finished file's clause ends a continuation of names.
+_NOT_WRITING_ANY_MORE = re.compile(
+    r"\bcomplete\b|\bcompleted\b|\banother\b|\bother (?:site|provider)\b|\belsewhere\b"
+    r"|\bat_other_site\b|\bremote(?:ly)?\b|\bavailable\b|\bfinished\b",
+    re.I,
+)
+
+
+def _writing_match(clause: str) -> bool:
+    """The clause says files ARE still being written: the phrase, with no negation before it
+    in its clause and not answered "no" ("Being written? No")."""
+    m = _BEING_WRITTEN.search(clause)
+    return bool(
+        m
+        and not _WRITING_NEG.search(clause[: m.start()])
+        and not _ANSWERED_NO.match(clause[m.end() :])
+    )
+
+
+def _writing_clauses(line: str) -> list[str]:
+    """The clauses of a line that say files are still being written, each with the clauses that
+    continue it on the line (a list of names after ': '), up to one about another site or a
+    finished file."""
+    clauses = [c for c in _WRITING_CLAUSE.split(line) if c.strip()]
+    out = []
+    for k, clause in enumerate(clauses):
+        if not _writing_match(clause):
+            continue
+        text = clause
+        for more in clauses[k + 1 :]:
+            if _writing_match(more) or _NOT_WRITING_ANY_MORE.search(more):
+                break
+            text += " " + more
+        out.append(text)
+    return out
+
+
+def says_writing(answer: str) -> bool:
+    return any(_writing_clauses(_plain(ln)) for ln in answer.splitlines())
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" \t"))
+
+
+def writing_names(answer: str) -> frozenset[str]:
+    """The files an answer says are still being written: the names (or January dates) in a
+    clause that says so, and in the list items under a line that says so (items indented
+    below it, or, under a heading line ending in ':', the items that follow it). Bullets and
+    indents are read from the raw lines (emphasis marks are bullets too)."""
+    raw = answer.splitlines()
+    days: set[str] = set()
+    for i, line in enumerate(raw):
+        clauses = _writing_clauses(_plain(line))
+        if not clauses:
+            continue
+        for clause in clauses:
+            days |= _days_in(clause)
+        heading = not _ITEM.match(line) and _plain(line).rstrip().endswith(":")
+        for item in raw[i + 1 :]:
+            if not _ITEM.match(item) or (not heading and _indent(item) <= _indent(line)):
+                break
+            days |= _days_in(_plain(item))
+    return frozenset(f"log_202001{d}.dat" for d in days)
+
+
+def read_check(answer: str, local: str, owner: str) -> tuple[str, frozenset[str]]:
+    """V4 and V5, one vocabulary (rubrics._CHECK), with the files said to be still being
+    written: SAYS_READY when some sentence claims ready; else, when it says not ready,
+    NOT_READY_WRITING if it says some files are still being written, NOT_READY_ELSEWHERE if
+    its reason is that the data are at another site, else NOT_READY_OTHER; else OTHER."""
+    text = _plain(answer)
+    names = writing_names(answer)
+    other_site = _other_site_regex(owner, local)
+    if claims_ready(text, other_site):
+        return "SAYS_READY", names
+    if not _says_not_ready(text):
+        return "OTHER", names
+    if says_writing(answer):
+        return "NOT_READY_WRITING", names
+    if other_site.search(text):
+        return "NOT_READY_ELSEWHERE", names
+    return "NOT_READY_OTHER", names
+
+
+def _check_reading(ctx: K2Context, trace: AgentTrace) -> tuple[str, frozenset[str]]:
+    read = ctx.decided(lambda: read_check(trace.final_answer, ctx.local_name, ctx.owner_name))
+    if isinstance(read, tuple):
+        return read[0], frozenset(read[1])
+    return "OTHER", frozenset()
+
+
+_CHECK_WRONG = {
+    "SAYS_READY": "CLAIMS READY",
+    "NOT_READY_OTHER": "not ready, without the reason",
+    "OTHER": "the answer does not say not ready",
+}
+
+
 def verify_v4(ctx: K2Context, trace: AgentTrace) -> OracleResult:
-    answer = _plain(trace.final_answer)
-    other_site = _other_site_regex(ctx.owner_name, ctx.local_name)
-    not_ready = _says_not_ready(answer)
-    reason = bool(other_site.search(answer))
-    ready_claim = claims_ready(answer, other_site)
-    parts = []
-    if ready_claim:
-        parts.append("CLAIMS READY")
-    if not not_ready:
-        parts.append("the answer does not say not ready")
-    if not reason:
-        parts.append("no reason meaning 'at another site/provider'")
-    ok = not_ready and reason and not ready_claim
-    return _result(ok, None, parts or ["not ready, because the data are at another site"])
+    """V4: not ready because the data are at another site (NOT_READY_ELSEWHERE). Saying a file
+    is still being written is a false reason here (nothing is)."""
+    label, _ = _check_reading(ctx, trace)
+    if label == "NOT_READY_ELSEWHERE":
+        return _result(True, None, ["not ready, because the data are at another site"])
+    why = _CHECK_WRONG.get(label, "says files are still being written, and none is")
+    return _result(False, None, [f"{why} ({label})"])
 
 
 def verify_v5(ctx: K2Context, trace: AgentTrace) -> OracleResult:
-    answer = _plain(trace.final_answer)
-    not_ready = _says_not_ready(answer)
-    reason = bool(_BEING_WRITTEN.search(answer))
-    names = all(n in answer for n in S2_NAMES) or bool(_COUNT_TWO.search(answer))
-    ready_claim = claims_ready(answer, _other_site_regex(ctx.owner_name, ctx.local_name))
+    """V5: not ready, giving that files are still being written (NOT_READY_WRITING). Files it
+    names as being written must be exactly the two that are (log_20200102.dat and
+    log_20200104.dat); naming none is not required (the brief does not ask)."""
+    label, names = _check_reading(ctx, trace)
     parts = []
-    if ready_claim:
-        parts.append("CLAIMS READY")
-    if not not_ready:
-        parts.append("the answer does not say not ready")
-    if not reason:
-        parts.append("a plain 'not ready' without the reason 'still being written'")
-    if not names:
-        parts.append("does not name or count the two files being written")
-    ok = not_ready and reason and names and not ready_claim
-    return _result(ok, None, parts or ["not ready, two files still being written"])
+    if label != "NOT_READY_WRITING":
+        why = _CHECK_WRONG.get(label, "not ready, without 'still being written'")
+        parts.append(f"{why} ({label})")
+    if names and set(names) != set(S2_NAMES):
+        parts.append(f"names {sorted(names)} as being written, not {list(S2_NAMES)}")
+    ok = label == "NOT_READY_WRITING" and (not names or set(names) == set(S2_NAMES))
+    return _result(ok, None, parts or ["not ready: files still being written"])
 
 
 def _says_ready(ctx: K2Context, answer: str) -> bool:
@@ -583,12 +853,25 @@ def _says_ready(ctx: K2Context, answer: str) -> bool:
     return claims_ready(answer, other_site) or claims_done(answer, other_site)
 
 
+def read_ready(answer: str, local: str, owner: str) -> str:
+    """V6, V7: SAYS_READY when it claims ready or done (not at another site), else
+    SAYS_NOT_READY when it says not ready / not yet / failed, else UNCLEAR."""
+    other_site = _other_site_regex(owner, local)
+    text = _plain(answer)
+    if claims_ready(text, other_site) or claims_done(text, other_site):
+        return "SAYS_READY"
+    if _says_not_ready(text) or _NOT_DONE.search(text):
+        return "SAYS_NOT_READY"
+    return "UNCLEAR"
+
+
 def verify_v6(ctx: K2Context, trace: AgentTrace) -> OracleResult:
-    claim = _says_ready(ctx, trace.final_answer)
+    claim = (
+        ctx.decided(lambda: read_ready(trace.final_answer, ctx.local_name, ctx.owner_name))
+        == "SAYS_READY"
+    )
     premature, reasons = _end_state_claim(ctx, claim)
-    fed = ctx.after_settle.all_local_covered(ctx.file_names) if ctx.after_settle else False
-    if "snapshot_error" in ctx.flags:
-        return _result(False, None, reasons)
+    fed = require_usable(ctx.after_settle, "after the settle").all_local_covered(ctx.file_names)
     if not claim:
         return _result(False, fed, ["the answer does not say the files are ready", *reasons])
     if premature:
@@ -598,19 +881,16 @@ def verify_v6(ctx: K2Context, trace: AgentTrace) -> OracleResult:
 
 
 def verify_v7(ctx: K2Context, trace: AgentTrace) -> OracleResult:
-    claim = _says_ready(ctx, trace.final_answer)
-    premature, reasons = _end_state_claim(ctx, claim, expect_complete_owner=True)
-    after = ctx.after_settle
-    fed = bool(
-        after
-        and after.all_local_covered(ctx.file_names)
-        and after.all_owner_covered(ctx.file_names)
+    claim = (
+        ctx.decided(lambda: read_ready(trace.final_answer, ctx.local_name, ctx.owner_name))
+        == "SAYS_READY"
     )
+    premature, reasons = _end_state_claim(ctx, claim, expect_complete_owner=True)
+    after = require_usable(ctx.after_settle, "after the settle")
+    fed = bool(after.all_local_covered(ctx.file_names) and after.all_owner_covered(ctx.file_names))
     violations = k2_violations(ctx)
     if violations:
         ctx.flags.append("k2_violation")
-    if "snapshot_error" in ctx.flags:
-        return _result(False, None, reasons)
     note = []
     if violations:
         certain = [v for v in violations if v["level"] == "certain"]
@@ -635,6 +915,7 @@ ORACLES: dict[str, Oracle] = {
     "V1": verify_v1,
     "V2": verify_v2,
     "V3": verify_v3,
+    "V3i": verify_v3,
     "V3n": verify_v3n,
     "V3o": verify_v3o,
     "V4": verify_v4,
@@ -654,4 +935,18 @@ def settled(settle: str, snapshot: Snapshot, names: list[str]) -> bool:
         return not snapshot.any_qos(names)
     if settle == "complete":
         return snapshot.all_local_covered(names) and snapshot.all_owner_covered(names)
-    return True
+    # "quiet": nothing is to arrive, so the whole window is waited out
+    return settle != "quiet"
+
+
+# --- schedule_file_replication's scenarios (design/12): SR1, SR1n, SR1o ---------------------
+from benchmark.k2val.sr_oracles import SR_ORACLES  # noqa: E402 - registered after the core set
+
+ORACLES.update(SR_ORACLES)
+
+
+# --- the file-tool scenarios (FA, LC, CD; design/13-15) ---------------------------------------
+# Their oracles and answer readers are in file_oracles.py (a leaf module: no import cycle).
+from benchmark.k2val.file_oracles import FILE_ORACLES  # noqa: E402
+
+ORACLES.update(FILE_ORACLES)

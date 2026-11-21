@@ -76,13 +76,18 @@ def register_module(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         """Schedule a replication transfer of a file to a target provider.
 
-        Copies the file's data to `target_provider_id` and returns the
-        scheduled transfer's id; poll it with `get_transfer`, or watch the
-        space transfer log with `list_space_transfers`. Replication only —
-        does not evict or migrate.
+        Copies the file's data to `target_provider_id`. Returns
+        `{"transferId": "<id>"}` as soon as the transfer is scheduled.
+        Scheduled does not mean copied: no data has moved yet, and the data
+        arrive later. A transfer's status can read completed before the
+        copied blocks show at the target, so re-check the target provider's
+        blocks of the file until they cover all of it, and judge the copy by
+        those blocks, not by the transfer's status.
 
-        The target provider must support the file's space; if it does not, the
-        call fails with a structured error explaining why the placement cannot
-        be scheduled.
+        Replication only — does not evict or migrate. The copy is one-off:
+        nothing keeps the data at the target afterwards.
+
+        The target must be a provider that supports the file's space, given by
+        its provider id, not its name; otherwise the call fails.
         """
         return await schedule_file_replication(file_id_or_path, target_provider_id)

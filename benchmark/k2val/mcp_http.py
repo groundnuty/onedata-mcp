@@ -95,9 +95,37 @@ def serve(argv: list[str]) -> int:
     from onedata_mcp.main import main as server_main
     from onedata_mcp.main import mcp
 
+    # The surface the model will see must be the scenario's set exactly: a server that would
+    # expose another tool (or miss one) refuses to start, and the trial is a harness error.
+    wanted = {t for t in a.tools.split(",") if t}
+    if problem := served_surface_problem(asyncio.run(mcp.list_tools()), wanted):
+        print(f"mcp_http: {problem}", file=sys.stderr)
+        return 3
     mcp.add_middleware(make_recording_middleware(Path(a.record)))
     server_main()
     return 0
+
+
+def served_surface_problem(listing: list, wanted: set[str]) -> str | None:
+    """Why the listing a server would serve is not the scenario's: other names, or, for a set
+    with a recorded hash, other descriptions or schemas (the runner checks the in-process
+    listing before dispatch; this checks the one the Claude and CLI legs are served)."""
+    if problem := surface_mismatch(wanted, {t.name for t in listing}):
+        return problem
+    from benchmark.k2val.surfaces import RECORDED_SURFACES, surface_problem
+
+    if frozenset(wanted) in RECORDED_SURFACES:
+        return surface_problem(listing, frozenset(wanted), RECORDED_SURFACES)[1]
+    return None
+
+
+def surface_mismatch(wanted: set[str], exposed: set[str]) -> str | None:
+    problems = []
+    if missing := sorted(wanted - exposed):
+        problems.append(f"the server does not expose {missing}")
+    if extra := sorted(exposed - wanted):
+        problems.append(f"the server would also expose {extra}")
+    return "; ".join(problems) or None
 
 
 class McpHttpError(RuntimeError):

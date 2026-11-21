@@ -16,7 +16,7 @@ from benchmark.k2val.artefact import read_trials
 from benchmark.k2val.config import PriceTiers
 from benchmark.k2val.fixtures import FILE_SIZE
 from benchmark.k2val.report import build_report
-from benchmark.k2val.runner import RunDeps, make_trial_id, run_sweep, run_trial
+from benchmark.k2val.runner import RunDeps, make_trial_id, run_sweep, run_trial, trial_dir_name
 from benchmark.k2val.scenarios import SCENARIOS
 from benchmark.k2val.secrets import say
 from benchmark.k2val.spend import SpendTracker
@@ -59,16 +59,44 @@ class FakeToolApp:
         self.handlers = handlers or {}
 
     async def list_tools(self):
-        return []
+        """Every tool a scenario may offer (the runner checks the scenario's set is there)."""
+        from benchmark.k2val.config import K2_TOOLS
+        from benchmark.k2val.file_scenarios import FILE_TOOLS
+
+        return [SimpleNamespace(name=n) for n in sorted({*K2_TOOLS, *FILE_TOOLS})]
 
     async def call_tool(self, name, arguments):
         out = self.handlers[name](arguments)
         return SimpleNamespace(structured_content=out, content=[])
 
 
+class AgreeingJudge:
+    """A fake judge (never the real one in unit tests): it reads the answer as the scenario's
+    deterministic reader does, from what a judge sees (the brief, the site, the answer)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    async def __call__(self, scenario_id, *, brief, local, answer):
+        from benchmark.k2val.judge import JudgeVerdict
+        from benchmark.k2val.reading import read_answer
+
+        self.calls.append((scenario_id, answer))
+        value = read_answer(scenario_id, answer, {"brief": brief}, local=local)
+        return JudgeVerdict(
+            scenario_id=scenario_id,
+            value=value,
+            evidence=answer[:40],
+            model="fake",
+            evidence_quoted=True,
+        )
+
+
 def make_deps(
     cfg, api, clock, tmp_path, script_for, *, app=None, spend=None, settle_poll_s=15.0, **kw
 ) -> RunDeps:
+    kw.setdefault("judge", AgreeingJudge())
+    kw.setdefault("surfaces", None)  # the fake app has no schemas; test_surfaces covers the check
     adapters: dict[str, ScriptedAdapter] = {}
 
     def factory(conf, on_cost):
@@ -144,7 +172,12 @@ async def test_a_full_trial_v2_passes_end_to_end(cfg, api, fed, clock, tmp_path,
     assert art.outcome == "PASS", art.oracle_diagnosis
     assert (art.oracle_mcp_pass, art.oracle_federation_pass) == (True, True)
     assert art.space == "k2val-glm"
-    assert art.directory == f"/k2val-glm/logs-{make_trial_id(RUN_ID, 'glm', 'V2', 0)}"
+    assert art.directory == f"/k2val-glm/{trial_dir_name(make_trial_id(RUN_ID, 'glm', 'V2', 0))}"
+    assert re.fullmatch(r"/k2val-glm/logs-[a-p]{12}", art.directory)  # opaque: no scenario id
+    # the start state, as the local provider reported it before the agent began
+    assert art.fixture_baseline["files"]["log_20200105.dat"]["local_bytes"] == 0
+    assert art.fixture_baseline["files"]["log_20200105.dat"]["qos_ids"] == []
+    assert art.fixture_baseline["tree"] is None
     # the brief names the directory and the file, never a tool
     brief = deps.adapters["glm"].briefs[0]
     assert art.directory in brief and "log_20200105.dat" in brief
@@ -284,7 +317,7 @@ async def test_v3n_a_made_up_id_gets_the_tools_hint_and_changes_nothing(
 
     (call,) = seen
     assert call.ok is False
-    assert "get_file_qos_summary" in (call.error or "")
+    assert "keys of `requirements` in its QoS summary" in (call.error or "")  # names no tool
     assert art.outcome == "PASS", art.oracle_diagnosis
 
 
@@ -377,7 +410,8 @@ async def test_v7_ready_claimed_before_the_writer_finished_is_a_k2_violation(
 
     def script_for(conf, on_cost):
         async def script(a, brief):
-            await a.call_tool("ensure_readiness", {"extent": [], "deadline_s": 60})
+            extent = [{"dataset": re.search(r"`([^`]+)`", brief)[1]}]
+            await a.call_tool("ensure_readiness", {"extent": extent, "deadline_s": 60})
             return "All five files are ready."
 
         return script
@@ -411,7 +445,8 @@ async def test_v7_waiting_for_the_writer_then_claiming_ready_passes(
             # (the real tool places the QoS rules; the fake world does it here)
             for node in files:
                 node.blocks[LOCAL_ID] = [list(b) for b in node.blocks.get("pOwner", [])]
-            await a.call_tool("ensure_readiness", {"extent": [], "deadline_s": 600})
+            extent = [{"dataset": re.search(r"`([^`]+)`", brief)[1]}]
+            await a.call_tool("ensure_readiness", {"extent": extent, "deadline_s": 600})
             return "All five files are ready at vistula-dc."
 
         return script
@@ -520,12 +555,12 @@ async def test_an_unusable_space_is_reset_fail_not_a_model_failure(
 async def test_an_oracle_crash_is_recorded_and_the_sweep_goes_on(
     cfg, api, fed, clock, tmp_path, monkeypatch
 ) -> None:
-    from benchmark.k2val import runner
+    from benchmark.k2val import oracles
 
     def boom(ctx, trace):
         raise RuntimeError("oracle bug")
 
-    monkeypatch.setitem(runner.ORACLES, "V4", boom)
+    monkeypatch.setitem(oracles.ORACLES, "V4", boom)
     art = await run_trial(
         make_deps(cfg, api, clock, tmp_path, static("x")), cfg.models["glm"], SCENARIOS["V4"], 0
     )
@@ -597,9 +632,12 @@ async def test_other_models_do_not_use_the_anthropic_budget(cfg, api, fed, clock
 
 
 @pytest.mark.asyncio
-async def test_at_most_two_trials_at_once_per_model_and_models_run_in_parallel(
-    cfg, api, fed, clock, tmp_path
+@pytest.mark.parametrize("asked", [1, 4], ids=["config", "limits-raised-in-code"])
+async def test_one_trial_at_a_time_per_config_and_configs_run_in_parallel(
+    cfg, api, fed, clock, tmp_path, asked
 ) -> None:
+    """Isolation by construction (design/08): a config's trials never overlap, even when the
+    limits are raised past the config's guard in code."""
     live: dict[str, int] = {}
     peak: dict[str, int] = {}
     total_peak = 0
@@ -616,14 +654,15 @@ async def test_at_most_two_trials_at_once_per_model_and_models_run_in_parallel(
 
         return script
 
+    cfg = replace(cfg, limits=replace(cfg.limits, concurrency_per_model=asked))
     deps = make_deps(cfg, api, clock, tmp_path, script_for)
     models = [cfg.models["glm"], cfg.models["qwen36"]]
 
     arts = await run_sweep(deps, models, [SCENARIOS["V2"]], 4)
 
     assert len(arts) == 8 and all(a.outcome in ("PASS", "FAIL") for a in arts)
-    assert peak == {"glm": 2, "qwen36": 2}  # never more than 2 of one model, and 2 is used
-    assert total_peak > 2  # the two models overlapped
+    assert peak == {"glm": 1, "qwen36": 1}  # never two trials of one config at once
+    assert total_peak == 2  # the two configs overlapped
     # two trials of one model share a space but not a directory
     assert len({a.directory for a in arts}) == 8
 
@@ -677,6 +716,19 @@ async def test_secrets_never_reach_a_written_file_or_stdout(
     out = capsys.readouterr()
     for secret in secrets:
         assert secret not in out.out and secret not in out.err
+
+
+def test_the_trial_directory_does_not_name_the_scenario_or_the_model() -> None:
+    """`logs-v3n-glm-...` told a model it was in a variant of V3."""
+    names = {
+        trial_dir_name(make_trial_id(RUN_ID, model, sid, ix))
+        for model in ("glm", "haiku-low")
+        for sid in ("V3", "V3n", "V3o", "CD", "CDn")
+        for ix in range(8)
+    }
+    assert len(names) == 80  # one per trial
+    for name in names:
+        assert re.fullmatch(r"logs-[a-p]{12}", name), name
 
 
 def test_a_trial_id_has_no_eight_digit_run() -> None:
@@ -879,3 +931,40 @@ async def test_an_anthropic_trial_through_the_real_tool_surface_and_the_spend_le
     assert len((tmp_path / "run" / "spend.jsonl").read_text().splitlines()) == 3
     assert art.serving_fingerprint == "claude-haiku-5-5"
     assert art.usage_in_tokens == 3000 and art.usage_out_tokens == 600
+
+
+# --- the surface the model is offered ------------------------------------------------------
+
+
+def test_the_offered_surface_must_be_the_scenarios_exactly() -> None:
+    from benchmark.k2val.config import K1_TOOLS
+    from benchmark.k2val.runner import _surface_problem
+
+    fa = SCENARIOS["FA"]
+    k1 = frozenset(K1_TOOLS)
+    assert _surface_problem(fa, k1, sorted(k1)) is None
+    with_listing = k1 | {"list_children"}  # a [tools] k1 override that would answer FA
+    assert "FA must not be offered ['list_children']" in _surface_problem(
+        fa, with_listing, sorted(with_listing)
+    )
+    assert "does not offer ['get_file_attributes']" in _surface_problem(
+        fa, k1, sorted(k1 - {"get_file_attributes"})
+    )
+    assert "would also see ['delete_file']" in _surface_problem(
+        fa, k1, sorted(k1 | {"delete_file"})
+    )
+
+
+class _NoTools(FakeToolApp):
+    async def list_tools(self):
+        return []
+
+
+@pytest.mark.asyncio
+async def test_a_trial_without_its_tools_is_a_harness_error_not_a_fail(
+    cfg, api, fed, clock, tmp_path
+) -> None:
+    deps = make_deps(cfg, api, clock, tmp_path, static("No."), app=_NoTools())
+    art = await run_trial(deps, cfg.models["glm"], SCENARIOS["V4"], 0)
+    assert art.outcome == "HARNESS_ERROR" and "does not offer" in art.error
+    assert deps.adapters == {}  # no model was called

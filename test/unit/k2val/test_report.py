@@ -102,9 +102,19 @@ def test_a_control_that_does_not_pass_marks_the_scenario_design_suspect(cfg, tmp
 
 
 def test_a_clean_control_is_said_so(cfg, tmp_path) -> None:
-    text = build(cfg, tmp_path, [art("sonnet-medium", "V1", 0, "PASS")])
-    assert "The control passed every scenario it ran." in text
+    arts = [art("sonnet-medium", "V1", 0, "PASS"), art("sonnet-medium", "V1", 1, "PASS")]
+    text = build(cfg, tmp_path, arts)  # K = 2
+    assert "The control passed every scenario it ran" in text
     assert "DESIGN SUSPECT: V" not in text
+
+
+def test_control_coverage_counts_distinct_passing_trials_against_k(cfg, tmp_path) -> None:
+    """A trial that never ran, or one index passing twice, leaves the control short of K
+    (review: Codex earlier #13)."""
+    arts = [art("sonnet-medium", "V1", 0, "PASS"), art("sonnet-medium", "V1", 0, "PASS")]
+    text = build(cfg, tmp_path, arts)  # K = 2, trial 1 missing
+    assert "CONTROL COVERAGE INCOMPLETE: V1 (1/2)" in text
+    assert "V1 attributes **DESIGN SUSPECT**" in text
 
 
 def test_the_pass_k_table_is_raw_and_marks_other_outcomes(cfg, tmp_path) -> None:
@@ -210,3 +220,34 @@ def test_recorded_changes_appear_with_before_and_after(cfg, tmp_path) -> None:
 def test_the_scenario_range_syntax() -> None:
     assert parse_scenarios("V1..V7") == [f"V{i}" for i in range(1, 8)]
     assert parse_scenarios("V5,V2") == ["V5", "V2"]
+
+
+def test_needs_review_is_its_own_count_and_section_never_a_pass_or_a_fail(cfg, tmp_path) -> None:
+    reading = {
+        "deterministic": "NOT_READY_ELSEWHERE",
+        "judge": "SAYS_READY",
+        "judge_error": None,
+        "judge_verdict": {
+            "evidence": "they are ready",
+            "model": "claude-sonnet-5-5",
+            "effort": "medium",
+            "rubric_sha": "abc",
+            "evidence_quoted": True,
+        },
+        "outcome_if": {"deterministic": "PASS", "judge": "FAIL"},
+    }
+    text = build(
+        cfg,
+        tmp_path,
+        [
+            art("glm", "V4", 0, "PASS"),
+            art("glm", "V4", 1, "NEEDS_REVIEW", answer_reading=reading, final_answer="Not ready."),
+        ],
+    )
+    assert "| V4 check, remote | 1/1 **+1 NEEDS_REVIEW** |" in text
+    section = text.split("## NEEDS_REVIEW")[1].split("\n## ")[0]
+    assert "V4 / glm / trial 1: NEEDS_REVIEW" in section
+    assert "`NOT_READY_ELSEWHERE`" in section and "`SAYS_READY`" in section
+    assert "they are ready" in section and "'deterministic': 'PASS'" in section
+    every_non_pass = text.split("## Every non-pass")[1].split("\n## ")[0]
+    assert "NEEDS_REVIEW" not in every_non_pass  # listed once, in its own section

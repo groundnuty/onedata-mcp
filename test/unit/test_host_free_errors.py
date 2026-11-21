@@ -17,6 +17,7 @@ import ssl
 import time
 import traceback
 from collections.abc import Callable
+from urllib.parse import quote
 
 import httpx
 import pytest
@@ -36,12 +37,15 @@ from onedata_mcp.config import (
 )
 from onedata_mcp.modules import spaces as spaces_module
 from onedata_mcp.utils import (
+    MAX_ERROR_CHARS,
     OnedataApiError,
     OnedataInvalidSpaceError,
+    http_failure_message,
     redact_endpoints,
     redact_json_text,
     replace_node_names,
     request,
+    shorten_path,
     transport_error_kind,
 )
 
@@ -389,10 +393,12 @@ async def test_with_a_node_list_a_url_and_a_pair_are_masked(
 
 
 @pytest.mark.asyncio
-async def test_without_a_node_list_a_url_a_pair_and_a_node_name_reach_the_caller_unchanged(
+async def test_without_a_node_list_a_url_is_masked_and_a_pair_a_host_name_and_an_ip_pass(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
-    """No list: byte for byte what Onedata wrote, where a list would replace or mask each part."""
+    """No list: a URL is masked and a configured host is replaced. A `host=` or `port=` pair, an
+    unlisted host name in free text and an IP address reach the caller as written: none of them
+    is structurally a host this server knows (design/11, "What is not masked")."""
     _set_env(monkeypatch)
     text = (
         f"Contacted https://{NODE_FQDN}:{NODE_PORT}/qos, host='{NODE_FQDN}', port={NODE_PORT}, "
@@ -401,15 +407,122 @@ async def test_without_a_node_list_a_url_a_pair_and_a_node_name_reach_the_caller
     )
     answer = await _redacted_answer(monkeypatch, httpx_mock, text, node_names=False)
 
-    assert answer == _expected_message(_qos_error(text))
-    for part in (NODE_FQDN, NODE_PORT, NODE_IP, "host='", "hostname=other.example", "http://"):
-        assert part in answer
-    assert "<address>" not in answer
+    assert answer == _expected_message(
+        _qos_error(
+            f"Contacted <address>, host='{NODE_FQDN}', port={NODE_PORT}, "
+            f"hostname=other.example, <address> and the node {NODE_FQDN}:{NODE_PORT} "
+            f"at {NODE_IP}"
+        )
+    )
+    for part in ("unlisted.example", "http://", "https://"):
+        assert part not in answer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("node_names", [False, True], ids=["unset", "listed"])
+async def test_a_configured_host_never_reaches_the_caller_with_or_without_a_node_list(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, node_names: bool
+) -> None:
+    """The Onezone and the Oneprovider this server is configured with read as their declared
+    service names in every mode, whichever service the call was for; whole names only. A longer
+    name that merely contains one is another name: it is not renamed (and is not masked either)."""
+    _set_env(monkeypatch)
+    text = (
+        "Provider provider.example:8443 and PROVIDER.EXAMPLE, zone onezone.example; not "
+        "provider.example.other.test, myprovider.example or provider.examples"
+    )
+    answer = await _redacted_answer(monkeypatch, httpx_mock, text, node_names=node_names)
+
+    assert answer == _expected_message(
+        _qos_error(
+            "Provider oneprovider and oneprovider, zone onezone; not "
+            "provider.example.other.test, myprovider.example or provider.examples"
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_node_list_entry_for_a_configured_host_wins(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    monkeypatch.setenv("ONEDATA_MCP_NODE_NAMES", json.dumps({"provider.example": "site-a"}))
+    error = await _post_qos_error(httpx_mock, _qos_error("down: provider.example"))
+
+    assert str(error) == _expected_message(_qos_error("down: site-a"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["", "not a url", "http://[::1", "provider.example:8443"])
+async def test_an_unset_or_malformed_configured_host_never_hides_the_error(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, bad: str
+) -> None:
+    """The redaction reads the zone's host too; whatever it holds, the real error is raised."""
+    _set_env(monkeypatch)
+    monkeypatch.setenv("ONEDATA_ONEZONE_HOST", bad)
+    error = await _post_qos_error(httpx_mock, _qos_error("Invalid near '=='"))
+
+    assert str(error) == _expected_message(_qos_error("Invalid near '=='"))
+
+
+@pytest.mark.asyncio
+async def test_a_long_path_segment_and_a_long_body_are_bounded_after_the_redaction(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """An overlong id is echoed cut short, and the whole message stops at MAX_ERROR_CHARS. A
+    host name that would straddle the cut is gone before it (the cut comes second)."""
+    _set_env(monkeypatch)
+    long_id = "b" * 500
+    httpx_mock.add_response(
+        method="DELETE",
+        url=f"https://provider.example/api/v3/oneprovider/things/{long_id}",
+        status_code=400,
+        json=_qos_error("x" * 1980 + " provider.example" + "y" * 3000),
+    )
+    with pytest.raises(OnedataApiError) as excinfo:
+        await request(get_oneprovider_config(), "DELETE", f"/things/{long_id}")
+
+    text = str(excinfo.value)
+    assert len(text) == MAX_ERROR_CHARS and text.endswith("...")
+    assert long_id not in text and "b" * 129 not in text
+
+
+def test_no_part_of_a_host_survives_wherever_the_cut_falls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The host is replaced before the message is cut, so a cut cannot leave half of it."""
+    _set_env(monkeypatch)
+    config = get_oneprovider_config_for("https://provider.example")
+    for offset in range(MAX_ERROR_CHARS - 140, MAX_ERROR_CHARS + 10):
+        body = _qos_error("x" * offset + " provider.example " + "y" * 50)
+        text = http_failure_message(config, "POST", "/qos_requirements", 400, body)
+        assert len(text) <= MAX_ERROR_CHARS
+        assert "r.example" not in text and "ider.exa" not in text, offset
+
+
+def test_shorten_path_cuts_only_the_overlong_segments() -> None:
+    assert shorten_path("/a/b%2Fc/d") == "/a/b%2Fc/d"
+    assert shorten_path(f"/qos_requirements/{'z' * 200}") == f"/qos_requirements/{'z' * 128}..."
+
+
+@pytest.mark.asyncio
+async def test_a_transport_error_message_shortens_a_long_id_too(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    long_id = "c" * 500
+    httpx_mock.add_exception(httpx.ConnectError(POOL_TEXT))
+    with pytest.raises(OnedataApiError) as excinfo:
+        await request(get_oneprovider_config(), "DELETE", f"/qos_requirements/{long_id}")
+
+    text = str(excinfo.value)
+    assert long_id not in text and "c" * 129 not in text
+    _assert_host_free(text)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("value", [None, "", "  ", "{}"])
-async def test_an_unset_empty_or_blank_node_list_is_the_unchanged_mode(
+async def test_an_unset_empty_or_blank_node_list_is_the_no_list_mode(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, value: str | None
 ) -> None:
     _set_env(monkeypatch)
@@ -420,19 +533,23 @@ async def test_an_unset_empty_or_blank_node_list_is_the_unchanged_mode(
     text = f"see https://{NODE_FQDN}:{NODE_PORT}/x host={NODE_FQDN} port={NODE_PORT} {NODE_IP}"
     error = await _post_qos_error(httpx_mock, _qos_error(text))
 
-    assert str(error) == _expected_message(_qos_error(text))
+    # the URL is masked; a pair, an unlisted host name and an IP address pass
+    assert str(error) == _expected_message(
+        _qos_error(f"see <address> host={NODE_FQDN} port={NODE_PORT} {NODE_IP}")
+    )
 
 
 @pytest.mark.asyncio
-async def test_a_dotted_file_name_and_unlisted_names_pass_untouched(
+async def test_a_dotted_file_name_a_version_and_an_ip_pass_untouched(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
     _set_env(monkeypatch)
     _set_node_names(monkeypatch)
     text = (
-        "No such file /space/notes.txt or data.v2.csv (e.g. a.b), at 12:30:45 on "
-        "2026-11-16T12:30:45Z, v1.2.3-beta, std::string, other-node.site.example and 192.0.2.7, "
-        f"{NODE_FQDN}0 and x{NODE_FQDN} and {NODE_IP}9 are not the listed nodes"
+        "No such file /space/notes.txt or data.v2.csv (e.g. a.b), archive.tar.gz, script.py, "
+        "README.md, /space/sub.dom.pl/x, at 12:30:45 on 2026-11-16T12:30:45Z, v1.2.3-beta, "
+        "std::string, 192.0.2.7, "
+        f"{NODE_FQDN}0 and {NODE_IP}9 are not host names"
     )
     error = await _post_qos_error(httpx_mock, _qos_error(text))
 
@@ -440,14 +557,44 @@ async def test_a_dotted_file_name_and_unlisted_names_pass_untouched(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("node_names", [False, True], ids=["unset", "listed"])
+async def test_an_unlisted_host_name_in_free_text_is_not_masked_a_known_residual(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, node_names: bool
+) -> None:
+    """KNOWN RESIDUAL (design/11, "What is not masked"): a host name written in the free text
+    of a description, that is neither a configured host, a listed node nor part of a URL, reaches
+    the caller. A guess from the look of the word was removed: it also replaced attribute and
+    file names. A deploy that must hide its peers lists them in ONEDATA_MCP_NODE_NAMES."""
+    text = "Cannot reach other-node.site.example or peer.site-b.example. Mail ops@peer.example.org."
+    _set_env(monkeypatch)
+    answer = await _redacted_answer(monkeypatch, httpx_mock, text, node_names=node_names)
+
+    assert answer == _expected_message(_qos_error(text))
+
+
+@pytest.mark.asyncio
+async def test_a_listed_peer_is_masked_in_free_text_and_an_unlisted_one_is_the_residual(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    monkeypatch.setenv("ONEDATA_MCP_NODE_NAMES", json.dumps({"peer.site-b.example": "provider-b"}))
+    error = await _post_qos_error(
+        httpx_mock, _qos_error("peer.site-b.example:8443 and peer.site-c.example")
+    )
+
+    assert str(error) == _expected_message(_qos_error("provider-b and peer.site-c.example"))
+
+
+@pytest.mark.asyncio
 async def test_without_a_node_list_a_body_is_onedatas_text_byte_for_byte(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
-    """Compose: no list, so Onedata's own text is byte-identical, names and addresses included."""
+    """Compose: no list, and no URL, host name or configured host in the text, so Onedata's own
+    text is byte-identical, addresses and `host=` words included."""
     _set_env(monkeypatch)
     plain = _qos_error(
-        f"Invalid near '==' for {NODE_FQDN}:{NODE_PORT} {NODE_IP} {NODE_IPV6} lab.data notes.txt "
-        f"hostname 'x.example' doesn't match 'y.example'; Host: h.example"
+        f"Invalid near '==' for {NODE_IP} {NODE_IPV6} lab.data notes.txt "
+        "hostname 'x' doesn't match 'y'; Host: h"
     )
     error = await _post_qos_error(httpx_mock, plain)
 
@@ -504,14 +651,22 @@ def test_a_pair_mask_stops_before_sentence_punctuation_and_closing_brackets() ->
     )
 
 
-def test_redact_endpoints_without_a_node_list_is_the_identity() -> None:
+def test_redact_endpoints_without_a_node_list_masks_urls_and_configured_hosts_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_env(monkeypatch)
     config = get_oneprovider_config_for("https://provider.example")
-    text = f"https://{NODE_FQDN}:{NODE_PORT}/x host={NODE_FQDN} port={NODE_PORT} {NODE_IP}"
+    plain = f"port={NODE_PORT} {NODE_IP} lab.data notes.txt"
+    text = f"https://{NODE_FQDN}:{NODE_PORT}/x {plain} and provider.example:8443 at {NODE_FQDN}"
 
-    assert redact_endpoints(text, config) == text
-    assert redact_json_text(json.dumps({"d": text, "n": [text]}), config) == json.dumps(
-        {"d": text, "n": [text]}
+    assert redact_endpoints(plain, config) == plain
+    assert redact_endpoints(text, config) == f"<address> {plain} and oneprovider at {NODE_FQDN}"
+    as_json = json.dumps({"d": text, "n": [plain]})
+    assert redact_json_text(as_json, config) == json.dumps(
+        {"d": f"<address> {plain} and oneprovider at {NODE_FQDN}", "n": [plain]}
     )
+    # a string that nothing touches stays byte for byte
+    assert redact_json_text(json.dumps({"n": [plain]}), config) == json.dumps({"n": [plain]})
 
 
 def test_a_listed_ipv6_address_does_not_match_inside_a_longer_one() -> None:
@@ -587,13 +742,14 @@ def test_replace_node_names_with_no_list_is_the_identity() -> None:
 
 
 @pytest.mark.parametrize("unit", ["a.", "ab.", "1.", "ab-", "1:", "1.1.", "host=' ", "http:/"])
-def test_redaction_cost_stays_linear_on_hostile_input(unit: str) -> None:
+@pytest.mark.parametrize("listed", [True, False], ids=["listed", "no-list"])
+def test_redaction_cost_stays_linear_on_hostile_input(unit: str, listed: bool) -> None:
     """Adversarial `a.a.a. ...` bodies must not cost a rescan from every label.
 
-    The rules run only with a node list, so the list is given.
+    The URL and configured-host rules run in every mode; the pair rule only with a list.
     """
     config = get_oneprovider_config_for(
-        "https://provider.example", node_names=(("node-1.example", "a"),)
+        "https://provider.example", node_names=(("node-1.example", "a"),) if listed else ()
     )
     text = unit * 200_000
     started = time.perf_counter()
@@ -759,7 +915,7 @@ async def test_an_invalid_space_error_redacts_the_id_the_service_echoes(
     )
     httpx_mock.add_response(
         method="GET",
-        url="https://provider.example/api/v3/oneprovider/data/dsadas/children",
+        url="https://provider.example/api/v3/oneprovider/data/dsadas/files",
         status_code=400,
         json={
             "error": {
@@ -769,19 +925,22 @@ async def test_an_invalid_space_error_redacts_the_id_the_service_echoes(
         },
     )
 
+    # the shared resolver of the stable tools (list_children has its own text since design/14)
     with pytest.raises(OnedataInvalidSpaceError) as excinfo:
-        await files.list_children("dsadas", limit=10, offset=0)
+        await files.list_files_recursively("dsadas", limit=10)
 
     _assert_host_free(str(excinfo.value))
     assert str(excinfo.value).startswith('Space "<address>" does not exist.')
 
 
 @pytest.mark.asyncio
-async def test_without_a_node_list_an_invalid_space_error_keeps_the_id_the_service_echoes(
+async def test_list_children_says_the_space_is_unsupported_without_echoing_the_service(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
+    """design/14: it names the target the caller gave, never the service's echoed id, and
+    Onedata's own message that follows is redacted."""
     _set_env(monkeypatch)
-    echoed = f"https://{NODE_FQDN}:{NODE_PORT}/x"
+    _set_node_names(monkeypatch)
     httpx_mock.add_response(
         method="GET",
         url="https://provider.example/api/v3/oneprovider/spaces",
@@ -796,15 +955,49 @@ async def test_without_a_node_list_an_invalid_space_error_keeps_the_id_the_servi
         json={
             "error": {
                 "id": "spaceNotSupportedBy",
+                "details": {"spaceId": f"https://{NODE_FQDN}:{NODE_PORT}/x", "providerId": "p1"},
+            }
+        },
+    )
+
+    with pytest.raises(OnedataApiError) as excinfo:
+        await files.list_children("dsadas", limit=10, offset=0)
+
+    _assert_host_free(str(excinfo.value))
+    assert str(excinfo.value).startswith(
+        "This provider does not support the space of file id 'dsadas'"
+    )
+
+
+@pytest.mark.asyncio
+async def test_without_a_node_list_an_invalid_space_error_masks_a_url_the_service_echoes(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    echoed = f"https://{NODE_FQDN}:{NODE_PORT}/x"
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/spaces",
+        json=[],
+        is_reusable=True,
+        is_optional=True,
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/data/dsadas/files",
+        status_code=400,
+        json={
+            "error": {
+                "id": "spaceNotSupportedBy",
                 "details": {"spaceId": echoed, "providerId": "p1"},
             }
         },
     )
 
     with pytest.raises(OnedataInvalidSpaceError) as excinfo:
-        await files.list_children("dsadas", limit=10, offset=0)
+        await files.list_files_recursively("dsadas", limit=10)
 
-    assert str(excinfo.value).startswith(f'Space "{echoed}" does not exist.')
+    assert str(excinfo.value).startswith('Space "<address>" does not exist.')
 
 
 @pytest.mark.asyncio
@@ -880,6 +1073,122 @@ async def test_a_successful_answer_is_unchanged(
     answer = await request(get_oneprovider_config(), "GET", "/spaces")
 
     assert answer == {"status_code": 200, "body": [{"name": "s", "spaceId": "sp1"}]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [200, 201, 202, 204])
+async def test_every_2xx_answer_is_a_success(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, status: int
+) -> None:
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="POST", url="https://provider.example/api/v3/oneprovider/x", status_code=status
+    )
+
+    answer = await request(get_oneprovider_config(), "POST", "/x")
+
+    assert answer["status_code"] == status
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize("method", ["GET", "POST"])
+async def test_a_redirect_is_an_error_and_its_page_and_target_are_not_shown(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, method: str, status: int
+) -> None:
+    """httpx follows no redirect and does not call a 3xx an error: without this a tool would
+    return the redirect's page as its result."""
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method=method,
+        url="https://provider.example/api/v3/oneprovider/spaces",
+        status_code=status,
+        headers={"Location": f"https://{NODE_FQDN}:{NODE_PORT}/elsewhere"},
+        text=f"<a href='https://{NODE_FQDN}:{NODE_PORT}/x'>moved</a> {NODE_FQDN}",
+    )
+
+    with pytest.raises(OnedataApiError) as excinfo:
+        await request(get_oneprovider_config(), method, "/spaces")
+
+    assert str(excinfo.value) == (
+        f"Onedata API request failed: {method} /spaces (status={status}) - http_{status} "
+        "(service: oneprovider)"
+    )
+    _assert_host_free(str(excinfo.value))
+    assert excinfo.value.response["status_code"] == status
+    assert len(httpx_mock.get_requests()) == 1  # not followed
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_marks_the_rest_span_as_an_error(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("test")
+    monkeypatch.setattr(telemetry, "get_tracer", lambda: tracer)
+    monkeypatch.setattr(telemetry, "_telemetry_enabled", True)
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="GET", url="https://provider.example/api/v3/oneprovider/spaces", status_code=302
+    )
+
+    with pytest.raises(OnedataApiError):
+        await request(get_oneprovider_config(), "GET", "/spaces")
+
+    span = next(s for s in exporter.get_finished_spans() if s.name == "onedata.rest GET")
+    assert span.status.status_code == telemetry.StatusCode.ERROR
+    assert span.status.description == "HTTP 302"
+
+
+@pytest.mark.asyncio
+async def test_a_redirected_download_is_an_error_not_file_content(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """The download path calls httpx directly: its 3xx must not be returned as file bytes."""
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/data/fid1",
+        json={"type": "REG", "size": 3},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/data/fid1/content",
+        status_code=302,
+        headers={"Location": f"https://{NODE_FQDN}:{NODE_PORT}/x"},
+        text=f"<html>moved to {NODE_FQDN}</html>",
+    )
+
+    with pytest.raises(OnedataApiError) as excinfo:
+        await files.download_file_with_meta("fid1")
+
+    assert str(excinfo.value) == (
+        "Onedata API request failed: GET /data/fid1/content (status=302) - http_302 "
+        "(service: oneprovider)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_redirected_move_is_an_error_not_a_completed_move(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="PUT",
+        url="https://provider.example/cdmi/myspace/new.txt",
+        status_code=307,
+        headers={"Location": f"https://{NODE_FQDN}:{NODE_PORT}/x"},
+    )
+
+    with pytest.raises(OnedataApiError) as excinfo:
+        await files.move_file("/myspace/old.txt", "/myspace/new.txt")
+
+    assert str(excinfo.value) == (
+        "CDMI move failed: PUT /cdmi/myspace/new.txt (status=307) - http_307 (service: oneprovider)"
+    )
+    assert len(httpx_mock.get_requests()) == 1  # no lookup of a file that was never moved
 
 
 @pytest.mark.asyncio
@@ -979,3 +1288,288 @@ async def test_move_status_error_names_the_path_not_the_url(
     assert message == (
         "CDMI move failed: PUT /cdmi/myspace/new.txt (status=500) - http_500 (service: oneprovider)"
     )
+
+
+# ---------------------------------------------------------------------------
+# A peer's domain: the 25.0 error carries `ctx.serviceDomain`, the domain of the service that
+# answered, which is not necessarily a host this server is configured with.
+# ---------------------------------------------------------------------------
+
+PEER_DOMAIN = "provider-b.default.svc.cluster.local"
+PEER_SITE = "peer-b.site-b.example"
+
+
+def _peer_error() -> dict:
+    """A 25.0 error body (swagger `Error`) from a peer provider, with the domain in its ctx and
+    another in `details`."""
+    return {
+        "error": {
+            "id": "posix",
+            "description": "Operation failed with POSIX error: enoent.",
+            "details": {"errno": "enoent", "domain": PEER_SITE, "nested": {"Hostname": "n7"}},
+            "ctx": {
+                "timestamp": 1750762637248,
+                "serviceReleaseVersion": "25.0",
+                "serviceId": "a7ee2722915b8bf7fb064eb65087cc61ch9357",
+                "serviceDomain": PEER_DOMAIN,
+                "serviceBuildVersion": "231-g8d26f953c3",
+                "service": "opw",
+                "onedataErrorsRevision": "ca3af8cb",
+                "module": "metadata_req",
+                "line": 45,
+            },
+        }
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("node_names", [False, True], ids=["unset", "listed"])
+async def test_a_peer_providers_domain_in_an_error_never_reaches_the_caller(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, node_names: bool
+) -> None:
+    _set_env(monkeypatch)
+    if node_names:
+        _set_node_names(monkeypatch)
+    error = await _post_qos_error(httpx_mock, _peer_error())
+
+    text = str(error)
+    for leak in (PEER_DOMAIN, PEER_SITE, "cluster.local", "site-b.example", "n7"):
+        assert leak not in text, leak
+    # only the domain-bearing values changed: the rest of the error reads as Onedata wrote it
+    expected = _peer_error()
+    expected["error"]["ctx"]["serviceDomain"] = "a provider"
+    expected["error"]["details"]["domain"] = "a provider"
+    expected["error"]["details"]["nested"]["Hostname"] = "a provider"
+    assert text == _expected_message(expected)
+    assert error.errno == "enoent" and error.error_id == "posix"
+    # the response kept on the error is the raw body: it is not what a model reads
+    assert error.response["body"]["error"]["ctx"]["serviceDomain"] == PEER_DOMAIN
+
+
+@pytest.mark.parametrize(
+    "key", ["serviceDomain", "domain", "domainName", "subdomain", "host", "hostname", "fqdn"]
+)
+@pytest.mark.parametrize("spelling", [str, str.lower, str.upper])
+def test_a_domain_bearing_field_reads_a_provider_whatever_it_holds(key: str, spelling) -> None:
+    config = get_oneprovider_config_for("https://provider.example")
+    body = {"error": {"id": "x", "ctx": {spelling(key): "anything at all"}, "keep": "provider2"}}
+
+    shown = redact_json_text(json.dumps(body, indent=2), config)
+
+    assert json.loads(shown) == {
+        "error": {"id": "x", "ctx": {spelling(key): "a provider"}, "keep": "provider2"}
+    }
+
+
+def test_a_domain_bearing_field_that_holds_no_string_and_a_value_named_like_one_are_kept() -> None:
+    config = get_oneprovider_config_for("https://provider.example")
+    body = {"domain": None, "host": 7, "k": "host", "list": ["domain", "host"], "d": 'a "host": b'}
+
+    assert redact_json_text(json.dumps(body), config) == json.dumps(body)
+
+
+# QoS expressions and attribute names are not host names and survive in every mode
+QOS_TEXTS = [
+    "providerId=abc & anyStorage",
+    "geo=PL",
+    "country=FR & type=ssd",
+    "geo=EU \\ providerId=p123",
+    "storage.type=ssd | cloud.region=eu",
+    "Invalid QoS expression near '==': use '=' instead (storageId=s1 | geo=PL & anyStorage).",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("node_names", [False, True], ids=["unset", "listed"])
+@pytest.mark.parametrize("expression", QOS_TEXTS)
+async def test_a_qos_expression_survives_the_redaction(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, node_names: bool, expression: str
+) -> None:
+    _set_env(monkeypatch)
+    body = _qos_error(f"Bad expression {expression}")
+    if node_names:
+        _set_node_names(monkeypatch)
+    error = await _post_qos_error(httpx_mock, body)
+
+    assert str(error) == _expected_message(body)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # attribute names, file names, versions and addresses: real text, never rewritten
+        (
+            "xattr.user.id file.name error.info notes.v1.md setup.test.py a.b.c.d",
+            "xattr.user.id file.name error.info notes.v1.md setup.test.py a.b.c.d",
+        ),
+        (
+            "notes.txt data.v2.csv archive.tar.gz report.pdf",
+            "notes.txt data.v2.csv archive.tar.gz report.pdf",
+        ),
+        ("script.py README.md run.sh data.in", "script.py README.md run.sh data.in"),
+        (
+            "v1.2.3 25.0 1.2.3.4 10.0.0.1:8443 192.0.2.7",
+            "v1.2.3 25.0 1.2.3.4 10.0.0.1:8443 192.0.2.7",
+        ),
+        ("storage.type region.geo e.g. i.e.", "storage.type region.geo e.g. i.e."),
+        ("/space/dir.v2.ext/file.example.org", "/space/dir.v2.ext/file.example.org"),
+        # a URL is masked, with its sentence punctuation kept; a configured host is replaced
+        ("see https://peer.site-b.example:8443/x.", "see <address>."),
+        (
+            "provider.example:8443 and onezone.example, (provider.example)",
+            "oneprovider and onezone, (oneprovider)",
+        ),
+    ],
+)
+def test_only_urls_and_known_hosts_are_masked_all_other_text_passes_untouched(
+    monkeypatch: pytest.MonkeyPatch, text: str, expected: str
+) -> None:
+    _set_env(monkeypatch)
+    config = get_oneprovider_config_for("https://provider.example")
+
+    assert redact_endpoints(text, config) == expected
+    assert redact_endpoints(text, config) == redact_endpoints(
+        redact_endpoints(text, config), config
+    )
+
+
+def test_the_review_example_keeps_its_attribute_and_file_names() -> None:
+    """`xattr.user.id` and `setup.test.py` were read as host names and became `<address>`."""
+    config = get_oneprovider_config_for("https://provider.example")
+    body = {"error": {"id": "x", "description": "Set xattr.user.id on setup.test.py: refused"}}
+
+    assert redact_json_text(json.dumps(body), config) == json.dumps(body)
+
+
+# A domain-bearing field: the node-name mapping first, then `a provider`
+LISTED = (
+    (NODE_IP, "oneprovider-a"),
+    (NODE_IPV6, "oneprovider-b"),
+    (NODE_FQDN, "oneprovider-a"),
+    (ZONE_FQDN, "onezone"),
+)
+
+
+def _domain_body(value: str, key: str) -> str:
+    return json.dumps({"error": {"id": "x", "ctx": {key: value}}}, indent=2)
+
+
+@pytest.mark.parametrize(
+    ("value", "reads"),
+    [
+        ("provider.example", "oneprovider"),  # the configured Oneprovider
+        ("PROVIDER.EXAMPLE:8443", "oneprovider"),
+        ("onezone.example", "onezone"),  # the configured Onezone
+        (NODE_FQDN, "oneprovider-a"),  # a listed node
+        (f"  {NODE_FQDN}:{NODE_PORT} ", "oneprovider-a"),
+        (NODE_IP, "oneprovider-a"),
+        (f"[{NODE_IPV6}]:{NODE_PORT}", "oneprovider-b"),
+        # not, as a whole, one known node: a provider
+        ("peer.site-b.example", "a provider"),
+        (f"{NODE_FQDN} via peer.site-b.example", "a provider"),
+        (f"peer.site-b.example/{NODE_FQDN}", "a provider"),
+        (f"{NODE_FQDN}.site-b.example", "a provider"),
+        (f"x{NODE_FQDN}", "a provider"),
+        ("", "a provider"),
+    ],
+)
+@pytest.mark.parametrize("key", ["serviceDomain", "domain", "HOST"])
+def test_a_domain_field_reads_the_declared_name_of_the_node_it_is_else_a_provider(
+    monkeypatch: pytest.MonkeyPatch, key: str, value: str, reads: str
+) -> None:
+    """The node-name mapping runs first, so a listed or configured node keeps its declared name
+    (before, `a provider` overwrote it); a value that is anything else, a known node mixed with
+    other text included, reads `a provider` and never shows the peer."""
+    _set_env(monkeypatch)
+    config = get_oneprovider_config_for("https://provider.example", node_names=LISTED)
+
+    shown = redact_json_text(_domain_body(value, key), config)
+
+    assert json.loads(shown)["error"]["ctx"][key] == reads
+    assert "site-b.example" not in shown
+
+
+def test_a_domain_field_with_no_node_list_reads_the_configured_hosts_name_else_a_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_env(monkeypatch)
+    config = get_oneprovider_config_for("https://provider.example")
+
+    assert json.loads(redact_json_text(_domain_body("provider.example", "domain"), config))[
+        "error"
+    ]["ctx"] == {"domain": "oneprovider"}
+    assert json.loads(redact_json_text(_domain_body(NODE_FQDN, "domain"), config))["error"][
+        "ctx"
+    ] == {"domain": "a provider"}
+
+
+@pytest.mark.asyncio
+async def test_a_peer_providers_domain_does_not_reach_the_invalid_space_error(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """A host in a domain-bearing field of the error is masked wherever the error is shown."""
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/spaces",
+        json=[],
+        is_reusable=True,
+        is_optional=True,
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url="https://provider.example/api/v3/oneprovider/data/dsadas/children",
+        status_code=400,
+        json={
+            "error": {
+                "id": "spaceNotSupportedBy",
+                "details": {"spaceId": "s9", "providerId": "p1", "domain": PEER_SITE},
+                "ctx": {"serviceDomain": PEER_DOMAIN},
+            }
+        },
+    )
+
+    # list_children reads spaceNotSupportedBy as "this provider does not support the space"
+    # (the file tools' review: the space may still exist), not as a missing space
+    with pytest.raises(OnedataApiError) as excinfo:
+        await files.list_children("dsadas", limit=10, offset=0)
+
+    assert str(excinfo.value).startswith("This provider does not support the space of file id")
+    assert PEER_SITE not in str(excinfo.value) and PEER_DOMAIN not in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encoded", [False, True], ids=["plain", "percent-encoded"])
+async def test_a_node_name_in_the_request_path_is_replaced_in_an_http_failure(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, encoded: bool
+) -> None:
+    """A caller may pass a node's name where an id or a path belongs; the path an error shows
+    goes through the same rules as the body, before it is shortened."""
+    _set_env(monkeypatch)
+    _set_node_names(monkeypatch)
+    arg = f"/space/{NODE_FQDN}:{NODE_PORT}/x"
+    shown = quote(arg, safe="") if encoded else arg.lstrip("/")
+    httpx_mock.add_response(status_code=404, json={"error": {"id": "notFound"}})
+    with pytest.raises(OnedataApiError) as excinfo:
+        await request(get_oneprovider_config(), "POST", f"/lookup-file-id/{shown}")
+
+    text = str(excinfo.value)
+    _assert_host_free(text)
+    assert "oneprovider-a" in text
+
+
+@pytest.mark.asyncio
+async def test_a_node_name_in_the_request_path_is_replaced_in_a_transport_failure(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    _set_node_names(monkeypatch)
+    httpx_mock.add_exception(httpx.ConnectError(POOL_TEXT))
+    with pytest.raises(OnedataApiError) as excinfo:
+        await request(
+            get_oneprovider_config(), "GET", f"/data/{quote(NODE_IP, safe='')}/{'d' * 300}"
+        )
+
+    text = str(excinfo.value)
+    _assert_host_free(text)
+    assert "oneprovider-a" in text and "d" * 129 not in text

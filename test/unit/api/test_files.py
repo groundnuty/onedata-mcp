@@ -5,7 +5,7 @@ import pytest
 from pytest_httpx import HTTPXMock
 
 from onedata_mcp.api import files
-from onedata_mcp.utils import OnedataInvalidSpaceError
+from onedata_mcp.utils import OnedataApiError, OnedataInvalidSpaceError
 
 
 def _set_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -162,11 +162,7 @@ async def test_list_children_rejects_deprecated_attribute_names(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
     _set_env(monkeypatch)
-    httpx_mock.add_response(
-        method="POST",
-        url=_lookup_url("/space/path"),
-        json={"fileId": "parent-id"},
-    )
+    # refused before any request: no lookup either (design/14)
 
     with pytest.raises(ValueError, match="Deprecated attribute names"):
         await files.list_children("/space/path", attributes=["file_id"], limit=10, offset=0)
@@ -291,10 +287,13 @@ async def test_list_children_formats_invalid_space_error_with_hints(
         },
     )
 
-    with pytest.raises(OnedataInvalidSpaceError, match='Space "dsadas" does not exist') as exc:
+    # design/14: list_children says what this provider established, not that the space is gone
+    with pytest.raises(
+        OnedataApiError, match="does not support the space of file id 'dsadas'"
+    ) as exc:
         await files.list_children("dsadas", limit=10, offset=0)
 
-    assert 'Available spaces: "Alpha".' in str(exc.value)
+    assert 'Spaces this token sees at this provider: "Alpha".' in str(exc.value)
 
 
 @pytest.mark.asyncio
@@ -854,7 +853,7 @@ async def test_create_directory_rejects_space_root_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _set_env(monkeypatch)
-    with pytest.raises(ValueError, match="path must be /<space_name>/<path_to_directory>"):
+    with pytest.raises(ValueError, match="is the root directory of a space, which always exists"):
         await files.create_directory("/space")
 
 

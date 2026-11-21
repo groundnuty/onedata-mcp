@@ -19,9 +19,10 @@
         smoke smoke-d1 smoke-fast \
         sweep sweep-cyfronet sweep-deepseek sweep-claude sweep-all \
         sweep-headline sweep-k8 \
-        k2val k2val-scan k2val-jail-probe k2val-jail-smoke test-k2val-jail-live \
+        k2val k2val-rejudge k2val-scan k2val-jail-probe k2val-jail-smoke test-k2val-jail-live \
         valfed-up valfed-reset valfed-down valfed-status valfed-check valfed-readiness-live \
-        valfed-qos-live \
+        valfed-qos-live valfed-transfer-live test-transfer-live \
+        test-files-live valfed-files-live \
         conformance inspect-smoke \
         report report-latest rescore \
         show-grid show-grid-rate show-headline show-trial inspect-fail list-runs \
@@ -43,6 +44,8 @@ help:
 	@echo "                       to import another checkout; set ONEDATA_MCP_TOOLS to pick tools)"
 	@echo "    test-readiness-live  readiness tools against the LOCAL Compose federation only"
 	@echo "    test-qos-live      remove_qos_requirement against the LOCAL Compose federation only"
+	@echo "    test-transfer-live schedule_file_replication against the LOCAL Compose federation only"
+	@echo "    test-files-live    get_file_attributes, list_children, create_directory, LOCAL only"
 	@echo ""
 	@echo "  Federation provisioning  (run once per panel-LLM addition)"
 	@echo "    spaces-create      create per-LLM Onedata spaces (idempotent)"
@@ -77,6 +80,11 @@ help:
 	@echo "      make k2val                                  all configs, V1..V7, K=3"
 	@echo "      make k2val K2VAL_MODELS=sonnet-medium,haiku-low K2VAL_SCENARIOS=V2,V5 K2VAL_K=1"
 	@echo "                         (K2VAL_CONFIG=... K2VAL_RID=<run id to resume>)"
+	@echo "                       Each answer is read by its deterministic reader AND a rubric judge"
+	@echo "                       ([judge], default claude-sonnet-5-5 at effort medium, on the"
+	@echo "                       subscription); a disagreement is NEEDS_REVIEW (design/08)"
+	@echo "    k2val-rejudge      read a run's stored answers again, offline: RID=<run id> (or"
+	@echo "                       K2VAL_RUN_DIRS=\"dir1 dir2\"); cached verdicts are reused; no trial runs"
 	@echo "    k2val-scan         pre-flight scan for the CLI legs (wave 2; K2VAL_MODELS=gpt-luna-low,..)"
 	@echo "    k2val-jail-probe   leak probe of the CLI jail: PASS/FAIL table (K2VAL_JAIL_CLIS=codex,agy)"
 	@echo "    k2val-jail-smoke   one harmless prompt per CLI in the jail, no MCP (after the probe)"
@@ -91,9 +99,11 @@ help:
 	@echo "    valfed-check       no-model check: panel fixtures built and torn down in omcp-smoke"
 	@echo "    valfed-readiness-live  the gated live readiness test, in omcp-live"
 	@echo "    valfed-qos-live    the gated live test of remove_qos_requirement, in omcp-live"
+	@echo "    valfed-transfer-live  the gated live test of schedule_file_replication, in omcp-live"
+	@echo "    valfed-files-live  the gated live test of the three file tools, in omcp-live"
 	@echo ""
 	@echo "  MCP-protocol validation  (paper-grade artifacts)"
-	@echo "    conformance        run modelcontextprotocol/conformance suite v0.1.16+"
+	@echo "    conformance        run modelcontextprotocol/conformance suite 0.1.16 (pinned)"
 	@echo "                       against onedata-mcp on a temp HTTP transport;"
 	@echo "                       output → conformance-results/<timestamp>/"
 	@echo "    inspect-smoke      run modelcontextprotocol/inspector --cli"
@@ -153,6 +163,20 @@ test-readiness-live:
 # or *.datahub.test. Needs the usual ONEDATA_* variables and ONEDATA_MCP_LIVE_QOS_SPACE.
 test-qos-live:
 	ONEDATA_MCP_LIVE_QOS=1 uv run pytest test/live/test_qos_live.py -v -s
+
+# Live test of schedule_file_replication (a copy to the local provider, judged by its block map;
+# an unknown target; a provider name as the id). It writes files through a SECOND provider and
+# schedules transfers, and refuses any host but 127.0.0.1, localhost or *.datahub.test. Needs the
+# usual ONEDATA_* variables, ONEDATA_MCP_LIVE_TRANSFER_SPACE, and the source provider's
+# ONEDATA_MCP_LIVE_TRANSFER_SOURCE_HOST and ONEDATA_MCP_LIVE_TRANSFER_SOURCE_TOKEN.
+test-transfer-live:
+	ONEDATA_MCP_LIVE_TRANSFER=1 uv run pytest test/live/test_transfer_live.py -v -s
+
+# Live test of get_file_attributes, list_children and create_directory (design/13-15). It
+# writes files and directories, and refuses any host but 127.0.0.1, localhost or
+# *.datahub.test. Needs the usual ONEDATA_* variables and ONEDATA_MCP_LIVE_FILES_SPACE.
+test-files-live:
+	ONEDATA_MCP_LIVE_FILES=1 uv run pytest test/live/test_files_live.py -v -s
 
 lint:
 	uv run ruff check benchmark/ onedata_mcp/ test/ --fix
@@ -386,6 +410,15 @@ K2VAL_SCENARIOS ?= V1..V7
 K2VAL_K ?= 3
 K2VAL_RID ?=
 
+RID ?=
+K2VAL_RUN_DIRS ?= $(if $(RID),artefacts/k2val/$(RID))
+
+k2val-rejudge:
+	@test -n "$(K2VAL_RUN_DIRS)" || { echo "set RID=<run id> or K2VAL_RUN_DIRS=..."; exit 2; }
+	uv run python -m benchmark.k2val.run rejudge \
+	  $(foreach d,$(K2VAL_RUN_DIRS),--run-dir $(d)) \
+	  $(if $(wildcard $(K2VAL_CONFIG)),--config $(K2VAL_CONFIG))
+
 k2val:
 	uv run python -m benchmark.k2val.run --config $(K2VAL_CONFIG) \
 	  $(if $(K2VAL_MODELS),--models $(K2VAL_MODELS)) \
@@ -447,6 +480,12 @@ valfed-readiness-live:
 valfed-qos-live:
 	$(VALFED) qos-live
 
+valfed-transfer-live:
+	$(VALFED) transfer-live
+
+valfed-files-live:
+	$(VALFED) files-live
+
 # ---------------------------------------------------------------------------
 # MCP-protocol validation
 # ---------------------------------------------------------------------------
@@ -455,7 +494,9 @@ valfed-qos-live:
 # scripts/with-http-server.sh), run an external validator against it,
 # and tear the server down. Both produce paper-citable artifacts:
 #
-#   conformance     — modelcontextprotocol/conformance v0.1.16+
+#   conformance     — modelcontextprotocol/conformance 0.1.16 (pinned: a
+#                     new suite version may add scenarios the baseline
+#                     does not list, so a bump is a deliberate change)
 #                     (March 2026, Anthropic-canonical protocol suite).
 #                     Validates JSON-RPC, capability negotiation,
 #                     spec compliance. Output: conformance-results/.
@@ -476,7 +517,7 @@ conformance:
 	mkdir -p "$${OUTDIR}"; \
 	echo "Conformance run → $${OUTDIR}"; \
 	scripts/with-http-server.sh --port $(MCP_CONFORMANCE_PORT) -- \
-	  npx -y @modelcontextprotocol/conformance@latest server \
+	  npx -y @modelcontextprotocol/conformance@0.1.16 server \
 	    --url __MCP_URL__ \
 	    --expected-failures conformance-baseline.yaml \
 	    --output-dir "$${OUTDIR}" 2>&1 | tee "$${OUTDIR}/run.log"; \

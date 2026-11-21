@@ -1,11 +1,12 @@
+import json
 import re
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 from urllib.parse import urlparse
 
 from fastmcp import Context, FastMCP
 from mcp.shared.exceptions import McpError
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import BeforeValidator, Field
 
 from onedata_mcp.api.files import (
     _looks_like_directory_intent,
@@ -28,6 +29,73 @@ from onedata_mcp.api.files import (
 )
 
 ONEDATA_FILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{20,}$")
+
+# --- the `attributes` input of get_file_attributes and list_children ---------------------------
+
+MAX_ATTRIBUTES = 64  # the swagger names 34 attributes; `xattr.<key>` adds any number
+ATTRIBUTE_NAMES_DOC = (
+    "(Optional) Names of the attributes to return, at most 64. Allowed names:\n"
+    "- identity and location: fileId, parentFileId, index, name, conflictingName, path, type\n"
+    "- permissions: activePermissionsType, posixPermissions, acl\n"
+    "- ownership, provider and shares: ownerUserId, originProviderId, directShareIds\n"
+    "- links: hardlinkCount, symlinkValue\n"
+    "- display ids: displayUid, displayGid\n"
+    "- times and size: creationTime, atime, mtime, ctime, size\n"
+    "- replication: isFullyReplicatedLocally, localReplicationRate\n"
+    "- metadata: hasCustomMetadata, hasJsonMetadata, jsonMetadata, and xattr.<key> for one "
+    "extended attribute"
+)
+DEFAULT_ATTRIBUTES_DOC = (
+    "path, name, type (REG for a regular file, DIR for a directory, SYMLNK for a symbolic "
+    "link), size, posixPermissions, atime and mtime"
+)
+
+
+# The longest JSON text read as a list of names: 64 names of 128 characters, quoted and
+# separated. Anything longer is refused before it is decoded.
+MAX_ATTRIBUTES_TEXT = MAX_ATTRIBUTES * 132
+
+
+def _attribute_list(value: Any) -> Any:
+    """Read a list sent as its JSON text (`'["size", "mtime"]'`, seen from Qwen3-Coder) as that
+    list. Any other string is refused, with what to send instead: one longer than
+    MAX_ATTRIBUTES_TEXT before it is decoded, and one nested too deeply to decode. Everything
+    else goes on to pydantic's own list check, so the published schema stays a list of
+    strings."""
+    if not isinstance(value, str):
+        return value
+    parsed = None
+    if len(value) <= MAX_ATTRIBUTES_TEXT:
+        try:
+            parsed = json.loads(value)
+        except (ValueError, RecursionError):
+            parsed = None
+    if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
+        return parsed
+    raise ValueError(
+        'attributes must be a list of attribute names, for example ["size", "mtime"]; '
+        f"got the string {value[:80]!r}" + ("..." if len(value) > 80 else "")
+    )
+
+
+AttributeNames = Annotated[
+    Optional[Annotated[list[str], Field(max_length=MAX_ATTRIBUTES)]],
+    BeforeValidator(_attribute_list),
+]
+
+GET_FILE_ATTRIBUTES_DOC = (
+    "Get the attributes of a file or directory, given by path or file id.\n\n"
+    "Returns an object that maps each requested attribute name to its value. Without "
+    f"`attributes`, it returns {DEFAULT_ATTRIBUTES_DOC}."
+)
+LIST_CHILDREN_DOC = (
+    "List the entries of a directory (its files and subdirectories), given by path or file "
+    "id.\n\n"
+    "Returns one page: `children`, the requested attributes of each entry; `isLast`, true "
+    "when no entries follow; and `nextPageToken`. Without `attributes`, each entry has its "
+    f"{DEFAULT_ATTRIBUTES_DOC}. When `isLast` is false, call again with `token` set to "
+    "`nextPageToken` to get the next page."
+)
 
 
 def _is_probable_file_id(value: str) -> bool:
@@ -79,6 +147,18 @@ async def _resolve_with_mcp_root(path_or_id: str, ctx: Optional[Context]) -> str
     return f"{root_path.rstrip('/')}/{path_or_id.lstrip('/')}"
 
 
+async def _resolve_or_hint(path_or_id: str, ctx: Optional[Context], form: str) -> str:
+    """`_resolve_with_mcp_root` for get_file_attributes, list_children and create_directory
+    (design/13-15), with the same hint when there is no MCP session to ask for roots. An
+    in-process call, as the validation panel's API legs make, has none: `ctx.list_roots()` then
+    raises a RuntimeError ("session is not available"), which said nothing about the path. The
+    stable tools keep `_resolve_with_mcp_root` as it is."""
+    try:
+        return await _resolve_with_mcp_root(path_or_id, ctx)
+    except RuntimeError:
+        raise ValueError(f"Paths must start with '/': use {form} (got {path_or_id!r}).") from None
+
+
 def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
     """Register onedata files module tools and prompts with the MCP server.
 
@@ -120,68 +200,60 @@ def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
             path = await _resolve_with_mcp_root(path, ctx)
             return await get_file_id(path)
 
-    @mcp.tool(name="get_file_attributes", annotations=ToolAnnotations(readOnlyHint=True))
+    @mcp.tool(
+        name="get_file_attributes",
+        description=GET_FILE_ATTRIBUTES_DOC,
+        annotations=ToolAnnotations(readOnlyHint=True),
+    )
     async def mcp_get_file_attributes(
         file_id_or_path: str = Field(
-            description="File id or path to the file in format /<space_name>/<path_to_file>"
+            description=(
+                "Path of the file or directory, /<space_name>/<path_to_file>, or its file id"
+            )
         ),
-        attributes: Optional[list[str]] = Field(
-            default=None,
-            description="""
-            (Optional) List of attribute names to request from Oneprovider. 
-            Allowed values:
-            - Identity/location: fileId, parentFileId, index, name, conflictingName, path, type
-            - Permissions/access: activePermissionsType, posixPermissions, acl
-            - Ownership/provider/shares: ownerUserId, originProviderId, directShareIds
-            - Links: hardlinkCount, symlinkValue
-            - Display ids: displayUid, displayGid
-            - Timestamps/size: creationTime, atime, mtime, ctime, size
-            - Replication: isFullyReplicatedLocally, localReplicationRate
-            - Metadata: hasCustomMetadata, hasJsonMetadata, jsonMetadata, xattr.*
-            """,
-        ),
+        attributes: AttributeNames = Field(default=None, description=ATTRIBUTE_NAMES_DOC),
         ctx: Optional[Context] = None,
     ) -> dict[str, Any]:
-        """
-        Get attributes for a file id or a logical path.
-        """
-        file_id_or_path = await _resolve_with_mcp_root(file_id_or_path, ctx)
+        file_id_or_path = await _resolve_or_hint(
+            file_id_or_path, ctx, "/<space_name>/<path_to_file>"
+        )
         return await get_file_attributes(file_id_or_path, attributes=attributes)
 
-    @mcp.tool(name="list_children", annotations=ToolAnnotations(readOnlyHint=True))
+    @mcp.tool(
+        name="list_children",
+        description=LIST_CHILDREN_DOC,
+        annotations=ToolAnnotations(readOnlyHint=True),
+    )
     async def mcp_list_children(
         parent_id_or_path: str = Field(
-            description="File id or path to the parent file in format /<space_name>/<path_to_file>"
+            description=("Path of the directory, /<space_name>/<path_to_directory>, or its file id")
         ),
         *,
-        attributes: Optional[list[str]] = Field(
-            default=None,
-            description="""
-            (Optional) List of attribute names to request from Oneprovider. 
-            Use the same allowed values as in get_file_attributes.
-            """,
-        ),
+        attributes: AttributeNames = Field(default=None, description=ATTRIBUTE_NAMES_DOC),
         limit: int = Field(
             default=10,
             ge=1,
             le=100,
-            description="Maximum number of children",
+            description="Maximum number of entries in this page (1 to 100)",
         ),
         offset: int = Field(
             default=0,
-            description="Starting offset of the children",
+            ge=0,
+            le=500,
+            description=(
+                "Number of entries to skip from the start of the directory (0 to 500). Not "
+                "used with `token`."
+            ),
         ),
         token: Optional[str] = Field(
             default=None,
-            description="Token to continue listing from the next page of results",
+            description="The `nextPageToken` of the previous page, to get the next page",
         ),
         ctx: Optional[Context] = None,
     ) -> dict[str, Any]:
-        """
-        List children (files and directories) of a given file id or path.
-
-        """
-        parent_id_or_path = await _resolve_with_mcp_root(parent_id_or_path, ctx)
+        parent_id_or_path = await _resolve_or_hint(
+            parent_id_or_path, ctx, "/<space_name>/<path_to_directory>"
+        )
         return await list_children(
             parent_id_or_path, attributes=attributes, limit=limit, offset=offset, token=token
         )
@@ -368,31 +440,20 @@ def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
     @mcp.tool(name="create_directory", annotations=ToolAnnotations(destructiveHint=True))
     async def mcp_create_directory(
         path: str = Field(
-            description="Path to the directory in format /<space_name>/<path_to_directory>"
+            description="Path of the new directory, /<space_name>/<path_to_directory>"
         ),
         create_parents: bool = Field(
             default=True,
-            description=(
-                "Create missing intermediate directories along the path. Defaults to True."
-            ),
+            description="Create missing parent directories along the path. Defaults to true.",
         ),
         ctx: Optional[Context] = None,
     ) -> dict[str, Any]:
-        """
-        Create a new DIRECTORY at the given path.
+        """Create a directory at the given path. Returns `{fileId, path}` of the new directory.
 
-        Returns ``{fileId, path}`` of the created directory.
-
-        Maps to ``PUT /data/{space_id}/path/{relative}?type=DIR``
-        (Oneprovider 25.0). Raises ``FileExistsError`` if the path
-        already exists.
-
-        Use this whenever you need a directory — never call
-        ``create_file`` with empty content for that purpose.
-
-        See research/empirical-mcp-server-findings.md M-11.
-        """
-        path = await _resolve_with_mcp_root(path, ctx)
+        By default, missing parent directories along the path are created too. Fails if
+        something already exists at the path; when the provider can tell, the error says
+        whether it is a directory or a regular file."""
+        path = await _resolve_or_hint(path, ctx, "/<space_name>/<path_to_directory>")
         return await api_create_directory(path, create_parents=create_parents)
 
     @mcp.tool(name="delete_file", annotations=ToolAnnotations(destructiveHint=True))

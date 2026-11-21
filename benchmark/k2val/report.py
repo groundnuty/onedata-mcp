@@ -7,7 +7,10 @@ failure). Layout, in reading order:
 1. the control (`sonnet-medium`): scenarios where it did not pass are DESIGN SUSPECT, to be
    settled (a wrong tool, scenario or oracle) before any weak-model result is read;
 2. a K2 violation, if any, in large letters (a tool bug, not a model failure);
-3. the raw pass^k table, control column first, the three Haiku efforts side by side;
+2b. NEEDS_REVIEW: every trial whose two answer readings disagree (or whose judge failed), with
+   both readings, the judge's evidence and the outcome each reading would give;
+3. the raw pass^k table, control column first, the three Haiku efforts side by side, with a
+   NEEDS_REVIEW count of its own in each cell;
 4. the Haiku effort comparison;
 5. every non-pass with its diagnosis and the trace lines that show why;
 6. premature claims; tool-call sequences per scenario; wrong arguments; errors tools returned;
@@ -48,18 +51,54 @@ def ordered_models(cfg: K2valConfig, present: set[str]) -> list[str]:
     return out
 
 
-def _cell(rows: list[dict]) -> str:
+def _exact_indices(rows: list[dict], k: int | None) -> bool:
+    """The cell holds the planned trials exactly: indices 0..K-1, each once."""
+    return isinstance(k, int) and sorted(r["trial_ix"] for r in rows) == list(range(k))
+
+
+def _cell(rows: list[dict], k: int | None = None, *, planned: bool = True) -> str:
+    """`passes/judged`, pass^K only when the cell holds exactly the K planned trial indices and
+    every one was judged, then the other outcomes; a NEEDS_REVIEW is never counted as a pass or
+    a fail until it is classified. A planned cell with no trial is MISSING."""
     if not rows:
-        return "-"
+        return "**MISSING**" if planned else "-"
     judged = [r for r in rows if r["outcome"] in JUDGED]
     passes = sum(r["outcome"] == "PASS" for r in judged)
-    extra = Counter(r["outcome"] for r in rows if r["outcome"] not in JUDGED)
+    review = sum(r["outcome"] == "NEEDS_REVIEW" for r in rows)
+    extra = Counter(r["outcome"] for r in rows if r["outcome"] not in (*JUDGED, "NEEDS_REVIEW"))
     text = f"{passes}/{len(judged)}" if judged else "0/0"
-    if judged and len(judged) == len(rows):
-        text += f" (pass^{len(rows)}={int(passes == len(rows))})"
+    if not isinstance(k, int):
+        pass  # no plan recorded: no pass^K, which needs the K planned indices
+    elif not _exact_indices(rows, k):
+        have = len({r["trial_ix"] for r in rows} & set(range(k)))
+        text += f" **INCOMPLETE: {have} of K={k} planned indices, {len(rows)} trial(s)**"
+    elif len(judged) == len(rows):
+        text += f" (pass^{k}={int(passes == k)})"
+    if review:
+        text += f" **+{review} NEEDS_REVIEW**"
     if extra:
         text += " +" + ",".join(f"{n} {k}" for k, n in sorted(extra.items()))
     return text
+
+
+def _review_lines(r: dict) -> list[str]:
+    reading = r.get("answer_reading") or {}
+    verdict = reading.get("judge_verdict") or {}
+    lines = [
+        f"### {r['scenario_id']} / {r['llm_name']} / trial {r['trial_ix']}: NEEDS_REVIEW",
+        f"- deterministic reader: `{reading.get('deterministic')}`",
+        f"- judge ({verdict.get('model')} {verdict.get('effort')}, rubric "
+        f"{verdict.get('rubric_sha')}): `{reading.get('judge')}`"
+        + (f"; judge_error: {reading.get('judge_error')}" if reading.get("judge_error") else ""),
+        f"- judge's evidence: {_short(verdict.get('evidence') or '', 220)!r}"
+        + ("" if verdict.get("evidence_quoted") in (True, None) else " (NOT a quote)"),
+        f"- outcome if each reading decided: {reading.get('outcome_if')}",
+        f"- final answer: {_short(r.get('final_answer') or '(none)', 400)}",
+        "- Classification (which reading is right; then harness bug / deployment artefact / "
+        "tool-attributable / model capability): ",
+        "",
+    ]
+    return lines
 
 
 def _sequence(calls: list[dict]) -> str:
@@ -103,8 +142,15 @@ def _cost_cell(rows: list[dict]) -> str:
 def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | None = None) -> str:
     rows = read_trials(run_dir)
     meta = meta or {}
-    models = ordered_models(cfg, {r["llm_name"] for r in rows})
-    scenarios = [s for s in SCENARIOS if any(r["scenario_id"] == s for r in rows)]
+    # The matrix is the RUN PLAN (every planned config x scenario), with any cell that has
+    # trials but was not planned added; a planned cell with no trial shows as MISSING.
+    planned_models = set(meta.get("models") or [])
+    planned_scenarios = set(meta.get("scenarios") or [])
+    present_models = {r["llm_name"] for r in rows}
+    models = ordered_models(cfg, planned_models | present_models)
+    models += sorted((planned_models | present_models) - set(models))  # not in this config
+    wanted = planned_scenarios | {r["scenario_id"] for r in rows}
+    scenarios = [s for s in SCENARIOS if s in wanted] + sorted(wanted - set(SCENARIOS))
     by = defaultdict(list)
     for r in rows:
         by[(r["llm_name"], r["scenario_id"])].append(r)
@@ -130,13 +176,39 @@ def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | N
     w("")
 
     # 1. control
-    controls = [m for m in models if cfg.models[m].control]
+    controls = [m for m in models if m in cfg.models and cfg.models[m].control]
+    planned_k = meta.get("k")
+
+    def is_planned(m: str, sid: str) -> bool:
+        """In the run plan (run.json's configs x scenarios); with no plan recorded, no cell is
+        known to be planned, so none shows as MISSING."""
+        return m in planned_models and sid in planned_scenarios
+
+    def control_short(c: str, sid: str) -> bool:
+        """The control's cell is not K distinct passing trials (or not K exactly)."""
+        cell = by.get((c, sid), [])
+        if not cell:
+            return is_planned(c, sid)
+        passed = {r["trial_ix"] for r in cell if r["outcome"] == "PASS"}
+        return isinstance(planned_k, int) and (
+            len(passed & set(range(planned_k))) < planned_k or not _exact_indices(cell, planned_k)
+        )
+
     for control in controls:
         suspects = []
+        short: list[str] = []
         for sid in scenarios:
             cell = by.get((control, sid), [])
             if cell and any(r["outcome"] != "PASS" for r in cell):
                 suspects.append(sid)
+            # coverage: DISTINCT trial indices that passed, against the K planned (a trial that
+            # never ran, or ran twice, does not count twice); a planned cell with none: missing
+            if not cell and is_planned(control, sid):
+                short.append(f"{sid} (MISSING)")
+            elif cell and control_short(control, sid):
+                passed = {r["trial_ix"] for r in cell if r["outcome"] == "PASS"}
+                got = len(passed & set(range(planned_k))) if isinstance(planned_k, int) else "?"
+                short.append(f"{sid} ({got}/{planned_k})")
         w(f"## Control: {control}\n")
         if suspects:
             w(
@@ -145,8 +217,14 @@ def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | N
                 + ".** The control did not pass these. Settle a wrong tool, scenario or oracle "
                 "before reading any weak-model result for them.\n"
             )
-        else:
-            w("The control passed every scenario it ran.\n")
+        if short:
+            w(
+                "**CONTROL COVERAGE INCOMPLETE: "
+                + ", ".join(short)
+                + ".** Distinct passing trials against the K planned: re-run the missing ones.\n"
+            )
+        if not suspects and not short:
+            w("The control passed every scenario it ran, K distinct trials each.\n")
 
     # 2. K2 violations
     violations = [r for r in rows if r.get("k2_violations")]
@@ -163,6 +241,19 @@ def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | N
             )
         w("")
 
+    # 2b. NEEDS_REVIEW
+    review = [r for r in rows if r["outcome"] == "NEEDS_REVIEW"]
+    w("## NEEDS_REVIEW (the two answer readings disagree, or the judge failed)\n")
+    if review:
+        w(
+            f"**{len(review)} trial(s) to classify by hand before any figure is read.** No record "
+            "is complete while one remains (design/10, gate 4).\n"
+        )
+        for r in sorted(review, key=lambda r: (r["scenario_id"], r["llm_name"], r["trial_ix"])):
+            out.extend(_review_lines(r))
+    else:
+        w("None.\n")
+
     # 3. pass^k table
     w("## Raw pass^k table (judged trials; other outcomes after the `+`)\n")
     w("| scenario | " + " | ".join(models) + " |")
@@ -170,9 +261,11 @@ def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | N
     for sid in scenarios:
         suspect = any(
             by.get((c, sid)) and any(r["outcome"] != "PASS" for r in by[(c, sid)]) for c in controls
-        )
-        label = f"{sid} {SCENARIOS[sid].title}" + (" **DESIGN SUSPECT**" if suspect else "")
-        w(f"| {label} | " + " | ".join(_cell(by.get((m, sid), [])) for m in models) + " |")
+        ) or any(control_short(c, sid) for c in controls)
+        title = SCENARIOS[sid].title if sid in SCENARIOS else ""
+        label = f"{sid} {title}".rstrip() + (" **DESIGN SUSPECT**" if suspect else "")
+        cells = [_cell(by.get((m, sid), []), planned_k, planned=is_planned(m, sid)) for m in models]
+        w(f"| {label} | " + " | ".join(cells) + " |")
     w("")
 
     # 4. Haiku effort comparison
@@ -182,7 +275,10 @@ def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | N
         w("| scenario | " + " | ".join(haiku) + " |")
         w("|---|" + "---|" * len(haiku))
         for sid in scenarios:
-            w(f"| {sid} | " + " | ".join(_cell(by.get((m, sid), [])) for m in haiku) + " |")
+            cells = [
+                _cell(by.get((m, sid), []), planned_k, planned=is_planned(m, sid)) for m in haiku
+            ]
+            w(f"| {sid} | " + " | ".join(cells) + " |")
         w("")
         w("| config | trials | mean rounds | mean output tokens | mean wall s | cost USD |")
         w("|---|---|---|---|---|---|")
@@ -199,7 +295,7 @@ def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | N
 
     # 5. every non-pass
     w("## Every non-pass\n")
-    bad = [r for r in rows if r["outcome"] != "PASS"]
+    bad = [r for r in rows if r["outcome"] not in ("PASS", "NEEDS_REVIEW")]
     if not bad:
         w("None.\n")
     for r in sorted(bad, key=lambda r: (r["scenario_id"], r["llm_name"], r["trial_ix"])):
@@ -269,7 +365,7 @@ def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | N
     problems = [
         r
         for r in rows
-        if r["outcome"] in ("RESET_FAIL", "ADAPTER_ERROR", "ORACLE_ERROR")
+        if r["outcome"] in ("RESET_FAIL", "ADAPTER_ERROR", "ORACLE_ERROR", "HARNESS_ERROR")
         or r.get("teardown_problems")
         or "writer_error" in (r.get("flags") or [])
     ]

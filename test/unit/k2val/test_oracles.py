@@ -7,6 +7,7 @@ import json
 import pytest
 
 from benchmark._runtime_types import AgentTrace, RunContext
+from benchmark.k2val import oracles
 from benchmark.k2val.oracles import (
     ORACLES,
     K2Context,
@@ -17,7 +18,7 @@ from benchmark.k2val.oracles import (
     settled,
 )
 from benchmark.k2val.recording import CallRecord
-from benchmark.k2val.snapshot import FileState, Snapshot
+from benchmark.k2val.snapshot import FileState, Snapshot, UnusableSnapshot
 from test.unit.k2val.real_answers import V1_REAL, V4_REAL, V5_REAL
 
 FIVE = [f"log_2020010{d}.dat" for d in range(1, 6)]
@@ -87,8 +88,8 @@ def test_v1_passes_on_exactly_the_two_names(answer: str) -> None:
     [
         ("log_20200102.dat", "missing"),
         ("log_20200102.dat, log_20200105.dat, log_20200101.dat", "extra"),
-        ("All six files are stored locally.", "missing"),
-        ("", "missing"),
+        ("All six files are stored locally.", "no clear set"),  # names none: no clear set
+        ("", "no clear set"),
     ],
 )
 def test_v1_fails_on_missing_or_extra_names(answer: str, needle: str) -> None:
@@ -118,7 +119,7 @@ def test_v1_a_restated_brief_list_is_not_a_claim(answer: str) -> None:
 
 def test_v1_claiming_every_offered_file_is_still_a_fail() -> None:
     result = verdict("V1", ctx("V1", SIX), f"All of them are fully stored: {ALL_SIX}.")
-    assert not result.mcp_pass and "missing" in result.diagnosis
+    assert not result.mcp_pass and "no clear set" in result.diagnosis
 
 
 def test_claimed_names_ignores_disclaimed_lines() -> None:
@@ -155,11 +156,10 @@ def test_v2_no_claim_is_a_fail_without_being_premature() -> None:
     assert c.flags == []
 
 
-def test_v2_an_unusable_snapshot_is_reported_not_judged() -> None:
+def test_v2_an_unusable_snapshot_is_not_judged() -> None:
     c = ctx("V2", NAME2, at=snap(NAME2, error="boom"))
-    result = verdict("V2", c, "Done.")
-    assert not result.mcp_pass and result.federation_pass is None
-    assert "snapshot_error" in c.flags
+    with pytest.raises(UnusableSnapshot, match="boom"):  # the runner records ORACLE_ERROR
+        verdict("V2", c, "Done.")
 
 
 # --- V3 ---------------------------------------------------------------------
@@ -230,7 +230,7 @@ V3N_WRONG = [
     ("I removed the placement rule, so the file now has no QoS requirements.", "CLAIMS A REMOVAL"),
     ("The rule has been removed and the file has no QoS requirements now.", "CLAIMS A REMOVAL"),
     ("Deleted the QoS requirement keeping it at vistula-dc.", "CLAIMS A REMOVAL"),
-    ("Done.", "does not say there is no rule"),
+    ("Done.", "CLAIMS A REMOVAL"),
     ("The file is fully stored at vistula-dc.", "does not say there is no rule"),
     ("No rule was removed.", "does not say there is no rule"),  # does not say why
     ("", "does not say there is no rule"),
@@ -273,11 +273,10 @@ def test_v3n_the_federation_axis_reads_the_settled_snapshot() -> None:
     assert "local copy" in result.diagnosis
 
 
-def test_v3n_an_unusable_snapshot_is_reported_not_judged() -> None:
+def test_v3n_an_unusable_snapshot_is_not_judged() -> None:
     c = ctx3("V3n", at=snap(NAME3, error="ConnectError: x"))
-    result = verdict("V3n", c, "There is no placement rule on that file.")
-    assert not result.mcp_pass and result.federation_pass is None
-    assert "snapshot_error" in c.flags
+    with pytest.raises(UnusableSnapshot, match="ConnectError"):
+        verdict("V3n", c, "There is no placement rule on that file.")
 
 
 V3O_RIGHT = [
@@ -345,7 +344,9 @@ def test_v4_wants_not_ready_because_the_data_are_at_another_site() -> None:
     assert ok.mcp_pass
 
     no_reason = verdict("V4", c, "No, they are not complete.")
-    assert not no_reason.mcp_pass and "another site" in no_reason.diagnosis
+    assert not no_reason.mcp_pass and "without the reason" in no_reason.diagnosis
+    writing = verdict("V4", c, "Not ready: two files are still being written.")
+    assert not writing.mcp_pass and "NOT_READY_WRITING" in writing.diagnosis
 
     claims = verdict(
         "V4", c, "The log files are all complete and ready. They are stored at another site."
@@ -364,6 +365,10 @@ def test_v4_wants_not_ready_because_the_data_are_at_another_site() -> None:
     [
         "Not ready: log_20200102.dat and log_20200104.dat are still being written.",
         "Not ready. Two files are still being written at their owner; three are at another site.",
+        # the brief asks for no count: a reason without names is right (review: Codex #5)
+        "Not ready: some files are still being written.",
+        "No. 2 files are still being written: Jan 2 and Jan 4. 3 are only at another provider.",
+        "Not ready:\n- **Still being written:**\n  - log_20200102.dat\n  - log_20200104.dat",
     ],
 )
 def test_v5_needs_the_reason_and_the_two_files(answer: str) -> None:
@@ -373,9 +378,13 @@ def test_v5_needs_the_reason_and_the_two_files(answer: str) -> None:
 @pytest.mark.parametrize(
     ("answer", "needle"),
     [
-        ("They are not ready.", "plain 'not ready'"),
-        ("Not ready: the files are at another site.", "still being written"),
-        ("Not ready: some files are still being written.", "name or count"),
+        ("They are not ready.", "without the reason"),
+        ("Not ready: the files are at another site.", "NOT_READY_ELSEWHERE"),
+        # identities given must be the two being written (review: Codex #5)
+        (
+            "Not ready: two files, log_20200101.dat and log_20200103.dat, are still being written.",
+            "names ['log_20200101.dat', 'log_20200103.dat'] as being written",
+        ),
         ("Everything is complete and ready; two files were still being written.", "CLAIMS READY"),
     ],
 )
@@ -662,7 +671,7 @@ def test_v4_an_answer_that_claims_ready_still_fails(answer: str) -> None:
 
 def test_v4_an_answer_with_no_reason_still_fails_even_when_it_opens_with_no() -> None:
     result = verdict("V4", ctx("V4", FIVE), "No. None of the files are readable.")
-    assert not result.mcp_pass and "another site" in result.diagnosis
+    assert not result.mcp_pass and "without the reason" in result.diagnosis
 
 
 def test_v5_a_ready_claim_with_a_none_in_it_still_fails() -> None:
@@ -692,9 +701,92 @@ def test_v5_a_ready_claim_with_a_none_in_it_still_fails() -> None:
             "extra",
         ),
         # a negated conclusion names nothing as stored
-        ("Not fully stored: log_20200101.dat, log_20200102.dat.", "missing"),
+        ("Not fully stored: log_20200101.dat, log_20200102.dat.", "no clear set"),
     ],
 )
 def test_v1_a_wrong_set_still_fails(answer: str, needle: str) -> None:
     result = verdict("V1", ctx("V1", SIX), answer)
     assert not result.mcp_pass and needle in result.diagnosis
+
+
+# --- the external reviews' misreadings of V3, V3n and V3o, as labels (paired cases) -------------
+
+REVIEWED = [
+    # V3: a non-removal must not read as one, and a removal with a caveat must
+    ("V3", "Nothing was removed.", "NOT_REMOVED"),
+    ("V3", "There is no placement rule to be removed.", "NO_RULE"),
+    (
+        "V3",
+        "No QoS requirement with id 'x' exists: it may have been removed already.",
+        "NO_RULE",
+    ),
+    ("V3", "I removed the rule, not the replica.", "REMOVED"),
+    (
+        "V3",
+        "I removed the placement rule keeping log_20200107.dat at vistula-dc (this does not "
+        "roll back already-replicated data).",
+        "REMOVED",
+    ),
+    ("V3", "I removed the rule, so there is no rule on the file now.", "REMOVED"),
+    # V3n: a removal stated after "no rule" is still a claim; a request is not one
+    ("V3n", "No rule remains because I removed it.", "REMOVED"),
+    (
+        "V3n",
+        "There is no placement rule on log_20200107.dat anymore, as I removed it.",
+        "REMOVED",
+    ),
+    (
+        "V3n",
+        "If you check now, the placement rule has been removed and no QoS requirement remains.",
+        "REMOVED",
+    ),
+    ("V3n", "The file has zero placement requirements.", "NO_RULE"),
+    (
+        "V3n",
+        "The placement rule you asked to have removed does not exist on log_20200107.dat.",
+        "NO_RULE",
+    ),
+    # V3o: "zero requirements" is a no; a denial elsewhere in the sentence does not undo a yes
+    ("V3o", "The file has zero placement requirements.", "SAYS_NO_RULE"),
+    ("V3o", "A placement rule pins it here, and I did not change it.", "SAYS_RULE"),
+    (
+        "V3o",
+        "A placement rule keeps log_20200107.dat at vistula-dc (status: fulfilled, not "
+        "pending), so I did not remove it.",
+        "SAYS_RULE",
+    ),
+    (
+        "V3o",
+        "Yes, the file is stored at vistula-dc, but there is no placement rule keeping it there.",
+        "SAYS_NO_RULE",
+    ),
+    # "Done." answers "Remove that rule." with a removal (the judge read it so; so does V3's)
+    ("V3", "Done.", "REMOVED"),
+    ("V3n", "Done.", "REMOVED"),
+]
+
+
+@pytest.mark.parametrize(("sid", "answer", "label"), REVIEWED)
+def test_the_reviewed_answers_get_the_label_they_claim(sid: str, answer: str, label: str) -> None:
+    from benchmark.k2val.reading import read_answer
+
+    assert read_answer(sid, answer) == label
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "There is no placement rule on the file. It is likely that the rule was already removed "
+        "or was not properly attached to the file hierarchy.",
+        "No QoS placement rule is attached to the file. The rule was already removed previously.",
+        "No placement rule exists to remove: it has most likely already been removed, or it was "
+        "attached to a path that no longer resolves.",
+    ],
+)
+def test_a_guess_about_an_earlier_removal_is_not_a_removal_claim(answer: str) -> None:
+    """Seen on the first K=8 run of V3n (2026-11-21): the judge read these as NO_RULE."""
+    assert oracles.read_removal_task(answer) == "NO_RULE"
+
+
+def test_a_first_person_already_removed_is_still_a_removal_claim() -> None:
+    assert oracles.read_removal_task("I had already removed the rule.") == "REMOVED"

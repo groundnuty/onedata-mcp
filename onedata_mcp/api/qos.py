@@ -18,7 +18,13 @@ from urllib.parse import quote
 
 from onedata_mcp.api.files import _normalize_path_to_file_id
 from onedata_mcp.config import get_oneprovider_config
-from onedata_mcp.utils import OnedataApiError, request
+from onedata_mcp.utils import (
+    OnedataApiError,
+    bound_message,
+    http_failure_message,
+    redact_endpoints,
+    request,
+)
 
 
 async def get_file_qos_summary(file_id_or_path: str) -> dict[str, Any]:
@@ -87,16 +93,20 @@ async def add_qos_requirement(
 async def get_qos_requirement(qos_id: str) -> dict[str, Any]:
     """Return detailed information about a single QoS requirement.
 
-    Response shape (QosRequirement swagger definition):
+    Response shape (Onedata 25.0, as measured live; the swagger example names the expression
+    `qosExpression`, which 25.0 does not send):
         {
           "qosRequirementId": "...",
           "fileId": "...",
-          "qosExpression": "...",
+          "expression": "...",
           "replicasNum": N,
           "status": "fulfilled|pending|impossible"
         }
+
+    The id is stripped of surrounding whitespace, and refused (see `_clean_qos_id`) when it
+    cannot name a requirement.
     """
-    _check_qos_id(qos_id)
+    qos_id = _clean_qos_id(qos_id)
     config = get_oneprovider_config()
     # Percent-encoded, as in remove_qos_requirement: a `?` or `#` would otherwise cut the path.
     response = await request(config, "GET", f"/qos_requirements/{quote(qos_id, safe='')}")
@@ -104,10 +114,10 @@ async def get_qos_requirement(qos_id: str) -> dict[str, Any]:
 
 
 # Where a caller finds a valid id, for the errors below. A model that passed a path, a file id
-# or a stale id needs to know where the current ids are.
+# or a stale id needs to know where the current ids are. The text names no tool: the tool that
+# shows a file's QoS summary may not be offered alongside this one.
 _WHERE_IDS_ARE = (
-    "A file's current QoS requirement ids are the keys of `requirements` in "
-    "get_file_qos_summary's answer for that file."
+    "A file's current QoS requirement ids are the keys of `requirements` in its QoS summary."
 )
 _SHOWN_ID_MAX = 80
 
@@ -119,63 +129,152 @@ def _shown(qos_id: str) -> str:
     return repr(qos_id[:_SHOWN_ID_MAX]) + "..."
 
 
-def _check_qos_id(qos_id: str) -> None:
-    """Refuse, before any request, an id that cannot name a requirement.
+def _clean_qos_id(qos_id: str) -> str:
+    """The id to use: stripped of surrounding whitespace. Refuse, before any request, one that
+    cannot name a requirement.
 
-    The id is otherwise opaque: its alphabet is Onedata's, so nothing stricter is checked
-    here. A `/` makes it a path (a model passing the file it means); `.` and `..` are dot
-    segments, which the HTTP client resolves to another URL (`..` to the API root).
+    The id is otherwise opaque: its alphabet is Onedata's, so nothing stricter than the
+    following is checked. Each refusal says what the value looks like and where the ids are:
+
+    - empty;
+    - a `/`: a path (a model passing the file it means);
+    - `.` or `..`: dot segments, which the HTTP client resolves to another URL (`..` to the
+      API root);
+    - whitespace inside, or a control character;
+    - `=`: a QoS expression, which is not an id;
+    - a backslash: a QoS operator or a Windows path, not part of an id.
     """
     stripped = qos_id.strip()
+    shown = _shown(qos_id)
     if not stripped:
         raise ValueError(f"qos_id is empty. {_WHERE_IDS_ARE}")
-    if "/" in qos_id:
-        raise ValueError(
-            f"qos_id {_shown(qos_id)} is a path, not a QoS requirement id. {_WHERE_IDS_ARE}"
-        )
+    if "/" in stripped:
+        raise ValueError(f"qos_id {shown} is a path, not a QoS requirement id. {_WHERE_IDS_ARE}")
     if stripped in {".", ".."}:
-        raise ValueError(f"qos_id {_shown(qos_id)} is not a QoS requirement id. {_WHERE_IDS_ARE}")
+        raise ValueError(f"qos_id {shown} is not a QoS requirement id. {_WHERE_IDS_ARE}")
+    if any(c.isspace() for c in stripped):
+        raise ValueError(
+            f"qos_id {shown} has whitespace inside, which no QoS requirement id has. "
+            f"{_WHERE_IDS_ARE}"
+        )
+    if not stripped.isprintable():
+        raise ValueError(
+            f"qos_id {shown} has a control character, which no QoS requirement id has. "
+            f"{_WHERE_IDS_ARE}"
+        )
+    if "=" in stripped:
+        raise ValueError(
+            f"qos_id {shown} looks like a QoS expression, not a QoS requirement id. "
+            f"{_WHERE_IDS_ARE}"
+        )
+    if "\\" in stripped:
+        raise ValueError(
+            f"qos_id {shown} has a backslash, which no QoS requirement id has. {_WHERE_IDS_ARE}"
+        )
+    return stripped
+
+
+def _status_of(error: OnedataApiError) -> int | None:
+    response = error.response if isinstance(error.response, dict) else {}
+    status = response.get("status_code")
+    return status if isinstance(status, int) else None
 
 
 def _remove_error_hint(error: OnedataApiError, qos_id: str) -> str | None:
     """What the caller can do about a failed removal, or None to pass the error on unchanged.
 
-    Keyed on the HTTP status the swagger lists for this call (400, 403, 404), with the error
-    id and errno as a fallback; the exact error bodies of 25.0 are not pinned here.
+    A specific diagnosis needs a structured Onedata error (a JSON body whose `error.id` or
+    `error.details.errno` says what happened) on a 4xx status. What a 25.0 provider answers for
+    each case is not pinned here (the swagger lists 400, 403, 404 and 500, each with the generic
+    Error body); the live test prints the real answers. Anything less specific (a bare or HTML
+    404, an unrecognised 400, a 5xx that mentions a missing file) gets a generic hint that keeps
+    the uncertainty and does not say the requirement is gone.
     """
-    response = error.response if isinstance(error.response, dict) else {}
-    status = response.get("status_code")
+    status = _status_of(error)
     shown = _shown(qos_id)
-    if status == 403 or error.error_id == "forbidden" or error.errno in {"eacces", "eperm"}:
+    not_found = error.error_id == "notFound" or error.errno == "enoent"
+    forbidden = error.error_id == "forbidden" or error.errno in {"eacces", "eperm"}
+    client_error = status in {400, 404}
+    if status is not None and 300 <= status < 400:
+        # `request` treats anything outside 2xx as an error, a redirect included; it follows
+        # none, so the removal did not happen as far as anything here can tell.
         return (
-            f"Not allowed to remove QoS requirement {shown}: the token may not manage QoS in "
-            "this space (the space privilege space_manage_qos), or is read-only. Calling "
-            "again, with this id or another, will not help."
+            f"Onedata answered {status}, not 204: this tool does not follow a redirect, so the "
+            f"removal is not confirmed and QoS requirement {shown} may still exist. Check the "
+            f"provider. {_WHERE_IDS_ARE}"
         )
-    if status == 404 or error.error_id == "notFound" or error.errno == "enoent":
+    if status == 403 or (client_error and forbidden):
+        return (
+            f"Not allowed to remove QoS requirement {shown}: the token may lack the privilege to "
+            "manage QoS in the space this requirement belongs to (space_manage_qos), or be "
+            "read-only. Calling again with this id will not help. A requirement in a space where "
+            "the token has that privilege is not affected."
+        )
+    if client_error and not_found:
         return (
             f"No QoS requirement with id {shown} exists: it may have been removed already, "
             f"or the value is not a QoS requirement id (a file id is not one). {_WHERE_IDS_ARE}"
         )
+    if status == 404:
+        return (
+            "Onedata answered 404 without saying the requirement is missing; check the id and "
+            f"the provider. {_WHERE_IDS_ARE}"
+        )
     if status == 400:
-        return f"Onedata rejected {shown} as a QoS requirement id. {_WHERE_IDS_ARE}"
+        return (
+            "Onedata answered 400 without saying the requirement is missing; check that "
+            f"{shown} is a QoS requirement id (a file id is not one) and the provider. "
+            f"{_WHERE_IDS_ARE}"
+        )
+    if status is not None and status >= 500 and not_found:
+        return (
+            f"Onedata answered {status} and mentioned a missing item; that does not show that "
+            "the requirement is gone, so the removal is not confirmed. Check the id and the "
+            f"provider. {_WHERE_IDS_ARE}"
+        )
     return None
 
 
 async def remove_qos_requirement(qos_id: str) -> None:
     """Remove a QoS requirement. Returns None on success (HTTP 204).
 
-    The id is percent-encoded into the path: unencoded, a `?` or `#` in it would cut the path
-    short and remove the requirement named by the part before it. A failure the caller can
-    act on (unknown id, wrong kind of id, no permission) is raised with what to do about it,
-    followed by Onedata's own message.
+    The id is stripped of surrounding whitespace and percent-encoded into the path: unencoded,
+    a `?` or `#` in it would cut the path short and remove the requirement named by the part
+    before it. Only a 204, the one documented success, is a success: a redirect (which is not
+    followed) and a 202 (accepted, not confirmed) are errors that say the removal is not
+    confirmed and the requirement may still exist. A failure the caller can act on (unknown id,
+    wrong kind of id, no permission) is raised with what to do about it, followed by Onedata's
+    own message. The whole message holds no configured host or URL and is bounded.
     """
-    _check_qos_id(qos_id)
+    qos_id = _clean_qos_id(qos_id)
     config = get_oneprovider_config()
+    path = f"/qos_requirements/{quote(qos_id, safe='')}"
     try:
-        await request(config, "DELETE", f"/qos_requirements/{quote(qos_id, safe='')}")
+        response = await request(config, "DELETE", path)
     except OnedataApiError as error:
         hint = _remove_error_hint(error, qos_id)
         if hint is None:
             raise
-        raise OnedataApiError(f"{hint} [{error}]", response=error.response) from error
+        message = bound_message(redact_endpoints(f"{hint} [{error}]", config))
+        raise OnedataApiError(message, response=error.response) from error
+    status = response["status_code"]
+    if status != 204:
+        # 204 is the one documented success. Any other 2xx, a 202 (accepted) above all, does not
+        # say that the requirement is gone: the removal is not confirmed.
+        accepted = (
+            "the removal was accepted but is not confirmed"
+            if status == 202
+            else "the removal is not confirmed"
+        )
+        failure = http_failure_message(
+            config, "DELETE", path, status, None, label="Onedata API answer"
+        )
+        message = (
+            f"Onedata answered {status}{' (accepted)' if status == 202 else ''}, not 204: "
+            f"{accepted}, so QoS requirement {_shown(qos_id)} may still exist. Check the "
+            f"provider. {_WHERE_IDS_ARE} [{failure}]"
+        )
+        raise OnedataApiError(
+            bound_message(redact_endpoints(message, config)),
+            response={"status_code": status, "body": None},
+        )

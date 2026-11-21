@@ -13,6 +13,11 @@ Kinds of file (design/08, Fixtures):
   is confirmed from the blocks.
 - `s0_qos`: an `s0` file with a QoS rule `providerId=<local id>`, waited until it is fulfilled
   and the file is locally covered.
+- Any kind but `s2` may be larger than the standard 256 KiB (`FileSpec.size`): such a file is
+  written in `PART`-sized writes at explicit offsets, so memory stays bounded. The copy scenarios
+  of `schedule_file_replication` (SR1, design/12) use `LARGE_FILE_SIZE`, which takes a transfer
+  a moment (about 2 s on an unloaded 25.0 federation); SR1's oracle therefore asks that a "whole"
+  claim be read off the block map after scheduling, not that the transfer be seen running.
 - `s2`: being written, mirroring the preallocated mode of the reference ingest tool (its
   `preallocate` and `ingestsparse` steps): create at the owner; extend with an EMPTY write at the
   final size (`PUT ...?offset=<size>`, which on 25.0 sets the size and writes no block); write a
@@ -32,7 +37,17 @@ from benchmark.k2val.clock import Clock
 from benchmark.k2val.federation import FedApi, FixtureError
 
 FILE_SIZE = 256 * 1024
+# list_children's largest `limit` (onedata_mcp/modules/files.py): LCp's names must lie beyond it.
+PAGE_LIMIT_MAX = 100
 CHUNK = 64 * 1024
+# SR1's file (design/12, gate 4). Calibrated by the live test (test/live/test_transfer_live.py) on
+# 2026-11-21, unloaded: whole 2.06 s after scheduling, about 62 MiB/s. Kept at 128 MiB by decision:
+# "in transfer" is rarely observable, so SR1 and SR1i fail a "whole" claim not read off the block
+# map after scheduling instead (design/12, "A whole claim is read from the blocks").
+LARGE_FILE_SIZE = 128 * 1024 * 1024
+# A large file's writes. Small enough to finish within the REST client's default 5 s timeout on
+# a CPU-capped provider; if a live write still times out, lower it.
+PART = 4 * 1024 * 1024
 REST_PARTS = (FILE_SIZE - CHUNK) // CHUNK  # parts the background writer writes
 SWEEP_PREFIX = "logs"
 
@@ -47,6 +62,12 @@ def file_name(day: str) -> str:
     return f"log_{day}.dat"
 
 
+def same_mode(seen: object, wanted: str) -> bool:
+    """POSIX permissions as Onedata reports them (an octal string, `"600"` or `"0600"`, per the
+    swagger; unverified on 25.0, which the live test prints) against the octal set."""
+    return isinstance(seen, str) and seen.lstrip("0") == wanted.lstrip("0")
+
+
 def content_for(name: str, size: int = FILE_SIZE) -> bytes:
     """Seeded random bytes: the same name always gives the same content."""
     seed = int.from_bytes(hashlib.sha256(f"k2val:{name}".encode()).digest()[:8], "big")
@@ -57,6 +78,11 @@ def content_for(name: str, size: int = FILE_SIZE) -> bytes:
 class FileSpec:
     day: str  # YYYYMMDD
     kind: Kind = "s0"
+    size: int = FILE_SIZE
+
+    def __post_init__(self) -> None:
+        if self.kind == "s2" and self.size != FILE_SIZE:
+            raise ValueError("an s2 file has the standard size: its writer's parts assume it")
 
     @property
     def name(self) -> str:
@@ -64,10 +90,40 @@ class FileSpec:
 
 
 @dataclass(frozen=True)
+class EntrySpec:
+    """A small file or a directory of the file-tool scenarios (FA, LC and CD; design/13-15), at
+    `path` relative to the trial directory (`calib_runs/log_20200103.dat`).
+
+    Made through the OWNER provider, parents first, with `content` as the whole body. `mode`,
+    when set, is the file's POSIX permissions in octal (`"600"`), set after the write. The trial
+    starts only once the LOCAL provider shows every entry as built: see
+    `FixtureBuilder._wait_local_tree`."""
+
+    path: str
+    kind: Literal["file", "dir"] = "file"
+    content: bytes = b""
+    mode: str | None = None
+
+    @property
+    def name(self) -> str:
+        return self.path.rsplit("/", 1)[-1]
+
+    @property
+    def onedata_type(self) -> str:
+        return "DIR" if self.kind == "dir" else "REG"
+
+
+@dataclass(frozen=True)
 class FixtureSpec:
     files: tuple[FileSpec, ...]
     # seconds after the first model turn at which the background writer finishes
     writer_finish_s: float | None = None
+    # the file-tool scenarios' small files and directories (design/13-15)
+    entries: tuple[EntrySpec, ...] = ()
+    # Names that must NOT be on the trial directory's first page at the listing tool's largest
+    # limit (`PAGE_LIMIT_MAX`), as the local provider lists it: checked before the agent starts,
+    # so that an answer needs a second page whatever order the provider lists in (LCp).
+    beyond_first_page: tuple[str, ...] = ()
 
 
 @dataclass
@@ -180,13 +236,44 @@ class BuiltFixture:
     dir_id: str
     files: dict[str, BuiltFile] = field(default_factory=dict)
     qos_rules: dict[str, str] = field(default_factory=dict)  # file name -> rule id
+    # each file as the local provider reported it before the agent started (`_wait_files_baseline`)
+    files_baseline: dict[str, dict] = field(default_factory=dict)
     writer: ScheduledWriter | None = None
     started_at: float = 0.0
     ready_at: float = 0.0
+    # The file-tool scenarios (design/13-15): the entries made, by relative path -> file id, and
+    # the trial directory's tree as the LOCAL provider showed it before the agent started (the
+    # baseline the oracles compare the end state with; `FedApi.tree`'s form).
+    entries: dict[str, str] = field(default_factory=dict)
+    baseline_tree: dict[str, dict] | None = None
 
     @property
     def dir_path(self) -> str:
         return f"/{self.space}/{self.dir_name}"
+
+    def ids(self) -> dict[str, str]:
+        """File ids by relative path, for a brief that gives an id (`{ids[log_20200102.dat]}`):
+        the entries, the log files, and the trial directory itself (`.`)."""
+        return {".": self.dir_id, **{n: bf.file_id for n, bf in self.files.items()}, **self.entries}
+
+    def baseline(self) -> dict:
+        """The start state the agent got, as the LOCAL provider reported it before the first
+        turn: each log file (`files`, `_wait_files_baseline`) and the trial directory's tree
+        (`tree`, the file-tool scenarios, else None). The artefact's `fixture_baseline`."""
+        return {"files": dict(self.files_baseline), "tree": self.baseline_tree}
+
+
+def _baseline_holds(kind: str, reading: dict, want_qos: tuple[str, ...], size: int) -> bool:
+    """The state a kind of file starts a trial in (see the module docstring), as the local
+    provider's own entry reads it: its size, its blocks and its effective QoS summary. An `s2`
+    file is at its final (preallocated) size with no block here and no rule, like an `s0`."""
+    if not reading["size_known"] or reading["size"] != size:
+        return False
+    if tuple(reading["qos_ids"]) != want_qos:
+        return False
+    if kind in ("s0", "s2"):
+        return reading["local_bytes"] == 0
+    return reading["local_covered"]
 
 
 class FixtureBuilder:
@@ -197,12 +284,14 @@ class FixtureBuilder:
 
     # --- state checks ---------------------------------------------------
 
-    async def _confirm_at_owner(self, file_id: str, name: str, ids: tuple[str, str]) -> None:
+    async def _confirm_at_owner(
+        self, file_id: str, name: str, ids: tuple[str, str], size: int = FILE_SIZE
+    ) -> None:
         owner_id, local_id = ids
 
         async def at_owner_only() -> bool:
             d = await self.fed.distribution("owner", file_id)
-            return d.size == FILE_SIZE and d.covers(owner_id) and d.bytes_of(local_id) == 0
+            return d.size_of(owner_id) == size and d.covers(owner_id) and d.bytes_of(local_id) == 0
 
         await self.fed.wait_until(
             at_owner_only,
@@ -215,7 +304,11 @@ class FixtureBuilder:
 
         async def preallocated() -> bool:
             d = await self.fed.distribution("owner", file_id)
-            return d.size == FILE_SIZE and d.bytes_of(owner_id) == 0
+            return (
+                d.readable(owner_id)
+                and d.size_of(owner_id) == FILE_SIZE
+                and d.bytes_of(owner_id) == 0
+            )
 
         await self.fed.wait_until(
             preallocated,
@@ -228,7 +321,11 @@ class FixtureBuilder:
 
         async def prefix_only() -> bool:
             d = await self.fed.distribution("owner", file_id)
-            return d.size == FILE_SIZE and d.bytes_of(owner_id) == CHUNK
+            return (
+                d.readable(owner_id)
+                and d.size_of(owner_id) == FILE_SIZE
+                and d.bytes_of(owner_id) == CHUNK
+            )
 
         await self.fed.wait_until(
             prefix_only,
@@ -241,7 +338,7 @@ class FixtureBuilder:
             if await self.fed.lookup("local", built.path) != built.file_id:
                 return False
             attrs = await self.fed.attrs("local", built.file_id, ["size"])
-            return bool(attrs) and attrs.get("size") == FILE_SIZE
+            return bool(attrs) and attrs.get("size") == built.spec.size
 
         await self.fed.wait_until(
             sees,
@@ -276,7 +373,7 @@ class FixtureBuilder:
         )
 
         for fs in spec.files:
-            data = content_for(fs.name)
+            data = content_for(fs.name) if fs.size == FILE_SIZE else b""
             file_id = await self.fed.create_reg("owner", fixture.dir_id, fs.name)
             bf = BuiltFile(fs, file_id, f"{fixture.dir_path}/{fs.name}")
             fixture.files[fs.name] = bf
@@ -287,9 +384,14 @@ class FixtureBuilder:
                 await self._confirm_preallocated(file_id, fs.name, ids)
                 await self.fed.put("owner", file_id, data[:CHUNK], 0)
                 await self._confirm_prefix(file_id, fs.name, ids)
-            else:
+            elif fs.size == FILE_SIZE:
                 await self.fed.put("owner", file_id, data, None)  # whole body, no offset
                 await self._confirm_at_owner(file_id, fs.name, ids)
+            else:  # a large file: parts at explicit offsets, each made on its own
+                for offset in range(0, fs.size, PART):
+                    part = content_for(f"{fs.name}@{offset}", min(PART, fs.size - offset))
+                    await self.fed.put("owner", file_id, part, offset)
+                await self._confirm_at_owner(file_id, fs.name, ids, fs.size)
 
         # The agent, the transfer and the QoS rule all work through the LOCAL provider: it must
         # know each file (at its final size) before it is asked to replicate or hold one.
@@ -306,13 +408,63 @@ class FixtureBuilder:
                 fixture.qos_rules[fs.name] = rule
                 await self._wait_rule_fulfilled(bf, rule, local_id)
 
+        if spec.entries:  # the file-tool scenarios (design/13-15)
+            await self._build_entries(fixture, spec.entries, spec.beyond_first_page)
+
         s2 = [fixture.files[f.name] for f in spec.files if f.kind == "s2"]
         if s2 and spec.writer_finish_s is not None:
             fixture.writer = ScheduledWriter(
                 self.fed, s2, spec.writer_finish_s, self.clock, owner_id
             )
+        await self._wait_files_baseline(fixture, spec, local_id)
         fixture.ready_at = self.clock.time()
         return fixture
+
+    async def _wait_files_baseline(
+        self, fixture: BuiltFixture, spec: FixtureSpec, local_id: str
+    ) -> None:
+        """Before the agent starts: each file's state, as the LOCAL provider reports it (its own
+        blocks, the size, the effective QoS summary, read strictly), is the one its kind builds;
+        recorded in `fixture.files_baseline`. A reading that fails or differs is retried until
+        the timeout (a FixtureError, never a trial on an unknown start). `s2` files are recorded
+        only: their writer has not started yet, and their own waits confirmed the prefix."""
+        for fs in spec.files:
+            bf = fixture.files[fs.name]
+            want_qos = (fixture.qos_rules[fs.name],) if fs.name in fixture.qos_rules else ()
+            last: dict[str, dict] = {}
+
+            async def as_built(
+                bf: BuiltFile = bf, kind: str = fs.kind, want_qos=want_qos, last=last
+            ) -> bool:
+                reading = await self._local_reading(bf, local_id)
+                if reading is None:
+                    return False
+                last["reading"] = reading
+                return _baseline_holds(kind, reading, want_qos, bf.spec.size)
+
+            await self.fed.wait_until(
+                as_built,
+                timeout_s=CONFIRM_TIMEOUT_S,
+                what=f"the local provider reports {fs.name} as its kind {fs.kind} builds it "
+                f"(blocks, size, QoS requirements {list(want_qos)})",
+            )
+            fixture.files_baseline[fs.name] = {"kind": fs.kind, **last["reading"]}
+
+    async def _local_reading(self, bf: BuiltFile, local_id: str) -> dict | None:
+        """The local provider's own view of a file, or None while it cannot be read."""
+        try:
+            dist = await self.fed.distribution("local", bf.file_id)
+            qos = await self.fed.qos_ids("local", bf.file_id, missing_ok=False)
+        except Exception:  # noqa: BLE001 - not readable yet; the caller's timeout decides
+            return None
+        return {
+            "size": dist.size_of(local_id),
+            "size_known": dist.readable(local_id),
+            "local_bytes": dist.bytes_of(local_id),
+            "local_covered": dist.covers(local_id),
+            "qos_ids": list(qos),
+            "observed": dist.observed(),
+        }
 
     async def _wait_local_covered(self, bf: BuiltFile, local_id: str) -> None:
         async def covered() -> bool:
@@ -336,20 +488,116 @@ class FixtureBuilder:
             what=f"the placement rule on {bf.name} is fulfilled and the file is locally covered",
         )
 
+    # --- the file-tool scenarios' entries (design/13-15) -----------------
+
+    async def _build_entries(
+        self, fixture: BuiltFixture, entries: tuple[EntrySpec, ...], beyond: tuple[str, ...] = ()
+    ) -> None:
+        """Make each entry through the owner, parents first; then wait until the local provider
+        shows exactly the built tree, and record it as the baseline."""
+        ids = {"": fixture.dir_id}
+        for entry in sorted(entries, key=lambda e: e.path.count("/")):
+            parent, _, name = entry.path.rpartition("/")
+            if parent not in ids:
+                raise FixtureError(f"entry {entry.path}: its parent {parent} is not an entry")
+            if entry.kind == "dir":
+                file_id = await self.fed.mkdir("owner", ids[parent], name)
+            else:
+                file_id = await self.fed.create_reg("owner", ids[parent], name)
+                if entry.content:
+                    await self.fed.put("owner", file_id, entry.content, None)
+                if entry.mode is not None:
+                    await self.fed.set_mode("owner", file_id, entry.mode)
+            ids[entry.path] = file_id
+            fixture.entries[entry.path] = file_id
+        fixture.baseline_tree = await self._wait_local_tree(fixture, entries)
+        if beyond:
+            await self._check_beyond_first_page(fixture, beyond)
+
+    async def _check_beyond_first_page(self, fixture: BuiltFixture, names: tuple[str, ...]) -> None:
+        listed, last = await self.fed.first_page_names("local", fixture.dir_id, PAGE_LIMIT_MAX)
+        on_first = sorted(set(names) & set(listed))
+        if last or on_first:
+            raise FixtureError(
+                f"{fixture.dir_path}: at limit {PAGE_LIMIT_MAX} the local provider's first page "
+                + ("is the last" if last else f"already lists {on_first}")
+                + ": an answer would not need a second page"
+            )
+
+    async def _wait_local_tree(
+        self, fixture: BuiltFixture, entries: tuple[EntrySpec, ...]
+    ) -> dict[str, dict]:
+        """The local provider's tree of the trial directory, once it is exactly the one built:
+        the same paths and ids, each of the built type, size and mode. A listing that fails
+        meanwhile is retried until the timeout (a FixtureError, never an empty baseline)."""
+        expected = {e.path: e for e in entries}
+        tree: dict[str, dict] = {}
+
+        async def as_built() -> bool:
+            nonlocal tree
+            try:
+                tree = await self.fed.tree("local", fixture.dir_id)
+            except Exception:  # noqa: BLE001 - not visible yet; the wait's timeout decides
+                return False
+            if set(tree) != set(expected):
+                return False
+            for path, entry in expected.items():
+                seen = tree[path]
+                if seen["fileId"] != fixture.entries[path] or seen["type"] != entry.onedata_type:
+                    return False
+                if entry.kind == "file" and seen.get("size") != len(entry.content):
+                    return False
+                if entry.mode is not None and not same_mode(seen.get("mode"), entry.mode):
+                    return False
+            # Each small file's bytes, read back at the local provider (status 200, the length
+            # written), must be the bytes written: a wrong start is the fixture's, never a model's.
+            for path, entry in expected.items():
+                if entry.kind != "file" or not entry.content:
+                    continue
+                try:
+                    data = await self.fed.content("local", fixture.entries[path])
+                except Exception:  # noqa: BLE001 - not readable yet; the timeout decides
+                    return False
+                if data != entry.content:
+                    return False
+                tree[path]["sha256"] = hashlib.sha256(data).hexdigest()
+            return True
+
+        await self.fed.wait_until(
+            as_built,
+            timeout_s=LOCAL_SEES_TIMEOUT_S,
+            what=f"the local provider shows the {len(expected)} entries built in "
+            f"{fixture.dir_path} (types, sizes, modes, and each small file's bytes read back)",
+        )
+        return tree
+
     # --- reset ----------------------------------------------------------
 
-    async def purge_dir(self, dir_id: str) -> list[str]:
-        """Delete the QoS rules on a directory's files, then the directory. Returns problems."""
+    async def purge_dir(self, dir_id: str, tracked_rules: tuple[str, ...] = ()) -> list[str]:
+        """Delete the QoS rules the fixture made (`tracked_rules`) and any rule set ON one of the
+        directory's own entries, then the entries and the directory. Returns problems.
+
+        A file's QoS summary is effective: it also lists rules inherited from its ancestors, up
+        to the space root. A rule found there is deleted only when its own `fileId` is the entry
+        itself, so a rule set anywhere above the trial is not touched here (the space root's own
+        rules are `purge_root_rules`')
+        """
         problems: list[str] = []
         ids = [dir_id]
         try:
             ids.extend(k["fileId"] for k in await self.fed.children("owner", dir_id))
         except Exception as e:  # noqa: BLE001
             problems.append(f"list {type(e).__name__}: {e}")
+        for qid in tracked_rules:
+            try:
+                await self.fed.delete_qos("local", qid)
+            except Exception as e:  # noqa: BLE001
+                problems.append(f"qos {type(e).__name__}: {e}")
         for fid in ids:
             try:
                 for qid in await self.fed.qos_ids("local", fid):
-                    await self.fed.delete_qos("local", qid)
+                    if qid not in tracked_rules and await self.fed.qos_file_id("local", qid) == fid:
+                        await self.fed.delete_qos("local", qid)
             except Exception as e:  # noqa: BLE001
                 problems.append(f"qos {type(e).__name__}: {e}")
         for fid in ids[1:]:
@@ -370,15 +618,32 @@ class FixtureBuilder:
             problems.append(f"absent {type(e).__name__}: {e}")
         return problems
 
+    async def purge_root_rules(self) -> list[str]:
+        """Delete every QoS rule ATTACHED to the space root (its own `fileId` is the root): a
+        model's debris that every later file of the space would inherit, so that every later
+        fixture would fail its start state. Rules attached anywhere else are left alone."""
+        problems: list[str] = []
+        try:
+            root_id = await self.fed.lookup("owner", f"/{self.space}")
+            if root_id is None:
+                return [f"space {self.space} not found at the owner provider"]
+            for qid in await self.fed.qos_ids("local", root_id):
+                if await self.fed.qos_file_id("local", qid) == root_id:
+                    await self.fed.delete_qos("local", qid)
+        except Exception as e:  # noqa: BLE001
+            problems.append(f"root qos {type(e).__name__}: {e}")
+        return problems
+
     async def sweep_space(self) -> list[str]:
-        """Once per config at run start: delete every `logs` / `logs-*` directory left in the
-        space by an earlier run (with the QoS rules on its files), and wait until the owner
-        answers the old ids absent. Per-trial teardown touches only the trial's own directory,
-        so two trials of one config never wipe each other's live fixture."""
+        """Once per config at run start: delete the QoS rules attached to the space root, and
+        every `logs` / `logs-*` directory left in the space by an earlier run (with the QoS
+        rules on its files), and wait until the owner answers the old ids absent. Per-trial
+        teardown touches only the trial's own directory and the root's rules, so two trials of
+        one config never wipe each other's live fixture."""
         root_id = await self.fed.lookup("owner", f"/{self.space}")
         if root_id is None:
             raise FixtureError(f"space {self.space} not found at the owner provider")
-        problems: list[str] = []
+        problems: list[str] = await self.purge_root_rules()
         for kid in await self.fed.children("owner", root_id):
             name = kid.get("name", "")
             if kid.get("type") == "DIR" and (
@@ -390,4 +655,5 @@ class FixtureBuilder:
     async def teardown(self, fixture: BuiltFixture) -> list[str]:
         if fixture.writer is not None:
             await fixture.writer.stop()
-        return await self.purge_dir(fixture.dir_id)
+        problems = await self.purge_dir(fixture.dir_id, tuple(fixture.qos_rules.values()))
+        return problems + await self.purge_root_rules()

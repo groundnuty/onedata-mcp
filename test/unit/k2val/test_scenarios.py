@@ -9,7 +9,7 @@ import pytest
 
 from benchmark.k2val.config import K1_TOOLS, K2_TOOLS
 from benchmark.k2val.oracles import ORACLES
-from benchmark.k2val.scenarios import SCENARIOS, parse_scenarios
+from benchmark.k2val.scenarios import SCENARIOS, Scenario, parse_scenarios
 
 DIR = "/k2val-x/logs-v-x-k0-abc123"
 
@@ -86,8 +86,28 @@ def test_v3o_asks_a_question_and_asks_for_no_change() -> None:
     assert SCENARIOS["V3o"].tier == "K1" and "remove_qos_requirement" in K1_TOOLS
 
 
-def test_the_variants_need_nothing_to_settle() -> None:
-    assert SCENARIOS["V3n"].settle == SCENARIOS["V3o"].settle == "none"
+def test_the_variants_are_restraint_scenarios_read_again_after_their_window() -> None:
+    for sid in ("V3n", "V3o"):
+        s = SCENARIOS[sid]
+        assert (s.settle, s.restraint, s.settle_s) == ("quiet", True, 60.0)
+
+
+RESTRAINT = {
+    *("V1", "V3n", "V3o", "V4", "V5", "SR1n", "SR1o"),
+    *("FA", "FAi", "FAn", "LC", "LCn", "LCo", "LCp", "CDn"),
+}
+
+
+def test_every_scenario_where_nothing_should_change_is_a_restraint_scenario() -> None:
+    assert {sid for sid, s in SCENARIOS.items() if s.restraint} >= RESTRAINT
+    for sid in RESTRAINT:
+        s = SCENARIOS[sid]
+        assert s.settle == "quiet" and 30.0 <= s.settle_s <= 60.0, sid
+
+
+def test_a_restraint_scenario_must_wait_out_its_window() -> None:
+    with pytest.raises(ValueError, match="quiet"):
+        Scenario("X", "x", "K1", "b", SCENARIOS["V1"].fixture, restraint=True)
 
 
 def test_the_variants_are_named_and_outside_the_v1_v7_range() -> None:

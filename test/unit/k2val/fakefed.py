@@ -40,6 +40,9 @@ class Node:
     size: int = 0
     blocks: dict[str, list[list[int]]] = field(default_factory=dict)
     local_lag: int = 0  # lookups at the local provider that still fail
+    # the file-tool scenarios (design/13-15)
+    mode: str = "664"
+    data: bytes = b""
 
 
 class FakeClock:
@@ -72,6 +75,7 @@ class FakeFed:
         self.local_lag = 0  # lag given to every new node at the local provider
         self.unexpected: list[str] = []
         self.fail_owner_distribution = False
+        self.offset_with_token = 0  # listings that sent both (25.0 rejects them)
         self._seq = 0
 
     # --- helpers --------------------------------------------------------
@@ -126,9 +130,13 @@ class FakeFed:
             obj["ticks"] += 1
             if obj["ticks"] >= self.replication_ticks:
                 node = self.nodes.get(obj["fileId"])
-                if node is not None:
+                is_transfer = obj in self.transfers.values()
+                # A transfer copies to its target. A copy to the owner, which already holds the
+                # data, changes nothing; rules here are always `providerId=<local>`.
+                target = obj.get("replicatingProviderId", LOCAL_ID) if is_transfer else LOCAL_ID
+                if node is not None and target == LOCAL_ID:
                     node.blocks[LOCAL_ID] = [list(b) for b in node.blocks.get(OWNER_ID, [])]
-                obj["status"] = "completed" if obj in self.transfers.values() else "fulfilled"
+                obj["status"] = "completed" if is_transfer else "fulfilled"
 
     # --- routing --------------------------------------------------------
 
@@ -164,12 +172,19 @@ class FakeFed:
             return httpx.Response(200, json=[])
         if m == "POST" and rest.startswith("/lookup-file-id/"):
             return self._lookup(provider, unquote(rest[len("/lookup-file-id/") :]))
+        raw_rest = request.url.raw_path.decode().split("?", 1)[0][len(API) :]
+        if m == "PUT" and (mm := re.fullmatch(r"/data/([^/]+)/path/(.+)", raw_rest)):
+            return self._create_at_path(provider, unquote(mm[1]), mm[2], q, request.content)
         if mm := re.fullmatch(r"/data/([^/]+)/children", rest):
             if m == "POST":
-                return self._create(mm[1], q)
+                return self._create(mm[1], q, request.content)
             return self._children(mm[1], body)
         if mm := re.fullmatch(r"/data/([^/]+)/content", rest):
+            if m == "GET":
+                return self._content(mm[1])
             return self._put(provider, mm[1], q, request.content)
+        if m == "GET" and (mm := re.fullmatch(r"/data/([^/]+)/files", rest)):
+            return self._files(mm[1], body)
         if mm := re.fullmatch(r"/data/([^/]+)/distribution", rest):
             return self._distribution(provider, mm[1])
         if mm := re.fullmatch(r"/data/([^/]+)/qos/summary", rest):
@@ -177,6 +192,8 @@ class FakeFed:
         if mm := re.fullmatch(r"/data/([^/]+)", rest):
             if m == "DELETE":
                 return self._delete(mm[1])
+            if m == "PUT":
+                return self._set_attrs(mm[1], body)
             return self._attrs(mm[1], body)
         if m == "POST" and rest == "/qos_requirements":
             return self._qos_post(body)
@@ -186,6 +203,8 @@ class FakeFed:
             return self._transfer_post(body)
         if mm := re.fullmatch(r"/transfers/([^/]+)", rest):
             return self._transfer_get(mm[1])
+        if m == "GET" and (mm := re.fullmatch(r"/spaces/([^/]+)", rest)) and mm[1] in self.roots:
+            return self._space(mm[1])
         self.unexpected.append(f"{m} {request.url}")
         return error(404)
 
@@ -209,7 +228,7 @@ class FakeFed:
             return error(400)
         return httpx.Response(200, json={"fileId": node.fid})
 
-    def _create(self, parent: str, q: dict) -> httpx.Response:
+    def _create(self, parent: str, q: dict, data: bytes = b"") -> httpx.Response:
         if parent not in self.nodes:
             return error(400)
         if any(k.name == q["name"] for k in self.kids(parent)):
@@ -217,13 +236,46 @@ class FakeFed:
         kind = q.get("type", "REG")
         fid = self.new_id("dir" if kind == "DIR" else "file")
         self.nodes[fid] = Node(fid, q["name"], parent, kind, local_lag=self.local_lag)
+        if kind == "REG" and data:
+            self.nodes[fid].data = data
+            self.nodes[fid].size = len(data)
         return httpx.Response(201, json={"fileId": fid})
 
     def _children(self, fid: str, body: dict) -> httpx.Response:
-        if fid not in self.nodes:
+        """One page, in name order, as 25.0 documents it: `limit`, then `token` (from the
+        previous page) or `offset`, never both. A regular file lists itself as its only entry,
+        not an error (measured on 25.0)."""
+        node = self.nodes.get(fid)
+        if node is None:
             return error(400)
-        kids = [{"fileId": k.fid, "name": k.name, "type": k.kind} for k in self.kids(fid)]
-        return httpx.Response(200, json={"children": kids, "isLast": True, "nextPageToken": None})
+        if node.kind != "DIR":
+            attributes = body.get("attributes") or ["fileId", "name", "type"]
+            return httpx.Response(
+                200,
+                json={
+                    "children": [{a: self._attr(node, a) for a in attributes}],
+                    "isLast": True,
+                    "nextPageToken": None,
+                },
+            )
+        if "token" in body and "offset" in body:
+            self.offset_with_token += 1
+            return httpx.Response(
+                400, json={"error": {"id": "badValue", "details": {"key": "offset"}}}
+            )
+        kids = sorted(self.kids(fid), key=lambda k: k.name)
+        start = (
+            int(body["token"].removeprefix("tok-")) if "token" in body else body.get("offset", 0)
+        )
+        limit = body.get("limit", 1000)
+        page = kids[start : start + limit]
+        attributes = body.get("attributes") or ["fileId", "name", "type"]
+        children = [{a: self._attr(k, a) for a in attributes} for k in page]
+        last = start + limit >= len(kids)
+        token = None if last else f"tok-{start + limit}"
+        return httpx.Response(
+            200, json={"children": children, "isLast": last, "nextPageToken": token}
+        )
 
     def _put(self, provider: str, fid: str, q: dict, data: bytes) -> httpx.Response:
         node = self.nodes.get(fid)
@@ -241,6 +293,7 @@ class FakeFed:
         )
         if offset is None:  # no offset: truncate to 0, then write
             node.size = len(data)
+            node.data = data
             node.blocks = {provider: [[0, len(data)]] if data else []}
         elif not data:  # empty write at an offset: sets the size, writes no block
             node.size = max(node.size, offset)
@@ -271,20 +324,101 @@ class FakeFed:
             }
         return httpx.Response(200, json={"type": "REG", "distributionPerProvider": per})
 
-    def _attrs(self, fid: str, body: dict) -> httpx.Response:
-        node = self.nodes.get(fid)
-        if node is None:
-            return error(400)
+    def _attr(self, node: Node, name: str):
         full = {
             "fileId": node.fid,
             "name": node.name,
             "type": node.kind,
-            "size": node.size,
+            "size": node.size if node.kind == "REG" else None,
             "path": self.path_of(node),
+            "posixPermissions": node.mode,
+            "atime": 1_700_000_000,
+            "mtime": 1_700_000_000,
             "isFullyReplicatedLocally": self.covered(node.blocks.get(LOCAL_ID, []), node.size)
             >= node.size,
         }
-        return httpx.Response(200, json={a: full.get(a) for a in body.get("attributes", full)})
+        return full.get(name)
+
+    def _attrs(self, fid: str, body: dict) -> httpx.Response:
+        node = self.nodes.get(fid)
+        if node is None:
+            return error(400)
+        names = body.get("attributes") or ["fileId", "name", "type", "size", "path"]
+        return httpx.Response(200, json={a: self._attr(node, a) for a in names})
+
+    # --- the file-tool scenarios (design/13-15) ---------------------------
+
+    def _files(self, fid: str, body: dict) -> httpx.Response:
+        """`GET /data/{id}/files`: every regular file under the directory, at any depth, with
+        its path relative to it (one page; no directories, as on 25.0)."""
+        root = self.nodes.get(fid)
+        if root is None or root.kind != "DIR":
+            return error(400)
+        prefix = self.path_of(root) + "/"
+        found = [
+            n for n in self.nodes.values() if n.kind == "REG" and self.path_of(n).startswith(prefix)
+        ]
+        attributes = body.get("attributes") or ["path", "name", "type", "size"]
+        files = []
+        for node in sorted(found, key=self.path_of):
+            entry = {a: self._attr(node, a) for a in attributes}
+            entry["path"] = self.path_of(node).removeprefix(prefix)
+            files.append(entry)
+        return httpx.Response(200, json={"files": files, "isLast": True, "nextPageToken": None})
+
+    def _set_attrs(self, fid: str, body: dict) -> httpx.Response:
+        node = self.nodes.get(fid)
+        if node is None:
+            return error(400)
+        if set(body) != {"posixPermissions"}:
+            return httpx.Response(400, json={"error": {"id": "badValue"}})
+        node.mode = body["posixPermissions"]
+        return httpx.Response(204)
+
+    def _content(self, fid: str) -> httpx.Response:
+        node = self.nodes.get(fid)
+        if node is None or node.kind != "REG":
+            return error(400)
+        return httpx.Response(
+            200, content=node.data, headers={"Content-Type": "application/octet-stream"}
+        )
+
+    def _create_at_path(
+        self, provider: str, base: str, raw: str, q: dict, data: bytes
+    ) -> httpx.Response:
+        """`PUT /data/{base}/path/{rel}?type=..&create_parents=..` (swagger
+        create_file_at_path): parents made when asked, eexist on any existing last segment,
+        eacces when a parent on the path is a regular file (measured on 25.0, which does not
+        send enotdir)."""
+        if base not in self.nodes:
+            return error(400)
+        names = [unquote(part) for part in raw.split("/")]
+        if any(n in ("", ".", "..") for n in names):
+            return httpx.Response(
+                400, json={"error": {"id": "badValue", "details": {"key": "path"}}}
+            )
+        current = base
+        for name in names[:-1]:
+            found = next((k for k in self.kids(current) if k.name == name), None)
+            if found is None:
+                if q.get("create_parents") != "true":
+                    return error(400, "enoent")
+                found = Node(self.new_id("dir"), name, current, "DIR")
+                self.nodes[found.fid] = found
+            elif found.kind != "DIR":
+                return error(400, "eacces")
+            current = found.fid
+        if any(k.name == names[-1] for k in self.kids(current)):
+            return error(400, "eexist")
+        kind = q.get("type", "REG")
+        fid = self.new_id("dir" if kind == "DIR" else "file")
+        node = Node(fid, names[-1], current, kind, local_lag=self.local_lag)
+        if kind == "REG":
+            node.data = data
+            node.size = len(data)
+            node.blocks = {provider: [[0, len(data)]] if data else []}
+        self.nodes[fid] = node
+        return httpx.Response(201, json={"fileId": fid})
 
     def _delete(self, fid: str) -> httpx.Response:
         if fid not in self.nodes:
@@ -296,10 +430,21 @@ class FakeFed:
             self.nodes.pop(cur, None)
         return httpx.Response(204)
 
+    def lineage(self, fid: str) -> set[str]:
+        """The node and its ancestors, up to the space root."""
+        out: set[str] = set()
+        cur = self.nodes.get(fid)
+        while cur is not None and cur.fid not in out:
+            out.add(cur.fid)
+            cur = self.nodes.get(cur.parent) if cur.parent else None
+        return out
+
     def _qos_summary(self, fid: str) -> httpx.Response:
         if fid not in self.nodes:
             return error(400)
-        reqs = {q: r["status"] for q, r in self.rules.items() if r["fileId"] == fid}
+        # effective, as Onedata's: the node's own rules and those inherited from its ancestors
+        lineage = self.lineage(fid)
+        reqs = {q: r["status"] for q, r in self.rules.items() if r["fileId"] in lineage}
         return httpx.Response(200, json={"requirements": reqs, "status": "fulfilled"})
 
     def _qos_post(self, body: dict) -> httpx.Response:
@@ -319,13 +464,42 @@ class FakeFed:
             json={
                 "qosRequirementId": qid,
                 "fileId": rule["fileId"],
-                "qosExpression": rule["expression"],
+                "expression": rule["expression"],  # 25.0's name, not the swagger's
                 "replicasNum": rule["replicasNum"],
                 "status": rule["status"],
             },
         )
 
+    # Provider names, as the space's providers list them (`GET /spaces/{id}`); here a space's
+    # id is its name.
+    PROVIDER_NAMES = {LOCAL_ID: "vistula-dc", OWNER_ID: "nordic-marine-dc"}
+
+    def space_of(self, fid: str) -> str | None:
+        root = next((n for n in map(self.nodes.get, self.lineage(fid)) if n and not n.parent), None)
+        return root.name if root is not None else None
+
+    def _space(self, space: str) -> httpx.Response:
+        providers = [{"providerId": p, "providerName": n} for p, n in self.PROVIDER_NAMES.items()]
+        return httpx.Response(200, json={"spaceId": space, "name": space, "providers": providers})
+
     def _transfer_post(self, body: dict) -> httpx.Response:
+        """As 25.0 is expected to answer (unverified; the live test prints the real bodies): an
+        unknown file is a 404, a target outside the space's providers a 400 naming the space."""
+        if body.get("fileId") not in self.nodes:
+            return error(404)
+        target = body.get("replicatingProviderId")
+        if target not in self.PROVIDER_NAMES:
+            details = {"spaceId": self.space_of(body["fileId"]), "providerId": target}
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "id": "spaceNotSupportedBy",
+                        "details": details,
+                        "description": f"Space is not supported by provider {target}.",
+                    }
+                },
+            )
         tid = self.new_id("t")
         self.transfers[tid] = {**body, "status": "pending", "ticks": 0}
         return httpx.Response(201, json={"transferId": tid})

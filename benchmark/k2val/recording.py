@@ -51,7 +51,8 @@ class RecordingApp:
         self.calls: list[CallRecord] = []
 
     async def list_tools(self) -> list[Any]:
-        return await self._app.list_tools()
+        """The scenario's tools only: a model never sees a tool it may not call."""
+        return [t for t in await self._app.list_tools() if t.name in self.allowed]
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         record = CallRecord(

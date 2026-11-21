@@ -19,6 +19,24 @@ KEY_LLMLAB = "lk-SECRET-key-44cd"
 
 
 @pytest.fixture(autouse=True)
+def _never_the_real_judge(monkeypatch: pytest.MonkeyPatch):
+    """A unit test never calls the real judge (design/08): its one call path raises. Tests of
+    the judge's retry and error handling override `_ask` in a subclass, which this leaves be."""
+    from benchmark.k2val import judge
+
+    reached: list[str] = []
+
+    async def refuse(self, spec, system, prompt):
+        reached.append(prompt[:60])
+        raise AssertionError("a unit test reached the real judge")
+
+    monkeypatch.setattr(judge.ClaudeSdkJudge, "_ask", refuse)
+    yield
+    # the judge turns a raised error into a verdict's judge_error, so check after the test too
+    assert reached == [], f"a unit test reached the real judge: {reached}"
+
+
+@pytest.fixture(autouse=True)
 def _masker():
     MASKER.clear()
     yield
@@ -54,7 +72,9 @@ def raw_config(secret_files: dict[str, Path]) -> dict:
                 "token_file": str(secret_files["owner"]),
             },
         },
-        "run": {"settle_s": 30, "wall_cap_s": 5, "tool_call_cap_s": 5},
+        # wall_cap_s: far above any trial's own time on a loaded host (a 5 s cap failed a real-
+        # tool trial at a load of 15); the tests of the cap set their own (0.2-0.3 s)
+        "run": {"settle_s": 30, "wall_cap_s": 120, "tool_call_cap_s": 5},
         "spend": {"cap_usd": 1.0, "reserve_usd": 0.5},
         "models": {
             "sonnet-medium": {
@@ -145,3 +165,17 @@ def api(fed: FakeFed, clock: FakeClock) -> FedApi:
         clock=clock,
         poll_s=1.0,
     )
+
+
+@pytest.fixture
+def tools_app(monkeypatch: pytest.MonkeyPatch):
+    """The in-process server with the real tool modules, pointed at the fake local provider
+    (the file-tool scenarios' full trials, test_scenarios_{fa,lc,cd}.py)."""
+    from benchmark.k2val.app import build_app
+
+    monkeypatch.setenv("ONEDATA_ONEPROVIDER_HOST", LOCAL_HOST)
+    monkeypatch.setenv("ONEDATA_ONEPROVIDER_TOKEN", TOKEN_LOCAL)
+    monkeypatch.setenv("ONEDATA_ONEZONE_HOST", ZONE_HOST)
+    monkeypatch.setenv("ONEDATA_ONEZONE_TOKEN", TOKEN_LOCAL)
+    monkeypatch.setenv("ONEDATA_ALLOW_INSECURE_TLS", "false")
+    return build_app()
