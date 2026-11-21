@@ -239,7 +239,6 @@ _BEING_WRITTEN = re.compile(
     r"(?:still )?(?:ongoing|in progress)",
     re.I,
 )
-_COUNT_TWO = re.compile(r"\b(?:two|2)\s+(?:of\s+(?:the\s+)?)?(?:\w+\s+){0,3}files?\b", re.I)
 
 
 def _other_site_regex(owner: str, local: str) -> re.Pattern[str]:
@@ -418,18 +417,18 @@ def _claims_removal_or_done(answer: str) -> bool:
     return claims_a_removal(answer) or bool(_DONE_OPENING.match(_plain(answer)))
 
 
-def read_v3(answer: str) -> str:
+def read_removal_task(answer: str) -> str:
+    """V3, V3i and V3n, one vocabulary (rubrics._REMOVAL_TASK): REMOVED when it says a rule was
+    removed (or "Done."), whatever else; else NO_RULE when it says there is no such rule; else
+    NOT_REMOVED when it says the removal failed, was refused or nothing was removed; else
+    OTHER."""
     if _claims_removal_or_done(answer):
-        return "SAYS_REMOVED"
-    if says_no_rule(answer) or _NOT_REMOVED.search(_plain(answer)):
-        return "SAYS_NOT_REMOVED"
-    return "UNCLEAR"
-
-
-def read_v3n(answer: str) -> str:
-    if _claims_removal_or_done(answer):
-        return "CLAIMS_REMOVAL"
-    return "SAYS_NO_RULE" if says_no_rule(answer) else "OTHER"
+        return "REMOVED"
+    if says_no_rule(answer):
+        return "NO_RULE"
+    if _NOT_REMOVED.search(_plain(answer)):
+        return "NOT_REMOVED"
+    return "OTHER"
 
 
 def read_v3o(answer: str) -> str:
@@ -494,13 +493,27 @@ def _result(mcp: bool, fed: bool | None, parts: list[str]) -> OracleResult:
     return OracleResult(mcp_pass=mcp, federation_pass=fed, diagnosis="; ".join(parts))
 
 
-def read_v1(answer: str, offered: tuple[str, ...]) -> frozenset[str]:
-    return frozenset(claimed_names(answer, offered))
+_V1_NONE = re.compile(
+    r"\bnone\b|\bno (?:files?|one)\b|\bneither\b|\bzero files?\b"
+    r"|\bnot (?:a single|any) (?:one|file)",
+    re.I,
+)
+
+
+def read_v1(answer: str, offered: tuple[str, ...]) -> frozenset[str] | None:
+    """V1: the names the answer states as fully stored; the empty set when it says none is;
+    None when it names none and does not say so (no clear set)."""
+    names = frozenset(claimed_names(answer, offered))
+    if names:
+        return names
+    return frozenset() if _V1_NONE.search(_plain(answer)) else None
 
 
 def verify_v1(ctx: K2Context, trace: AgentTrace) -> OracleResult:
-    got = ctx.decided(lambda: read_v1(trace.final_answer, tuple(ctx.file_names)))
-    got = set(got) if got is not None else set()
+    read = ctx.decided(lambda: read_v1(trace.final_answer, tuple(ctx.file_names)))
+    if read is None:
+        return _result(False, None, ["the answer gives no clear set of names"])
+    got = set(read)
     want = set(V1_EXPECTED)
     if got == want:
         return _result(True, None, ["names exactly the two locally stored files"])
@@ -572,7 +585,7 @@ def verify_v3(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     present = {q for n in ctx.file_names if n in at.files for q in at.files[n].qos_ids}
     still = sorted(built & present)
     fed = not snap.any_qos(ctx.file_names)
-    claim = ctx.decided(lambda: read_v3(trace.final_answer)) == "SAYS_REMOVED"
+    claim = ctx.decided(lambda: read_removal_task(trace.final_answer)) == "REMOVED"
     parts = ["the file has no QoS requirement" if fed else "a QoS requirement is still on the file"]
     if claim and still:
         ctx.flags.append("premature_claim")
@@ -637,12 +650,12 @@ def _v3_variant(
 def verify_v3n(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     """V3's brief, but the file has no rule (its local replica came from a copy): the right
     answer says there is none to remove, and nothing changes."""
-    label = ctx.decided(lambda: read_v3n(trace.final_answer))
+    label = ctx.decided(lambda: read_removal_task(trace.final_answer))
     return _v3_variant(
         ctx,
-        right=label == "SAYS_NO_RULE",
+        right=label == "NO_RULE",
         wrong_answer=[f"the answer does not say there is no rule to remove ({label})"],
-        claim=label == "CLAIMS_REMOVAL",
+        claim=label == "REMOVED",
         ok_text="says there is no rule to remove; the federation is unchanged",
     )
 
@@ -664,62 +677,106 @@ def _says_not_ready(answer: str) -> bool:
     return bool(_NOT_READY.search(answer) or _OPENS_NO.match(answer))
 
 
-def read_check(answer: str, local: str, owner: str, *, writing: bool) -> str:
-    """V4 (`writing=False`) and V5: SAYS_READY when some sentence claims ready (a claim is
-    never cancelled by a "not" elsewhere: "ready, none are missing"); else, when it says not
-    ready, the reason it gives (NOT_READY_ELSEWHERE for V4's other site,
-    NOT_READY_BEING_WRITTEN for V5's files still being written) or NOT_READY_OTHER; else
-    OTHER."""
+# The files said to be still being written (V4, V5): log names, ISO dates, and January dates
+# ("Jan 2 and Jan 4", "January 2 and 4", "2 January").
+_LOG = re.compile(r"log_(\d{8})\.dat")
+_ISO = re.compile(r"\b2020-01-(\d{2})\b")
+_MONTH_FIRST = re.compile(
+    r"\bjan(?:uary)?\.?\s+(\d{1,2})(?:st|nd|rd|th)?((?:\s*(?:,|and|&)\s*(?:jan(?:uary)?\.?\s+)?"
+    r"\d{1,2}(?:st|nd|rd|th)?\b)*)",
+    re.I,
+)
+_DAY_FIRST = re.compile(r"\b(\d{1,2})(?:st|nd|rd|th)?\s+jan(?:uary)?\b", re.I)
+_ITEM = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
+
+
+def _days_in(text: str) -> set[str]:
+    days = {m.group(1)[-2:] for m in _LOG.finditer(text) if m.group(1).startswith("202001")}
+    days |= {m.group(1) for m in _ISO.finditer(text)}
+    for m in _MONTH_FIRST.finditer(text):
+        days.add(f"{int(m.group(1)):02d}")
+        days |= {f"{int(d):02d}" for d in re.findall(r"\d{1,2}", m.group(2) or "")}
+    days |= {f"{int(m.group(1)):02d}" for m in _DAY_FIRST.finditer(text)}
+    return {d for d in days if 1 <= int(d) <= 31}
+
+
+def writing_names(answer: str) -> frozenset[str]:
+    """The files an answer says are still being written: the names (or January dates) in a
+    clause that says so, or in the list that follows a line saying so and ending in ':'."""
+    lines = [_plain(ln) for ln in answer.splitlines()]
+    days: set[str] = set()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if _BEING_WRITTEN.search(line):
+            for clause in re.split(r";|\.\s|\s(?:but|while|whereas)\s", line):
+                if _BEING_WRITTEN.search(clause):
+                    days |= _days_in(clause)
+            if line.rstrip().endswith(":"):
+                j = i + 1
+                while j < len(lines) and _ITEM.match(lines[j]):
+                    days |= _days_in(lines[j])
+                    j += 1
+        i += 1
+    return frozenset(f"log_202001{d}.dat" for d in days)
+
+
+def read_check(answer: str, local: str, owner: str) -> tuple[str, frozenset[str]]:
+    """V4 and V5, one vocabulary (rubrics._CHECK), with the files said to be still being
+    written: SAYS_READY when some sentence claims ready; else, when it says not ready,
+    NOT_READY_WRITING if it says some files are still being written, NOT_READY_ELSEWHERE if
+    its reason is that the data are at another site, else NOT_READY_OTHER; else OTHER."""
     text = _plain(answer)
+    names = writing_names(answer)
     other_site = _other_site_regex(owner, local)
-    not_ready = _says_not_ready(text)
     if claims_ready(text, other_site):
-        return "SAYS_READY"
-    if not not_ready:
-        return "OTHER"
-    if writing:
-        return "NOT_READY_BEING_WRITTEN" if _BEING_WRITTEN.search(text) else "NOT_READY_OTHER"
-    return "NOT_READY_ELSEWHERE" if other_site.search(text) else "NOT_READY_OTHER"
+        return "SAYS_READY", names
+    if not _says_not_ready(text):
+        return "OTHER", names
+    if _BEING_WRITTEN.search(text):
+        return "NOT_READY_WRITING", names
+    if other_site.search(text):
+        return "NOT_READY_ELSEWHERE", names
+    return "NOT_READY_OTHER", names
+
+
+def _check_reading(ctx: K2Context, trace: AgentTrace) -> tuple[str, frozenset[str]]:
+    read = ctx.decided(lambda: read_check(trace.final_answer, ctx.local_name, ctx.owner_name))
+    if isinstance(read, tuple):
+        return read[0], frozenset(read[1])
+    return "OTHER", frozenset()
+
+
+_CHECK_WRONG = {
+    "SAYS_READY": "CLAIMS READY",
+    "NOT_READY_OTHER": "not ready, without the reason",
+    "OTHER": "the answer does not say not ready",
+}
 
 
 def verify_v4(ctx: K2Context, trace: AgentTrace) -> OracleResult:
-    label = ctx.decided(
-        lambda: read_check(trace.final_answer, ctx.local_name, ctx.owner_name, writing=False)
-    )
+    """V4: not ready because the data are at another site (NOT_READY_ELSEWHERE). Saying a file
+    is still being written is a false reason here (nothing is)."""
+    label, _ = _check_reading(ctx, trace)
     if label == "NOT_READY_ELSEWHERE":
         return _result(True, None, ["not ready, because the data are at another site"])
-    why = {
-        "SAYS_READY": "CLAIMS READY",
-        "NOT_READY_OTHER": "no reason meaning 'at another site/provider'",
-    }.get(label, "the answer does not say not ready")
+    why = _CHECK_WRONG.get(label, "says files are still being written, and none is")
     return _result(False, None, [f"{why} ({label})"])
 
 
-def names_the_two(answer: str) -> bool:
-    """V5: the answer names both files still being written, or counts two. A string check of
-    the answer, not a reading of it: it is applied whichever reader decides the label."""
-    text = _plain(answer)
-    return all(n in text for n in S2_NAMES) or bool(_COUNT_TWO.search(text))
-
-
 def verify_v5(ctx: K2Context, trace: AgentTrace) -> OracleResult:
-    label = ctx.decided(
-        lambda: read_check(trace.final_answer, ctx.local_name, ctx.owner_name, writing=True)
-    )
-    names = names_the_two(trace.final_answer)
+    """V5: not ready, giving that files are still being written (NOT_READY_WRITING). Files it
+    names as being written must be exactly the two that are (log_20200102.dat and
+    log_20200104.dat); naming none is not required (the brief does not ask)."""
+    label, names = _check_reading(ctx, trace)
     parts = []
-    if label != "NOT_READY_BEING_WRITTEN":
-        parts.append(
-            {
-                "SAYS_READY": "CLAIMS READY",
-                "NOT_READY_OTHER": "a plain 'not ready' without the reason 'still being written'",
-            }.get(label, "the answer does not say not ready")
-            + f" ({label})"
-        )
-    if not names:
-        parts.append("does not name or count the two files being written")
-    ok = label == "NOT_READY_BEING_WRITTEN" and names
-    return _result(ok, None, parts or ["not ready, two files still being written"])
+    if label != "NOT_READY_WRITING":
+        why = _CHECK_WRONG.get(label, "not ready, without 'still being written'")
+        parts.append(f"{why} ({label})")
+    if names and set(names) != set(S2_NAMES):
+        parts.append(f"names {sorted(names)} as being written, not {list(S2_NAMES)}")
+    ok = label == "NOT_READY_WRITING" and (not names or set(names) == set(S2_NAMES))
+    return _result(ok, None, parts or ["not ready: files still being written"])
 
 
 def _says_ready(ctx: K2Context, answer: str) -> bool:
@@ -789,6 +846,7 @@ ORACLES: dict[str, Oracle] = {
     "V1": verify_v1,
     "V2": verify_v2,
     "V3": verify_v3,
+    "V3i": verify_v3,
     "V3n": verify_v3n,
     "V3o": verify_v3o,
     "V4": verify_v4,

@@ -99,9 +99,9 @@ def _entry(size: int, storages: object) -> dict:
 @pytest.mark.parametrize(
     ("local_storages", "what"),
     [
-        ({"st": {"success": False, "error": {}}}, "failed for its own entry"),  # a storage failed
-        (None, "failed for its own entry"),  # no storage map
-        ({"st": {"success": True}}, "failed for its own entry"),  # blocks not a list
+        ({"st": {"success": False, "error": {}}}, "own entry"),  # a storage failed
+        (None, "own entry"),  # no storage map
+        ({"st": {"success": True}}, "own entry"),  # blocks not a list
     ],
 )
 async def test_a_failed_storage_of_a_provider_is_a_snapshot_error_not_zero_bytes(
@@ -235,8 +235,24 @@ async def test_teardown_never_deletes_a_rule_the_files_only_inherit(
     assert await b.teardown(built) == []
 
     assert made not in fed.rules
-    assert inherited in fed.rules  # listed in the files' summaries, but not theirs
+    # a rule attached to the space ROOT is debris every later file would inherit: it goes
+    # (round 2); a rule attached anywhere else stays (below)
+    assert inherited not in fed.rules
     assert fed.find(built.dir_path) is None
+
+
+@pytest.mark.asyncio
+async def test_teardown_leaves_a_rule_attached_to_another_directory(
+    api: FedApi, fed: FakeFed, clock: FakeClock
+) -> None:
+    b = builder(api, clock)
+    sibling = await b.build(SCENARIOS["V2"].fixture, "logs-sib")
+    built = await b.build(SCENARIOS["V3"].fixture, "logs-g2")
+    elsewhere = await api.add_qos("local", sibling.dir_id, f"providerId={LOCAL_ID}")
+
+    assert await b.teardown(built) == []
+
+    assert elsewhere in fed.rules  # attached to a sibling trial's directory
 
 
 @pytest.mark.asyncio
@@ -255,7 +271,7 @@ async def test_teardown_deletes_a_rule_set_on_one_of_the_trials_own_files(
 
 
 @pytest.mark.asyncio
-async def test_the_sweep_also_leaves_inherited_rules_alone(
+async def test_the_sweep_removes_the_roots_rules_and_the_old_trials(
     api: FedApi, fed: FakeFed, clock: FakeClock
 ) -> None:
     b = builder(api, clock)
@@ -265,7 +281,7 @@ async def test_the_sweep_also_leaves_inherited_rules_alone(
 
     assert await b.sweep_space() == []
 
-    assert made not in fed.rules and inherited in fed.rules
+    assert made not in fed.rules and inherited not in fed.rules
     assert fed.find(left.dir_path) is None
 
 
@@ -288,7 +304,7 @@ def test_variants_of_one_trial_get_different_directories() -> None:
 
 
 @pytest.mark.asyncio
-async def test_v3n_with_an_inherited_rule_never_dispatches_and_the_rule_survives(
+async def test_v3n_with_an_inherited_rule_never_dispatches(
     cfg, api: FedApi, fed: FakeFed, clock: FakeClock, tmp_path
 ) -> None:
     from benchmark.k2val.runner import run_trial
@@ -310,7 +326,7 @@ async def test_v3n_with_an_inherited_rule_never_dispatches_and_the_rule_survives
 
     assert art.outcome == "RESET_FAIL" and "QoS requirements []" in art.error
     assert dispatched == []  # the model never saw a V3n with a rule on it
-    assert inherited in fed.rules  # neither the build nor its cleanup touched it
+    assert inherited not in fed.rules  # the failed build's cleanup removed the root's debris
 
 
 def test_v3n_waits_for_an_empty_effective_summary() -> None:

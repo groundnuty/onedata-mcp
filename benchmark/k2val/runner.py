@@ -31,8 +31,13 @@ from benchmark.k2val.fixtures import BuiltFixture, FixtureBuilder, FixtureSpec
 from benchmark.k2val.legs import AdapterFactory
 from benchmark.k2val.oracles import K2Context, k2_violations, settled
 from benchmark.k2val.recording import CallRecord, RecordingApp
-from benchmark.k2val.scenarios import SYSTEM_PROMPT_TEMPLATE, Scenario
-from benchmark.k2val.scoring import context_to_json, score_dual
+from benchmark.k2val.scenarios import SYSTEM_PROMPT_TEMPLATE, TOOL_UNDER_TEST, Scenario
+from benchmark.k2val.scoring import (
+    REQUIRED,
+    UnverifiableEvidence,
+    context_to_json,
+    score_dual,
+)
 from benchmark.k2val.secrets import redact, say
 from benchmark.k2val.snapshot import Snapshot, UnusableSnapshot, take_snapshot
 from benchmark.k2val.spend import SpendTracker
@@ -47,6 +52,8 @@ CAP_REASONS = {
     "content_filter": "content filter",
 }
 SETTLE_POLL_S = 5.0
+# Finish reasons that cut an answer short: NO_RESULT, whatever partial text came with them.
+TRUNCATED = ("max_tokens", "length", "content_filter", "refusal")
 
 
 def make_trial_id(run_id: str, model: str, scenario_id: str, ix: int) -> str:
@@ -105,20 +112,26 @@ async def _settle(
     deps: RunDeps, fixture: BuiltFixture, scenario: Scenario, first: Snapshot
 ) -> Snapshot:
     """The federation after the settle window (`Scenario.settle_s`, else `[run] settle_s`).
-    The federation is read every `settle_poll_s` until the awaited end state shows or the window
-    ends. "quiet" (every restraint scenario) awaits nothing, so the whole window is waited out
-    and the last reading, taken at its end, is the one returned, even if the first reading
-    already matched."""
+
+    A restraint scenario, or one that requires the tool under promotion, waits out the whole
+    window and is then read once more: an independent snapshot that STARTS after the deadline,
+    never skipped because the first reading already looked settled (a change that shows late,
+    after a poll, is still seen). The others (V2, V6, V7, CDo) read again every
+    `settle_poll_s` until the end state they await shows or the window ends, at least once
+    after the answer."""
     if scenario.settle == "none":
         return first
     window = scenario.settle_s if scenario.settle_s is not None else deps.cfg.limits.settle_s
+    if scenario.restraint or scenario.id in REQUIRED or scenario.settle == "quiet":
+        await deps.clock.sleep(window)
+        return await take_snapshot(deps.fed, fixture, deps.clock)
     names = list(fixture.files)
-    snap = first
     deadline = deps.clock.time() + window
-    while not settled(scenario.settle, snap, names) and deps.clock.time() < deadline:
-        await deps.clock.sleep(deps.settle_poll_s)
+    while True:
+        await deps.clock.sleep(min(deps.settle_poll_s, max(deadline - deps.clock.time(), 0.0)))
         snap = await take_snapshot(deps.fed, fixture, deps.clock)
-    return snap
+        if settled(scenario.settle, snap, names) or deps.clock.time() >= deadline:
+            return snap
 
 
 async def run_trial(
@@ -203,7 +216,9 @@ async def run_trial(
             )
 
         # a brief may give a file id, known only now
-        brief = scenario.render_brief(directory=directory, local=local_name, ids=fixture.ids())
+        brief = scenario.render_brief(
+            directory=directory, local=local_name, ids=fixture.ids(), qos=fixture.qos_rules
+        )
 
         tools = _tools_for(deps, scenario)
         rec_app = RecordingApp(
@@ -264,6 +279,9 @@ async def run_trial(
         finish_reason = dispatch.finish_reason if dispatch else None
         if dispatch is not None and dispatch.error:
             error = dispatch.error
+        elif dispatch is not None and finish_reason in TRUNCATED:
+            # cut by a cap or a filter: a partial answer is no answer (NO_RESULT, never a FAIL)
+            no_result = CAP_REASONS[finish_reason] + (" (a partial answer)" if final_answer else "")
         elif dispatch is not None and not final_answer:
             if finish_reason == "budget_exhausted":
                 no_result = "Anthropic spend cap reached"
@@ -304,6 +322,8 @@ async def run_trial(
 
         if error is not None:
             return persist(artefact("ADAPTER_ERROR", error=error, flags=tuple(flags), **common))
+        if writer_record and writer_record.get("error"):
+            return persist(_writer_failed(artefact, writer_record, flags, common))
         if finish_reason == "budget_exhausted" and no_result:
             return persist(
                 artefact("BUDGET_STOP", no_result_reason=no_result, flags=tuple(flags), **common)
@@ -316,6 +336,9 @@ async def run_trial(
         after_settle = await _settle(deps, fixture, scenario, at_answer)
         writer_record = fixture.writer.record() if fixture.writer else None
         common["writer"] = writer_record
+        if writer_record and writer_record.get("error"):  # failed during the settle
+            common["snapshot_after_settle"] = after_settle.to_json()
+            return persist(_writer_failed(artefact, writer_record, flags, common))
         run_ctx = RunContext(
             scenario_id=scenario.id,
             fixture_paths={bf.path: bf.file_id for bf in fixture.files.values()},
@@ -363,6 +386,15 @@ async def run_trial(
                     **common,
                 )
             )
+        except UnverifiableEvidence as e:
+            return persist(
+                artefact(
+                    "HARNESS_ERROR",
+                    error=f"unverifiable write: {e}",
+                    flags=tuple(dict.fromkeys([*flags, "unverifiable_write"])),
+                    **common,
+                )
+            )
         except Exception as e:  # noqa: BLE001 - recorded, so the sweep goes on
             return persist(
                 artefact(
@@ -398,6 +430,18 @@ async def run_trial(
             deps.spend.end_trial()
 
 
+def _writer_failed(artefact: Any, record: dict, flags: list[str], common: dict) -> Any:
+    """The background writer failed (before or during the settle): the fixture never reached
+    the state the scenario describes, so the trial is the deployment's (RESET_FAIL)."""
+    return artefact(
+        "RESET_FAIL",
+        error=f"background writer: {record.get('error')}",
+        fixture_error=f"background writer: {record.get('error')}",
+        flags=tuple(dict.fromkeys([*flags, "writer_error"])),
+        **common,
+    )
+
+
 async def _judge(deps: RunDeps, scenario: Scenario, brief: str, local: str, answer: str) -> Any:
     """The judge's verdict, or None when the run has no judge. A judge that raises gives a
     verdict with its error: NEEDS_REVIEW, never a silent fallback."""
@@ -414,6 +458,9 @@ async def _judge(deps: RunDeps, scenario: Scenario, brief: str, local: str, answ
 def _surface_problem(scenario: Scenario, tools: frozenset[str], offered: list[str]) -> str | None:
     """Why the surface the model would see is not the scenario's, or None."""
     problems = []
+    under_test = TOOL_UNDER_TEST.get(scenario.id)
+    if under_test is not None and (under_test not in tools or under_test not in offered):
+        problems.append(f"{scenario.id} exercises {under_test}, which is not offered")
     if missing := sorted(tools - set(offered)):
         problems.append(f"the app does not offer {missing}")
     if extra := sorted(set(offered) - tools):
@@ -438,7 +485,8 @@ async def _cleanup_partial(
     """After a failed build: remove whatever directory the trial managed to create."""
     try:
         dir_id = await deps.fed.lookup("owner", f"/{space}/{dir_name}")
-        return await builder.purge_dir(dir_id) if dir_id else []
+        problems = await builder.purge_dir(dir_id) if dir_id else []
+        return problems + await builder.purge_root_rules()
     except Exception as e:  # noqa: BLE001
         return [f"cleanup {type(e).__name__}: {e}"]
 

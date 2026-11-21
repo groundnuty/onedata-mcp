@@ -54,6 +54,9 @@ class FileState:
     qos_ids: tuple[str, ...] = ()
     size_field: str = ""
     error: str | None = None
+    # the validated source observations: each provider's view of every provider (own size,
+    # size field, merged intervals, or failed), kept so a stored trial can be rescored offline
+    observed: dict | None = None
 
 
 @dataclass
@@ -117,19 +120,22 @@ async def _file_state(fed: FedApi, name: str, bf: BuiltFile, owner_id: str, loca
     # provider's own entry failed, is an unusable reading, never "0 bytes".
     unreadable = []
     for role, view, pid in (("owner", via_owner, owner_id), ("local", via_local, local_id)):
-        if not view.size_known:
-            unreadable.append(f"the {role} provider's distribution has no size")
-        elif pid in view.failed or pid not in view.covered:
-            unreadable.append(f"the {role} provider's distribution failed for its own entry")
-        elif view.size != bf.spec.size:
+        if not view.readable(pid):
             unreadable.append(
-                f"the {role} provider reports size {view.size}, not the {bf.spec.size} written"
+                f"the {role} provider's own entry of its distribution is missing or unreadable "
+                "(no size, a failed or empty storage map, or a malformed interval)"
             )
+        elif view.size_of(pid) != bf.spec.size:
+            unreadable.append(
+                f"the {role} provider reports size {view.size_of(pid)}, not the "
+                f"{bf.spec.size} written"
+            )
+    state.observed = {"owner_view": via_owner.observed(), "local_view": via_local.observed()}
     if unreadable:
         state.error = "; ".join(unreadable)
         return state
-    state.size = max(via_owner.size, via_local.size)
-    state.size_field = via_local.size_field or via_owner.size_field
+    state.size = via_local.size_of(local_id)
+    state.size_field = via_local.size_fields.get(local_id, "")
     state.owner_bytes = via_owner.bytes_of(owner_id)
     state.local_bytes_via_owner = via_owner.bytes_of(local_id)
     state.local_bytes = via_local.bytes_of(local_id)

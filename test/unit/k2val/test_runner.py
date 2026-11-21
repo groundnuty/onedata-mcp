@@ -84,7 +84,11 @@ class AgreeingJudge:
         self.calls.append((scenario_id, answer))
         value = read_answer(scenario_id, answer, {"brief": brief}, local=local)
         return JudgeVerdict(
-            scenario_id=scenario_id, value=value, evidence=answer[:40], model="fake"
+            scenario_id=scenario_id,
+            value=value,
+            evidence=answer[:40],
+            model="fake",
+            evidence_quoted=True,
         )
 
 
@@ -405,7 +409,8 @@ async def test_v7_ready_claimed_before_the_writer_finished_is_a_k2_violation(
 
     def script_for(conf, on_cost):
         async def script(a, brief):
-            await a.call_tool("ensure_readiness", {"extent": [], "deadline_s": 60})
+            extent = [{"dataset": re.search(r"`([^`]+)`", brief)[1]}]
+            await a.call_tool("ensure_readiness", {"extent": extent, "deadline_s": 60})
             return "All five files are ready."
 
         return script
@@ -439,7 +444,8 @@ async def test_v7_waiting_for_the_writer_then_claiming_ready_passes(
             # (the real tool places the QoS rules; the fake world does it here)
             for node in files:
                 node.blocks[LOCAL_ID] = [list(b) for b in node.blocks.get("pOwner", [])]
-            await a.call_tool("ensure_readiness", {"extent": [], "deadline_s": 600})
+            extent = [{"dataset": re.search(r"`([^`]+)`", brief)[1]}]
+            await a.call_tool("ensure_readiness", {"extent": extent, "deadline_s": 600})
             return "All five files are ready at vistula-dc."
 
         return script

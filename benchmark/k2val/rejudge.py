@@ -31,6 +31,8 @@ from benchmark.k2val.judge import Judge, JudgeConf, JudgeVerdict
 from benchmark.k2val.rubrics import ANSWER_SPECS, rubric_sha
 
 DEFAULT_LOCAL = "vistula-dc"
+# Outcomes whose trials reached the oracle: their answers, empty ones included, were read.
+SCORED_OUTCOMES = ("PASS", "FAIL", "NEEDS_REVIEW")
 _LOCAL_IN_BRIEF = re.compile(r"your site (?:the provider )?`?([a-z][\w.-]*)`?", re.I)
 
 
@@ -129,8 +131,12 @@ async def judge_trials(
     *,
     on_verdict: Any = None,
 ) -> dict[str, JudgeVerdict]:
-    """A verdict per trial with an answer: from the cache, else from `judge` (None: cached
-    only; a trial without one gets a verdict with `error="not judged"`)."""
+    """A verdict per scored trial (one that reached the oracle: PASS, FAIL or NEEDS_REVIEW, an
+    empty final answer included): the trial's own stored verdict when it was given by the same
+    model and effort under the same judge input (`scoring.stored_verdict`), else the cache, else
+    `judge` (None: no call; a trial without a verdict gets one with `error="not judged"`)."""
+    from benchmark.k2val.scoring import stored_verdict
+
     by_source = locals_by_source(trials)
     out: dict[str, JudgeVerdict] = {}
 
@@ -138,6 +144,10 @@ async def judge_trials(
         sid = t.scenario_id
         brief = t.row.get("brief") or ""
         local = local_site(t, by_source)
+        own = stored_verdict(t.row)
+        if own is not None and (own.model, own.effort) == (conf.model, conf.effort):
+            out[t.key] = own
+            return
         key = cache_key(sid, brief, local, t.answer, conf)
         cached = cache.get(key)
         if cached is not None:
@@ -152,7 +162,11 @@ async def judge_trials(
         if on_verdict:
             on_verdict(t, verdict)
 
-    todo = [t for t in trials if t.answer and t.scenario_id in ANSWER_SPECS]
+    todo = [
+        t
+        for t in trials
+        if t.scenario_id in ANSWER_SPECS and t.row.get("outcome") in SCORED_OUTCOMES
+    ]
     await asyncio.gather(*[one(t) for t in todo])
     return out
 
@@ -165,7 +179,7 @@ async def judge_trials(
 def compare(trials: list[StoredTrial], verdicts: dict[str, JudgeVerdict]) -> list[dict[str, Any]]:
     """One row per judged trial: the deterministic reading, the judge's, whether they agree,
     the stored outcome, and the new outcome where the artefact can be scored again."""
-    from benchmark.k2val.reading import read_answer, right_reading
+    from benchmark.k2val.reading import is_right, read_answer, right_reading
     from benchmark.k2val.rubrics import reading_to_json, same_reading
     from benchmark.k2val.scoring import rescore_stored
 
@@ -178,6 +192,7 @@ def compare(trials: list[StoredTrial], verdicts: dict[str, JudgeVerdict]) -> lis
         local = local_site(t, by_source)
         det = read_answer(t.scenario_id, t.answer, t.row, local=local)
         agree = verdict.error is None and same_reading(det, verdict.value)
+        decides = agree and verdict.evidence_quoted is True
         right = right_reading(t.scenario_id)
         row = {
             "trial": t.key,
@@ -191,10 +206,12 @@ def compare(trials: list[StoredTrial], verdicts: dict[str, JudgeVerdict]) -> lis
             "evidence": verdict.evidence,
             "evidence_quoted": verdict.evidence_quoted,
             "agree": agree,
+            # what the scorer requires to decide without review: agreement AND a quoted evidence
+            "decides": decides,
             # the reading a right answer has (None where it depends on more than the label)
             "right_reading": reading_to_json(right) if right is not None else None,
-            "judge_says_right": None if right is None else same_reading(verdict.value, right),
-            "deterministic_says_right": None if right is None else same_reading(det, right),
+            "judge_says_right": None if verdict.error else is_right(t.scenario_id, verdict.value),
+            "deterministic_says_right": is_right(t.scenario_id, det),
         }
         row["rescored"] = rescore_stored(t.row, verdict)
         rows.append(row)
@@ -207,20 +224,28 @@ def summarise(rows: list[dict[str, Any]]) -> str:
     for r in rows:
         c = per[r["scenario_id"]]
         c["trials"] += 1
-        c["judge_error" if r["judge_error"] else ("agree" if r["agree"] else "disagree")] += 1
-    out.append("| scenario | trials | agree | disagree | judge error |")
-    out.append("|---|---|---|---|---|")
+        if r["judge_error"]:
+            c["judge_error"] += 1
+        elif not r["agree"]:
+            c["disagree"] += 1
+        elif not r.get("decides", True):
+            c["unquoted"] += 1
+        else:
+            c["agree"] += 1
+    out.append("| scenario | trials | agree | disagree | evidence not quoted | judge error |")
+    out.append("|---|---|---|---|---|---|")
     for sid in sorted(per):
         c = per[sid]
         out.append(
-            f"| {sid} | {c['trials']} | {c['agree']} | {c['disagree']} | {c['judge_error']} |"
+            f"| {sid} | {c['trials']} | {c['agree']} | {c['disagree']} | {c['unquoted']} | "
+            f"{c['judge_error']} |"
         )
     total = Counter()
     for c in per.values():
         total.update(c)
     out.append(
         f"| all | {total['trials']} | {total['agree']} | {total['disagree']} | "
-        f"{total['judge_error']} |\n"
+        f"{total['unquoted']} | {total['judge_error']} |\n"
     )
 
     doubt = [
@@ -231,8 +256,8 @@ def summarise(rows: list[dict[str, Any]]) -> str:
     out.append("## Stored PASSes the judge reads as a wrong claim\n")
     out.extend(_block(r) for r in doubt) if doubt else out.append("None.\n")
 
-    out.append("## Every disagreement\n")
-    bad = [r for r in rows if not r["agree"]]
+    out.append("## Every disagreement (and every agreement whose evidence is not a quote)\n")
+    bad = [r for r in rows if not r.get("decides", r["agree"])]
     out.extend(_block(r) for r in bad) if bad else out.append("None.\n")
     return "\n".join(out)
 

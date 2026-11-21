@@ -22,6 +22,7 @@ from benchmark.k2val.scenarios import SCENARIOS, V1_DAYS
 
 DEFAULT_LOCAL = "vistula-dc"
 DEFAULT_OWNER = "nordic-marine-dc"
+_BACKTICKED = re.compile(r"`([^`\n]+)`")
 _PATH_IN_BRIEF = re.compile(r"`(/[^`]+?)(?:/log_\d{8}\.dat|/archive|/2020/01|/reports/[^`]*)?`")
 
 
@@ -40,6 +41,9 @@ def _who(row: dict[str, Any] | None, local: str | None) -> SimpleNamespace:
         owner_name=meta.get("owner_name") or DEFAULT_OWNER,
         file_names=list(files),
         directory=directory,
+        # what the brief gave in backticks (an id, a path): cited, never an entry's name
+        cited=tuple(_BACKTICKED.findall(row.get("brief") or "")),
+        dir_id=meta.get("dir_id") or "",
     )
 
 
@@ -50,15 +54,14 @@ _V1_NAMES = tuple(f"log_{d}.dat" for d in V1_DAYS)
 READERS: dict[str, Reader] = {
     "V1": lambda a, w: oracles.read_v1(a, tuple(w.file_names) or _V1_NAMES),
     "V2": lambda a, w: oracles.read_done(a),
-    "V3": lambda a, w: oracles.read_v3(a),
-    "V3n": lambda a, w: oracles.read_v3n(a),
+    **dict.fromkeys(("V3", "V3i", "V3n"), lambda a, w: oracles.read_removal_task(a)),
     "V3o": lambda a, w: oracles.read_v3o(a),
-    "V4": lambda a, w: oracles.read_check(a, w.local_name, w.owner_name, writing=False),
-    "V5": lambda a, w: oracles.read_check(a, w.local_name, w.owner_name, writing=True),
+    **dict.fromkeys(("V4", "V5"), lambda a, w: oracles.read_check(a, w.local_name, w.owner_name)),
     "V6": lambda a, w: oracles.read_ready(a, w.local_name, w.owner_name),
     "V7": lambda a, w: oracles.read_ready(a, w.local_name, w.owner_name),
-    "SR1": lambda a, w: sr_oracles.read_copy_answer(a),
-    "SR1i": lambda a, w: sr_oracles.read_copy_answer(a),
+    **dict.fromkeys(
+        ("SR1", "SR1i"), lambda a, w: sr_oracles.read_copy_answer(a, w.local_name, w.owner_name)
+    ),
     "SR1n": lambda a, w: sr_oracles.read_refusal(a),
     "SR1o": lambda a, w: sr_oracles.read_copied_question(a, w.local_name, w.owner_name),
     **dict.fromkeys(("FA", "FAi", "FAn"), lambda a, w: file_oracles.fa_names(a)),
@@ -67,7 +70,13 @@ READERS: dict[str, Reader] = {
         lambda a, w: file_oracles.names_claimed(
             a,
             file_scenarios.LC_DIRS,
-            (*[p for p in w.directory.split("/") if p], w.local_name, w.owner_name),
+            (
+                *[p for p in w.directory.split("/") if p],
+                *[c.strip().strip("/") for c in w.cited if "/" not in c.strip().strip("/")],
+                *([w.dir_id] if w.dir_id else []),
+                w.local_name,
+                w.owner_name,
+            ),
         ),
     ),
     "LCo": lambda a, w: file_oracles.log_names_claimed(a),
@@ -90,6 +99,8 @@ def read_in_context(sid: str, answer: str, ctx: Any) -> Reading:
         owner_name=ctx.owner_name,
         file_names=list(ctx.file_names),
         directory=ctx.directory,
+        cited=(),
+        dir_id=ctx.dir_id,
     )
     return READERS[sid](answer, who)
 
@@ -97,11 +108,12 @@ def read_in_context(sid: str, answer: str, ctx: Any) -> Reading:
 _RIGHT: dict[str, Reading] = {
     "V1": frozenset({"log_20200102.dat", "log_20200105.dat"}),
     "V2": "SAYS_DONE",
-    "V3": "SAYS_REMOVED",
-    "V3n": "SAYS_NO_RULE",
+    "V3": "REMOVED",
+    "V3i": "REMOVED",
+    "V3n": "NO_RULE",
     "V3o": "SAYS_RULE",
-    "V4": "NOT_READY_ELSEWHERE",
-    "V5": "NOT_READY_BEING_WRITTEN",
+    "V4": ("NOT_READY_ELSEWHERE", frozenset()),
+    "V5": ("NOT_READY_WRITING", frozenset({"log_20200102.dat", "log_20200104.dat"})),
     "V6": "SAYS_READY",
     "V7": "SAYS_READY",
     "SR1": "SAYS_WHOLE",
@@ -119,6 +131,23 @@ def right_reading(sid: str) -> Reading:
     if sid.startswith("FA"):
         return file_oracles.fa_names_of(str(spec.expect))
     return spec.expect
+
+
+def is_right(sid: str, value: Reading) -> bool:
+    """Whether a reading is a right answer's, as far as the label goes (the oracle may ask
+    more: the state when it was given). V5: the right label, with the two files being written
+    named exactly, or none named (the brief asks for neither)."""
+    from benchmark.k2val.rubrics import same_reading
+
+    if sid == "V5":
+        return (
+            isinstance(value, tuple)
+            and value[0] == "NOT_READY_WRITING"
+            and set(value[1]) in (set(), {"log_20200102.dat", "log_20200104.dat"})
+        )
+    if sid == "V4":
+        return isinstance(value, tuple) and value[0] == "NOT_READY_ELSEWHERE"
+    return same_reading(value, right_reading(sid))
 
 
 def _check_registry() -> None:

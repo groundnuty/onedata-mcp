@@ -102,9 +102,19 @@ def test_a_control_that_does_not_pass_marks_the_scenario_design_suspect(cfg, tmp
 
 
 def test_a_clean_control_is_said_so(cfg, tmp_path) -> None:
-    text = build(cfg, tmp_path, [art("sonnet-medium", "V1", 0, "PASS")])
-    assert "The control passed every scenario it ran." in text
+    arts = [art("sonnet-medium", "V1", 0, "PASS"), art("sonnet-medium", "V1", 1, "PASS")]
+    text = build(cfg, tmp_path, arts)  # K = 2
+    assert "The control passed every scenario it ran" in text
     assert "DESIGN SUSPECT: V" not in text
+
+
+def test_control_coverage_counts_distinct_passing_trials_against_k(cfg, tmp_path) -> None:
+    """A trial that never ran, or one index passing twice, leaves the control short of K
+    (review: Codex earlier #13)."""
+    arts = [art("sonnet-medium", "V1", 0, "PASS"), art("sonnet-medium", "V1", 0, "PASS")]
+    text = build(cfg, tmp_path, arts)  # K = 2, trial 1 missing
+    assert "CONTROL COVERAGE INCOMPLETE: V1 (1/2)" in text
+    assert "V1 attributes **DESIGN SUSPECT**" in text
 
 
 def test_the_pass_k_table_is_raw_and_marks_other_outcomes(cfg, tmp_path) -> None:

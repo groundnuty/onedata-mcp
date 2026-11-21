@@ -100,7 +100,7 @@ def test_the_settles() -> None:
 
 def test_they_are_registered_after_the_v_scenarios_and_named_to_run() -> None:
     # right after V1..V7, V3n, V3o
-    assert list(SCENARIOS)[9:13] == ["SR1", "SR1i", "SR1n", "SR1o"] == list(SR_SCENARIOS)
+    assert list(SCENARIOS)[10:14] == ["SR1", "SR1i", "SR1n", "SR1o"] == list(SR_SCENARIOS)
     assert list(SCENARIOS)[2:5] == ["V3", "V3n", "V3o"]
     assert set(ORACLES) == set(SCENARIOS)
     assert parse_scenarios("SR1,SR1n,SR1o") == list(SR)
@@ -143,7 +143,9 @@ async def test_a_large_file_is_written_at_the_owner_in_parts_at_explicit_offsets
     assert all(p["provider"] == OWNER_ID for p in puts)
     node = fed.nodes[bf.file_id]
     assert node.size == TEST_LARGE and fed.covered(node.blocks[OWNER_ID], TEST_LARGE) == TEST_LARGE
-    assert built.baseline()["files"][SR_FILE] == {
+    baseline = dict(built.baseline()["files"][SR_FILE])
+    observed = baseline.pop("observed")
+    assert baseline == {
         "kind": "s0",
         "size": TEST_LARGE,
         "size_known": True,
@@ -151,6 +153,9 @@ async def test_a_large_file_is_written_at_the_owner_in_parts_at_explicit_offsets
         "local_covered": False,
         "qos_ids": [],
     }
+    # the source observations are kept: each provider's own size and validated intervals
+    assert observed[LOCAL_ID]["size"] == TEST_LARGE and observed[LOCAL_ID]["intervals"] == []
+    assert observed[OWNER_ID]["intervals"] == [[0, TEST_LARGE]]
 
 
 def test_a_file_being_written_keeps_the_standard_size() -> None:
@@ -222,7 +227,7 @@ async def test_sr1_a_copy_said_whole_once_it_is_passes(cfg, api, fed, clock, tmp
 async def test_sr1_done_said_right_after_scheduling_is_a_premature_claim(
     cfg, api, fed, clock, tmp_path, sr_app
 ):
-    fed.replication_ticks = 2  # the copy lands during the settle (two polls), after the answer
+    fed.replication_ticks = 1  # the copy lands during the settle's wait, after the answer
 
     async def steps(app, path):
         await _copy(app, path)
@@ -289,7 +294,7 @@ async def test_sr1n_a_refusal_after_the_tools_hint_passes_and_waits_the_whole_wi
 async def test_sr1n_a_copy_to_the_local_site_instead_fails_both_axes(
     cfg, api, fed, clock, tmp_path, sr_app
 ):
-    fed.replication_ticks = 2  # lands only during the settle
+    fed.replication_ticks = 1  # lands only during the settle's wait
 
     async def steps(app, path):
         await _copy(app, path)

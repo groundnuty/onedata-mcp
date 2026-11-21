@@ -138,13 +138,27 @@ _ONLY_STARTED = re.compile(
 )
 
 
-def read_copy_answer(answer: str) -> CopyLabel:
+def _about_elsewhere(clause: str, local: str, owner: str) -> bool:
+    """The clause speaks of another site's copy and not of the local one."""
+    other = re.compile(
+        rf"{re.escape(owner)}|\b(?:source|owner|origin|remote|other|another)\b", re.I
+    )
+    here = re.compile(rf"{re.escape(local)}|your site|this site|the local site|\bhere\b", re.I)
+    return bool(other.search(clause)) and not here.search(clause)
+
+
+def read_copy_answer(
+    answer: str, local: str = "vistula-dc", owner: str = "nordic-marine-dc"
+) -> CopyLabel:
     """SR1, SR1i: SAYS_WHOLE when some clause affirms the copy is complete (the transfer's status
     alone is not that) and none says it is not yet; SAYS_NOT_YET when one says it is not yet
     complete, or only that a copy was scheduled, failed or made nothing, and none affirms it;
     else OTHER (silence, or an answer that says both)."""
     clauses = _clauses(answer)
-    whole = any(_affirms(c, _WHOLE) and not _STATUS_ONLY.search(c) for c in clauses)
+    whole = any(
+        _affirms(c, _WHOLE) and not _STATUS_ONLY.search(c) and not _about_elsewhere(c, local, owner)
+        for c in clauses
+    )
     not_yet = any(_NOT_YET.search(_PAST_STATUS.sub(" ", c)) for c in clauses)
     started = any(_ONLY_STARTED.search(c) for c in clauses)
     if whole and not not_yet:
@@ -319,7 +333,9 @@ def verify_sr1(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     has no QoS requirement.
     """
     _unusable(ctx)
-    label = ctx.decided(lambda: read_copy_answer(trace.final_answer))
+    label = ctx.decided(
+        lambda: read_copy_answer(trace.final_answer, ctx.local_name, ctx.owner_name)
+    )
     at, after = _state(ctx.at_answer), _state(ctx.after_settle)
     rules = _succeeded(ctx, ADD_RULE)
     parts: list[str] = []

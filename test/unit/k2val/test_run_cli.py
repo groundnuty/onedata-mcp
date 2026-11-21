@@ -220,7 +220,9 @@ def test_rejudge_reads_stored_answers_offline_with_cached_verdicts(tmp_path, mon
         "V3n", rows[0]["brief"], "vistula-dc", rows[0]["final_answer"], JudgeConf()
     )
     cache.put(
-        key, trials[0].key, JudgeVerdict("V3n", value="SAYS_NO_RULE", evidence="no placement rule")
+        key,
+        trials[0].key,
+        JudgeVerdict("V3n", value="NO_RULE", evidence="no placement rule", evidence_quoted=True),
     )
 
     def no_judge(*a, **k):
@@ -233,8 +235,8 @@ def test_rejudge_reads_stored_answers_offline_with_cached_verdicts(tmp_path, mon
     assert code == 0
     got = [json.loads(line) for line in (out / "rejudge.jsonl").read_text().splitlines()]
     assert [r["agree"] for r in got] == [True, False]
-    assert got[1]["deterministic"] == "CLAIMS_REMOVAL" and got[1]["judge_error"]
+    assert got[1]["deterministic"] == "REMOVED" and got[1]["judge_error"]
     report = (out / "rejudge.md").read_text()
-    assert "| V3n | 2 | 1 | 0 | 1 |" in report
+    assert "| V3n | 2 | 1 | 0 | 0 | 1 |" in report
     assert "## Stored PASSes the judge reads as a wrong claim" in report
     assert not (run_dir / "glm__V3n.jsonl").read_text().count("agree")  # the run is untouched

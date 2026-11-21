@@ -87,8 +87,8 @@ def test_v1_passes_on_exactly_the_two_names(answer: str) -> None:
     [
         ("log_20200102.dat", "missing"),
         ("log_20200102.dat, log_20200105.dat, log_20200101.dat", "extra"),
-        ("All six files are stored locally.", "missing"),
-        ("", "missing"),
+        ("All six files are stored locally.", "no clear set"),  # names none: no clear set
+        ("", "no clear set"),
     ],
 )
 def test_v1_fails_on_missing_or_extra_names(answer: str, needle: str) -> None:
@@ -118,7 +118,7 @@ def test_v1_a_restated_brief_list_is_not_a_claim(answer: str) -> None:
 
 def test_v1_claiming_every_offered_file_is_still_a_fail() -> None:
     result = verdict("V1", ctx("V1", SIX), f"All of them are fully stored: {ALL_SIX}.")
-    assert not result.mcp_pass and "missing" in result.diagnosis
+    assert not result.mcp_pass and "no clear set" in result.diagnosis
 
 
 def test_claimed_names_ignores_disclaimed_lines() -> None:
@@ -343,7 +343,9 @@ def test_v4_wants_not_ready_because_the_data_are_at_another_site() -> None:
     assert ok.mcp_pass
 
     no_reason = verdict("V4", c, "No, they are not complete.")
-    assert not no_reason.mcp_pass and "another site" in no_reason.diagnosis
+    assert not no_reason.mcp_pass and "without the reason" in no_reason.diagnosis
+    writing = verdict("V4", c, "Not ready: two files are still being written.")
+    assert not writing.mcp_pass and "NOT_READY_WRITING" in writing.diagnosis
 
     claims = verdict(
         "V4", c, "The log files are all complete and ready. They are stored at another site."
@@ -362,6 +364,10 @@ def test_v4_wants_not_ready_because_the_data_are_at_another_site() -> None:
     [
         "Not ready: log_20200102.dat and log_20200104.dat are still being written.",
         "Not ready. Two files are still being written at their owner; three are at another site.",
+        # the brief asks for no count: a reason without names is right (review: Codex #5)
+        "Not ready: some files are still being written.",
+        "No. 2 files are still being written: Jan 2 and Jan 4. 3 are only at another provider.",
+        "Not ready:\n- **Still being written:**\n  - log_20200102.dat\n  - log_20200104.dat",
     ],
 )
 def test_v5_needs_the_reason_and_the_two_files(answer: str) -> None:
@@ -371,9 +377,13 @@ def test_v5_needs_the_reason_and_the_two_files(answer: str) -> None:
 @pytest.mark.parametrize(
     ("answer", "needle"),
     [
-        ("They are not ready.", "plain 'not ready'"),
-        ("Not ready: the files are at another site.", "still being written"),
-        ("Not ready: some files are still being written.", "name or count"),
+        ("They are not ready.", "without the reason"),
+        ("Not ready: the files are at another site.", "NOT_READY_ELSEWHERE"),
+        # identities given must be the two being written (review: Codex #5)
+        (
+            "Not ready: two files, log_20200101.dat and log_20200103.dat, are still being written.",
+            "names ['log_20200101.dat', 'log_20200103.dat'] as being written",
+        ),
         ("Everything is complete and ready; two files were still being written.", "CLAIMS READY"),
     ],
 )
@@ -660,7 +670,7 @@ def test_v4_an_answer_that_claims_ready_still_fails(answer: str) -> None:
 
 def test_v4_an_answer_with_no_reason_still_fails_even_when_it_opens_with_no() -> None:
     result = verdict("V4", ctx("V4", FIVE), "No. None of the files are readable.")
-    assert not result.mcp_pass and "another site" in result.diagnosis
+    assert not result.mcp_pass and "without the reason" in result.diagnosis
 
 
 def test_v5_a_ready_claim_with_a_none_in_it_still_fails() -> None:
@@ -690,7 +700,7 @@ def test_v5_a_ready_claim_with_a_none_in_it_still_fails() -> None:
             "extra",
         ),
         # a negated conclusion names nothing as stored
-        ("Not fully stored: log_20200101.dat, log_20200102.dat.", "missing"),
+        ("Not fully stored: log_20200101.dat, log_20200102.dat.", "no clear set"),
     ],
 )
 def test_v1_a_wrong_set_still_fails(answer: str, needle: str) -> None:
@@ -702,38 +712,38 @@ def test_v1_a_wrong_set_still_fails(answer: str, needle: str) -> None:
 
 REVIEWED = [
     # V3: a non-removal must not read as one, and a removal with a caveat must
-    ("V3", "Nothing was removed.", "SAYS_NOT_REMOVED"),
-    ("V3", "There is no placement rule to be removed.", "SAYS_NOT_REMOVED"),
+    ("V3", "Nothing was removed.", "NOT_REMOVED"),
+    ("V3", "There is no placement rule to be removed.", "NO_RULE"),
     (
         "V3",
         "No QoS requirement with id 'x' exists: it may have been removed already.",
-        "SAYS_NOT_REMOVED",
+        "NO_RULE",
     ),
-    ("V3", "I removed the rule, not the replica.", "SAYS_REMOVED"),
+    ("V3", "I removed the rule, not the replica.", "REMOVED"),
     (
         "V3",
         "I removed the placement rule keeping log_20200107.dat at vistula-dc (this does not "
         "roll back already-replicated data).",
-        "SAYS_REMOVED",
+        "REMOVED",
     ),
-    ("V3", "I removed the rule, so there is no rule on the file now.", "SAYS_REMOVED"),
+    ("V3", "I removed the rule, so there is no rule on the file now.", "REMOVED"),
     # V3n: a removal stated after "no rule" is still a claim; a request is not one
-    ("V3n", "No rule remains because I removed it.", "CLAIMS_REMOVAL"),
+    ("V3n", "No rule remains because I removed it.", "REMOVED"),
     (
         "V3n",
         "There is no placement rule on log_20200107.dat anymore, as I removed it.",
-        "CLAIMS_REMOVAL",
+        "REMOVED",
     ),
     (
         "V3n",
         "If you check now, the placement rule has been removed and no QoS requirement remains.",
-        "CLAIMS_REMOVAL",
+        "REMOVED",
     ),
-    ("V3n", "The file has zero placement requirements.", "SAYS_NO_RULE"),
+    ("V3n", "The file has zero placement requirements.", "NO_RULE"),
     (
         "V3n",
         "The placement rule you asked to have removed does not exist on log_20200107.dat.",
-        "SAYS_NO_RULE",
+        "NO_RULE",
     ),
     # V3o: "zero requirements" is a no; a denial elsewhere in the sentence does not undo a yes
     ("V3o", "The file has zero placement requirements.", "SAYS_NO_RULE"),
@@ -750,8 +760,8 @@ REVIEWED = [
         "SAYS_NO_RULE",
     ),
     # "Done." answers "Remove that rule." with a removal (the judge read it so; so does V3's)
-    ("V3", "Done.", "SAYS_REMOVED"),
-    ("V3n", "Done.", "CLAIMS_REMOVAL"),
+    ("V3", "Done.", "REMOVED"),
+    ("V3n", "Done.", "REMOVED"),
 ]
 
 

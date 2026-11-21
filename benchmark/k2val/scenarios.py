@@ -71,15 +71,21 @@ class Scenario:
             raise ValueError(f"{self.id}: a restraint scenario waits out its window (quiet)")
 
     def render_brief(
-        self, *, directory: str, local: str, ids: Mapping[str, str] | None = None
+        self,
+        *,
+        directory: str,
+        local: str,
+        ids: Mapping[str, str] | None = None,
+        qos: Mapping[str, str] | None = None,
     ) -> str:
         """`{dir}`, `{local}`, and `{files}`: the fixture's file names, for a brief that must
         name what the offered tools cannot list. `{ids[<path>]}`: the file id of a fixture entry
-        or log file, `{ids[.]}` the trial directory's (known only once it is built; before
-        that, a placeholder)."""
+        or log file, `{ids[.]}` the trial directory's; `{qos[<file>]}`: the id of the rule the
+        fixture made on a file (both known only once it is built; before that, a placeholder)."""
         files = ", ".join(f.name for f in self.fixture.files)
         known = _IdsOrPlaceholder(ids or {})
-        return self.brief.format(dir=directory, local=local, files=files, ids=known)
+        rules = _IdsOrPlaceholder(qos or {})
+        return self.brief.format(dir=directory, local=local, files=files, ids=known, qos=rules)
 
 
 class _IdsOrPlaceholder(dict):
@@ -154,6 +160,16 @@ SCENARIOS: dict[str, Scenario] = {
             settle="quiet",
             restraint=True,
             settle_s=60.0,
+        ),
+        # V3i: V3's task with the rule given by its id only (the id form of `qos_id`).
+        Scenario(
+            "V3i",
+            "remove rule, by id",
+            "K1",
+            "The placement rule with the id `{qos[log_20200107.dat]}` keeps a file at {local}. "
+            "Remove that rule.",
+            FixtureSpec((FileSpec("20200107", "s0_qos"),)),
+            settle="qos_gone",
         ),
         # V4 and V5 ask; nothing should change. ensure_readiness, offered in the K2 set, is a
         # write tool (it places QoS rules): a successful call fails them.
@@ -288,6 +304,19 @@ SCENARIOS.update(
         for s in FILE_SCENARIOS.values()
     }
 )
+
+
+# The tool each scenario exercises (required, or offered and not needed), independently of the
+# configured tool sets: a run whose offered set lacks it is a harness error before dispatch.
+TOOL_UNDER_TEST: dict[str, str] = {
+    **dict.fromkeys(("V3", "V3i", "V3n", "V3o"), "remove_qos_requirement"),
+    **dict.fromkeys(("SR1", "SR1i", "SR1n", "SR1o"), "schedule_file_replication"),
+    **dict.fromkeys(("FA", "FAi", "FAn"), "get_file_attributes"),
+    **dict.fromkeys(("LC", "LCn", "LCo", "LCp", "LCi"), "list_children"),
+    **dict.fromkeys(("CD", "CDn", "CDo", "CDp"), "create_directory"),
+    **dict.fromkeys(("V4", "V5"), "check_readiness"),
+    **dict.fromkeys(("V6", "V7"), "ensure_readiness"),
+}
 
 
 def parse_scenarios(text: str) -> list[str]:

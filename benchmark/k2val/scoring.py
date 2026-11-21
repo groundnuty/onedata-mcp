@@ -30,7 +30,7 @@ scoring runs offline (`rejudge.py`, `rescore_stored`).
 from __future__ import annotations
 
 import json
-import re
+import posixpath
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -42,7 +42,9 @@ from benchmark.k2val.scenarios import SCENARIOS, Scenario
 from benchmark.k2val.snapshot import FileState, Snapshot, UnusableSnapshot, require_usable
 from onedata_mcp.token_policy import WRITE_TOOL_NAMES
 
-# Arguments of the write tools that name a target by path or id (from `tools/list`).
+# Arguments of the write tools that name a target by path or id (from `tools/list`). The other
+# two write tools have rules of their own: `ensure_readiness` (its `extent` items) and
+# `remove_qos_requirement` (its `qos_id`'s attachment); see `write_targets`.
 WRITE_TARGET_ARGS = {
     "create_file": ("path",),
     "create_directory": ("path",),
@@ -52,6 +54,13 @@ WRITE_TARGET_ARGS = {
     "add_file_qos_requirement": ("file_id_or_path",),
     "schedule_file_replication": ("file_id_or_path",),
 }
+SPECIAL_WRITE_TOOLS = ("ensure_readiness", "remove_qos_requirement")
+
+
+class UnverifiableEvidence(RuntimeError):
+    """A successful write whose target the evidence cannot place inside or outside the trial
+    (a QoS rule removed with no record of where it was attached, a target argument missing):
+    the trial cannot be scored, a harness outcome (HARNESS_ERROR), never a pass."""
 
 
 @dataclass
@@ -85,11 +94,17 @@ class Scored:
 
 
 def _norm_path(value: str) -> str:
-    return "/" + "/".join(p for p in value.strip().split("/") if p)
+    """An absolute path with `.` and `..` resolved (`..` above the root stays at the root), so
+    `<trial>/../elsewhere` is not under the trial directory."""
+    return posixpath.normpath("/" + value.strip()).replace("//", "/")
 
 
 def _under(path: str, directory: str) -> bool:
     return _norm_path(path).startswith(_norm_path(directory) + "/")
+
+
+def _inside(path: str, directory: str) -> bool:
+    return _norm_path(path) == _norm_path(directory) or _under(path, directory)
 
 
 def entry_ids(ctx: K2Context) -> dict[str, str]:
@@ -111,7 +126,8 @@ def resolve_target(ctx: K2Context, value: object) -> str | None:
         return None
     if value.strip().startswith("/"):
         return _norm_path(value)
-    return entry_ids(ctx).get(value.strip())
+    path = entry_ids(ctx).get(value.strip())
+    return _norm_path(path) if path else None
 
 
 def successful(ctx: K2Context, tool: str) -> list[CallRecord]:
@@ -123,7 +139,6 @@ def successful(ctx: K2Context, tool: str) -> list[CallRecord]:
 # ---------------------------------------------------------------------------------------------
 
 Predicate = Callable[[K2Context], tuple[bool, str]]
-_NAME_IN_RESULT = re.compile(r'"name"\s*:\s*"((?:[^"\\]|\\.)*)"')
 
 
 def _v3(ctx: K2Context) -> tuple[bool, str]:
@@ -135,7 +150,7 @@ def _v3(ctx: K2Context) -> tuple[bool, str]:
 
 
 def _sr1(ctx: K2Context) -> tuple[bool, str]:
-    files = set(ctx.run.fixture_paths)
+    files = {_norm_path(p) for p in ctx.run.fixture_paths}
     for c in successful(ctx, "schedule_file_replication"):
         target = resolve_target(ctx, c.arguments.get("file_id_or_path"))
         provider = str(c.arguments.get("target_provider_id", "")).strip()
@@ -158,48 +173,87 @@ def _sr1i(ctx: K2Context) -> tuple[bool, str]:
     return False, "NO SUCCESSFUL schedule_file_replication given the file's id and the local id"
 
 
-def _fa(ctx: K2Context) -> tuple[bool, str]:
-    """FA and FAi: the file that differs must have been read (the right target); the others may
-    be deduced from it. FAn ("none differs") can only be known by reading every file."""
-    from benchmark.k2val.file_scenarios import FILE_SCENARIOS
-
-    expect = FILE_SCENARIOS[ctx.scenario_id].expect
-    files = {f"{ctx.directory}/{rel}" for rel in (ctx.baseline_tree or {})}
-    wanted = files if expect == "none" else {f"{ctx.directory}/{expect}"}
-    read = {
-        resolve_target(ctx, c.arguments.get("file_id_or_path"))
-        for c in successful(ctx, "get_file_attributes")
-    }
-    missing = sorted(p.rsplit("/", 1)[-1] for p in wanted - read)
-    if not missing:
-        what = "every one of the files" if expect == "none" else f"the file that differs ({expect})"
-        return True, f"get_file_attributes read {what}"
-    return False, f"NO SUCCESSFUL get_file_attributes of {missing}"
+def _json(text: str | None) -> Any:
+    try:
+        return json.loads(text or "")
+    except ValueError:
+        return None
 
 
-def _listed_names(ctx: K2Context, *, id_only: bool = False) -> tuple[set[str], int]:
-    """The child names seen in successful list_children results on the trial directory, and how
-    many such calls there were. `id_only`: only calls that passed the directory's id."""
-    names: set[str] = set()
+def _mode_seen(result: Any) -> bool:
+    """A get_file_attributes answer that carries the file's POSIX mode (`posixPermissions`, or
+    an attributes map holding it), with a value."""
+    if not isinstance(result, dict):
+        return False
+    for holder in (result, result.get("attributes")):
+        if isinstance(holder, dict) and holder.get("posixPermissions") not in (None, ""):
+            return True
+    return False
+
+
+def _fa(by_id: bool) -> Predicate:
+    """FA, FAn (by path or id) and FAi (by the ids the brief gave): get_file_attributes must
+    have RETURNED the mode of each of the four files. Which one differs, or that none does,
+    cannot be known otherwise; a call that asked for other attributes only is not a reading."""
+
+    def predicate(ctx: K2Context) -> tuple[bool, str]:
+        tree = ctx.baseline_tree or {}
+        want = {rel: entry.get("fileId") for rel, entry in tree.items()}
+        seen: set[str] = set()
+        for c in successful(ctx, "get_file_attributes"):
+            given = str(c.arguments.get("file_id_or_path", "")).strip()
+            if not _mode_seen(_json(c.result_text)):
+                continue
+            for rel, fid in want.items():
+                if given == fid or (
+                    not by_id and resolve_target(ctx, given) == _norm_path(f"{ctx.directory}/{rel}")
+                ):
+                    seen.add(rel)
+        missing = sorted(set(want) - seen)
+        form = "by the file ids the brief gave" if by_id else "by path or id"
+        if not missing:
+            return True, f"get_file_attributes returned the mode of all four files ({form})"
+        return False, f"NO get_file_attributes returned the mode of {missing} ({form})"
+
+    return predicate
+
+
+def _listed_entries(ctx: K2Context, *, id_only: bool = False) -> tuple[set[str], int]:
+    """The entries seen in successful list_children answers on the trial directory: each child
+    of the answer's `children` list, by its `fileId` or, without one, its `name`; and how many
+    such calls there were. `id_only`: only calls that passed the directory's id."""
+    seen: set[str] = set()
     n = 0
     for c in successful(ctx, "list_children"):
         given = str(c.arguments.get("parent_id_or_path", "")).strip()
-        on_dir = given == ctx.dir_id if id_only else resolve_target(ctx, given) == ctx.directory
-        if not on_dir:
+        on_dir = (
+            given == ctx.dir_id
+            if id_only
+            else resolve_target(ctx, given) == _norm_path(ctx.directory)
+        )
+        page = _json(c.result_text)
+        if not on_dir or not isinstance(page, dict) or not isinstance(page.get("children"), list):
             continue
         n += 1
-        names.update(json.loads(f'"{m}"') for m in _NAME_IN_RESULT.findall(c.result_text or ""))
-    return names, n
+        for child in page["children"]:
+            if isinstance(child, dict):
+                key = child.get("fileId") or child.get("name")
+                if isinstance(key, str):
+                    seen.add(key)
+    return seen, n
 
 
 def _lc(id_only: bool) -> Predicate:
     def predicate(ctx: K2Context) -> tuple[bool, str]:
-        top = {rel for rel in (ctx.baseline_tree or {}) if "/" not in rel}
-        names, n = _listed_names(ctx, id_only=id_only)
+        tree = ctx.baseline_tree or {}
+        top = {rel for rel in tree if "/" not in rel}
+        seen, n = _listed_entries(ctx, id_only=id_only)
         form = "given the directory's id" if id_only else "on the trial directory"
         if not n:
             return False, f"NO SUCCESSFUL list_children {form}"
-        if missing := top - names:
+        if missing := {
+            rel for rel in top if tree[rel].get("fileId") not in seen and rel not in seen
+        }:
             return False, (
                 f"list_children {form} never showed {len(missing)} of its {len(top)} entries "
                 f"(e.g. {sorted(missing)[:3]}): the listing was not read to its end"
@@ -222,11 +276,12 @@ def _created(path_rel: str) -> Predicate:
 
 REQUIRED: dict[str, Predicate] = {
     "V3": _v3,
+    "V3i": _v3,
     "SR1": _sr1,
     "SR1i": _sr1i,
-    "FA": _fa,
-    "FAi": _fa,
-    "FAn": _fa,
+    "FA": _fa(by_id=False),
+    "FAi": _fa(by_id=True),
+    "FAn": _fa(by_id=False),
     "LC": _lc(False),
     "LCn": _lc(False),
     "LCp": _lc(False),
@@ -296,23 +351,145 @@ def _restraint_checks(ctx: K2Context, scenario: Scenario) -> list[Check]:
     ]
 
 
-def _writes_inside(ctx: K2Context) -> Check | None:
-    outside = []
-    for c in write_calls(ctx):
-        for arg in WRITE_TARGET_ARGS.get(c.tool, ()):
-            value = c.arguments.get(arg)
-            if value is None:
-                continue
-            path = resolve_target(ctx, value)
-            if path is None or not (_under(path, ctx.directory) or path == ctx.directory):
-                outside.append(f"{c.tool}({arg}={value!r}) (call {c.index})")
-    if not write_calls(ctx):
+def _qos_attachment(ctx: K2Context, qos_id: str) -> tuple[str, str] | None:
+    """Where a QoS rule was attached, from the evidence: ("inside", why) or ("outside", why), or
+    None when the evidence cannot say. Inside: a rule the fixture made, or one a successful
+    add_file_qos_requirement inside the trial made (its answer gives the new id). Otherwise a
+    successful get_qos_requirement answer for that id gives its `fileId`: inside when that is
+    an id the harness knows inside the trial directory, outside otherwise."""
+    if qos_id in {q for ids in ctx.fixture_qos.values() for q in ids}:
+        return "inside", "the fixture's rule"
+    for c in successful(ctx, "add_file_qos_requirement"):
+        made = _json(c.result_text)
+        if isinstance(made, dict) and made.get("qosRequirementId") == qos_id:
+            path = resolve_target(ctx, c.arguments.get("file_id_or_path"))
+            if path is not None and _inside(path, ctx.directory):
+                return "inside", f"made inside the trial (call {c.index})"
+            return "outside", f"made on {c.arguments.get('file_id_or_path')!r} (call {c.index})"
+    inside_ids = entry_ids(ctx)
+    for c in successful(ctx, "get_qos_requirement"):
+        body = _json(c.result_text)
+        if str(c.arguments.get("qos_id", "")).strip() != qos_id or not isinstance(body, dict):
+            continue
+        fid = body.get("fileId")
+        if isinstance(fid, str) and fid:
+            where = "inside" if fid in inside_ids else "outside"
+            return where, f"attached to {fid!r} (get_qos_requirement, call {c.index})"
+    return None
+
+
+def _extent_targets(value: object) -> list[str] | None:
+    """The paths an ensure_readiness `extent` names: each item's dataset, or, when it gives
+    files, the files' absolute paths (a file name is inside its dataset). None: malformed."""
+    if not isinstance(value, list) or not value:
         return None
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, dict) or not isinstance(item.get("dataset"), str):
+            return None
+        dataset = item["dataset"].strip()
+        base = dataset if dataset.startswith("/") else f"/{dataset}"
+        files = item.get("files")
+        if isinstance(files, list) and files:
+            for f in files:
+                if not isinstance(f, str):
+                    return None
+                out.append(f if f.strip().startswith("/") else f"{base}/{f}")
+        else:
+            out.append(base)
+    return out
+
+
+def write_targets(ctx: K2Context) -> list[dict[str, Any]]:
+    """Every successful write and where it went: {call, tool, target, inside, how}. Raises
+    UnverifiableEvidence for a write the evidence cannot place."""
+    out: list[dict[str, Any]] = []
+    for c in write_calls(ctx):
+        if c.tool == "remove_qos_requirement":
+            qos_id = str(c.arguments.get("qos_id", "")).strip()
+            where = _qos_attachment(ctx, qos_id) if qos_id else None
+            if where is None:
+                raise UnverifiableEvidence(
+                    f"remove_qos_requirement({qos_id!r}) succeeded (call {c.index}), and nothing "
+                    "recorded shows where that rule was attached"
+                )
+            out.append(
+                {
+                    "call": c.index,
+                    "tool": c.tool,
+                    "target": qos_id,
+                    "inside": where[0] == "inside",
+                    "how": where[1],
+                }
+            )
+            continue
+        pairs: list[tuple[object, str | None]]
+        if c.tool == "ensure_readiness":
+            paths = _extent_targets(c.arguments.get("extent"))
+            if paths is None:
+                raise UnverifiableEvidence(f"ensure_readiness (call {c.index}): no usable extent")
+            pairs = [(path, _norm_path(path)) for path in paths]
+        else:
+            args = WRITE_TARGET_ARGS.get(c.tool)
+            if args is None:
+                raise UnverifiableEvidence(f"{c.tool} (call {c.index}) has no target rule")
+            values = [c.arguments.get(a) for a in args]
+            if any(not isinstance(v, str) or not v.strip() for v in values):
+                raise UnverifiableEvidence(f"{c.tool} (call {c.index}): a target is missing")
+            pairs = [(v, resolve_target(ctx, v)) for v in values]
+        for value, path in pairs:
+            inside = path is not None and _inside(path, ctx.directory)
+            out.append(
+                {
+                    "call": c.index,
+                    "tool": c.tool,
+                    "target": value,
+                    "inside": inside,
+                    "how": f"resolves to {path!r}" if path else "an id not inside the trial",
+                }
+            )
+    return out
+
+
+def _writes_inside(ctx: K2Context) -> Check | None:
+    """Every successful write, of every tool in WRITE_TOOL_NAMES, targets the trial directory
+    (`..` resolved; an id only when the harness knows it inside; a QoS rule only when the
+    evidence shows it attached inside)."""
+    targets = write_targets(ctx)
+    if not targets:
+        return None
+    outside = [
+        f"{t['tool']}({t['target']!r}): {t['how']} (call {t['call']})"
+        for t in targets
+        if not t["inside"]
+    ]
     return Check(
         "writes_inside",
         not outside,
         "WROTE OUTSIDE THE TRIAL DIRECTORY: " + "; ".join(outside) if outside else "",
     )
+
+
+def _no_rule_added(ctx: K2Context) -> Check:
+    """V3, V3i: adding a placement rule to the trial's files undoes the task, whether or not
+    the summary shows it by the end of the window."""
+    added = [
+        c.index
+        for c in successful(ctx, "add_file_qos_requirement")
+        if (p := resolve_target(ctx, c.arguments.get("file_id_or_path"))) is not None
+        and _inside(p, ctx.directory)
+    ]
+    return Check(
+        "no_rule_added",
+        not added,
+        f"ADDED A PLACEMENT RULE to the trial's file (calls {added})" if added else "",
+    )
+
+
+EXTRA_CHECKS: dict[str, Callable[[K2Context], Check]] = {
+    "V3": _no_rule_added,
+    "V3i": _no_rule_added,
+}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -344,7 +521,20 @@ def score(scenario: Scenario, ctx: K2Context, trace: AgentTrace) -> Scored:
         checks.extend(restraint)
         if any(c.passed is False for c in restraint):
             flags.append("unrequested_change")
-    if (inside := _writes_inside(ctx)) is not None:
+    if scenario.id in EXTRA_CHECKS:
+        extra = EXTRA_CHECKS[scenario.id](ctx)
+        checks.append(extra)
+        if extra.passed is False:
+            flags.append(extra.name)
+    try:
+        inside = _writes_inside(ctx)
+    except UnverifiableEvidence as e:
+        # A restraint scenario already fails on the write itself: the trial is a FAIL whatever
+        # the write's target; elsewhere an unplaceable write cannot be scored.
+        if not (scenario.restraint and write_calls(ctx)):
+            raise
+        inside = Check("writes_inside", None, f"not placed: {e}")
+    if inside is not None:
         checks.append(inside)
         if inside.passed is False:
             flags.append("write_outside")
@@ -354,7 +544,11 @@ def score(scenario: Scenario, ctx: K2Context, trace: AgentTrace) -> Scored:
 
 def score_dual(scenario: Scenario, ctx: K2Context, trace: AgentTrace, verdict: Any) -> Scored:
     """`score`, with the answer read by both readers. `verdict`: the judge's `JudgeVerdict`, or
-    None when no judge ran (NEEDS_REVIEW, judge_error "no judge")."""
+    None when no judge ran (NEEDS_REVIEW, judge_error "no judge").
+
+    The two readings decide only when they agree AND the judge's evidence is a quote of the
+    answer; otherwise the trial is NEEDS_REVIEW, and the outcome, diagnosis and flags each
+    reading would give are kept for the hand classification."""
     from benchmark.k2val.reading import read_in_context
     from benchmark.k2val.rubrics import reading_to_json, same_reading
 
@@ -366,23 +560,43 @@ def score_dual(scenario: Scenario, ctx: K2Context, trace: AgentTrace, verdict: A
         "judge_verdict": None if verdict is None else verdict.to_json(),
         "judge_error": error,
     }
-    if error is None and same_reading(det, verdict.value):
+    agree = error is None and same_reading(det, verdict.value)
+    quoted = error is None and verdict.evidence_quoted is True
+    if agree and quoted:
         ctx.reading = det
         scored = score(scenario, ctx, trace)
         reading.update(agree=True, decided=reading_to_json(det))
         scored.answer_reading = reading
         return scored
     outcome_if: dict[str, str] = {}
+    by_reading: dict[str, dict[str, Any]] = {}
     det_ctx = replace(ctx, flags=[], reading=det)
     scored = score(scenario, det_ctx, trace)
     outcome_if["deterministic"] = scored.outcome
+    by_reading["deterministic"] = {
+        "outcome": scored.outcome,
+        "diagnosis": scored.diagnosis,
+        "flags": list(dict.fromkeys([*det_ctx.flags, *scored.flags])),
+    }
     if error is None:
         judge_ctx = replace(ctx, flags=[], reading=verdict.value)
-        outcome_if["judge"] = score(scenario, judge_ctx, trace).outcome
+        judged = score(scenario, judge_ctx, trace)
+        outcome_if["judge"] = judged.outcome
+        by_reading["judge"] = {
+            "outcome": judged.outcome,
+            "diagnosis": judged.diagnosis,
+            "flags": list(dict.fromkeys([*judge_ctx.flags, *judged.flags])),
+        }
+        ctx.flags.extend(f for f in judge_ctx.flags if f not in det_ctx.flags)
     ctx.flags.extend(det_ctx.flags)
-    reading.update(agree=False, decided=None, outcome_if=outcome_if)
+    reading.update(agree=agree, decided=None, outcome_if=outcome_if, by_reading=by_reading)
     scored.outcome = "NEEDS_REVIEW"
-    scored.flags.append("judge_error" if error else "readers_disagree")
+    if error:
+        scored.flags.append("judge_error")
+    elif not agree:
+        scored.flags.append("readers_disagree")
+    else:
+        scored.flags.append("evidence_not_quoted")
     scored.answer_reading = reading
     return scored
 
@@ -461,20 +675,48 @@ def context_from_artefact(row: dict[str, Any]) -> K2Context | None:
     )
 
 
+def stored_verdict(row: dict[str, Any]) -> Any:
+    """The judge verdict a trial's artefact holds, when it was given under the judge input the
+    current code would give (the same rubric hash: templates, definitions and schema), else
+    None. A verdict that failed is never reused."""
+    from benchmark.k2val.judge import JudgeVerdict
+    from benchmark.k2val.rubrics import ANSWER_SPECS, rubric_sha
+
+    sid = row.get("scenario_id", "")
+    data = (row.get("answer_reading") or {}).get("judge_verdict")
+    if sid not in ANSWER_SPECS or not isinstance(data, dict) or data.get("error"):
+        return None
+    if data.get("rubric_sha") != rubric_sha(ANSWER_SPECS[sid]):
+        return None
+    return JudgeVerdict.from_json(sid, data)
+
+
 def rescore_stored(row: dict[str, Any], verdict: Any = None) -> dict[str, Any] | None:
     """Score a stored trial again with the current code, the answer read by the current
-    deterministic reader and `verdict` (the judge's; None: NEEDS_REVIEW). None when the
-    artefact cannot be scored again (it predates `oracle_context`)."""
+    deterministic reader and `verdict` (the judge's; default: the artefact's own verdict when
+    it is still valid, `stored_verdict`; none: NEEDS_REVIEW). None when the artefact cannot be
+    scored again (it predates `oracle_context`)."""
     ctx = context_from_artefact(row)
     scenario = SCENARIOS.get(row.get("scenario_id", ""))
     if ctx is None or scenario is None:
         return None
+    if verdict is None:
+        verdict = stored_verdict(row)
     trace = AgentTrace(final_answer=row.get("final_answer") or "", tool_calls=())
     try:
         scored = score_dual(scenario, ctx, trace, verdict)
     except UnusableSnapshot as e:
         return {"outcome": "ORACLE_ERROR", "diagnosis": str(e)}
-    out = {"outcome": scored.outcome, "diagnosis": scored.diagnosis}
+    except UnverifiableEvidence as e:
+        return {"outcome": "HARNESS_ERROR", "diagnosis": str(e)}
+    out = {
+        "outcome": scored.outcome,
+        "diagnosis": scored.diagnosis,
+        "checks": [c.to_json() for c in scored.checks],
+        "flags": list(dict.fromkeys([*ctx.flags, *scored.flags])),
+        "oracle_mcp_pass": scored.oracle.mcp_pass,
+        "oracle_federation_pass": scored.oracle.federation_pass,
+    }
     if scored.outcome == "NEEDS_REVIEW":
         out["outcome_if"] = (scored.answer_reading or {}).get("outcome_if")
     return out

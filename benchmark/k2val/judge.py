@@ -34,13 +34,16 @@ from typing import Any, Protocol
 
 from benchmark.k2val.rubrics import (
     ANSWER_SPECS,
+    RETRY_NOTE,
     AnswerSpec,
     Reading,
     normalise_names,
     output_schema,
+    reading_from_json,
     reading_to_json,
     rubric,
     rubric_sha,
+    user_message,
 )
 
 DEFAULT_MODEL = "claude-sonnet-5-5"
@@ -95,10 +98,9 @@ class JudgeVerdict:
     @classmethod
     def from_json(cls, scenario_id: str, data: dict[str, Any]) -> JudgeVerdict:
         spec = ANSWER_SPECS[scenario_id]
-        value = data.get("value")
         return cls(
             scenario_id=scenario_id,
-            value=normalise_names(value) if spec.kind == "names" else value,
+            value=reading_from_json(spec, data.get("value")),
             evidence=data.get("evidence") or "",
             error=data.get("error"),
             model=data.get("model") or "",
@@ -145,36 +147,52 @@ def parse_verdict(spec: AnswerSpec, payload: Any) -> tuple[Reading, str]:
     evidence = obj.get("evidence")
     if not isinstance(evidence, str):
         raise MalformedVerdict("no string 'evidence'")
+    allowed = {
+        "evidence",
+        *(("label",) if spec.kind != "names" else ()),
+        *(("names",) if spec.kind != "label" else ()),
+    }
+    if extra := sorted(set(obj) - allowed):
+        raise MalformedVerdict(f"keys {extra} are not in the schema")
+    label = obj.get("label")
+    if spec.kind != "names" and label not in spec.labels:
+        raise MalformedVerdict(f"label {label!r} is not one of {list(spec.labels)}")
     if spec.kind == "label":
-        label = obj.get("label")
-        if label not in spec.labels:
-            raise MalformedVerdict(f"label {label!r} is not one of {list(spec.labels)}")
         return label, evidence[:EVIDENCE_MAX]
     if "names" not in obj:
         raise MalformedVerdict("no 'names'")
     try:
-        return normalise_names(obj["names"]), evidence[:EVIDENCE_MAX]
+        names = normalise_names(obj["names"])
     except ValueError as e:
         raise MalformedVerdict(str(e)) from None
+    if spec.kind == "label_names":
+        if names is None:
+            raise MalformedVerdict("'names' must be a list")
+        return (label, names), evidence[:EVIDENCE_MAX]
+    return names, evidence[:EVIDENCE_MAX]
 
 
 def _flat(text: str) -> str:
     return _SPACE.sub(" ", _MARKS.sub("", text)).strip().lower()
 
 
+_ELLIPSIS = re.compile(r"\.\.\.|…|\[\.\.\.\]")
+
+
 def evidence_quoted(evidence: str, answer: str) -> bool:
-    flat = _flat(evidence).strip(" .…\"'")
-    return bool(flat) and flat in _flat(answer)
+    """The evidence is a passage of the answer: each part of it between ellipses is found in the
+    answer (whitespace, emphasis and case aside). An empty answer has only empty evidence."""
+    if not answer.strip():
+        return not evidence.strip()
+    flat_answer = _flat(answer)
+    parts = [_flat(p).strip(" .,;:\"'“”") for p in _ELLIPSIS.split(evidence)]
+    parts = [p for p in parts if p]
+    return bool(parts) and all(p in flat_answer for p in parts)
 
 
 # ---------------------------------------------------------------------------------------------
 # The judge on the subscription
 # ---------------------------------------------------------------------------------------------
-
-USER_TEMPLATE = "The assistant's final answer:\n<answer>\n{answer}\n</answer>"
-RETRY_NOTE = (
-    "\n\nYour previous reply was not a valid verdict ({why}). Reply with the JSON object only."
-)
 
 
 class ClaudeSdkJudge:
@@ -195,7 +213,7 @@ class ClaudeSdkJudge:
             rubric_sha=rubric_sha(spec),
         )
         system = rubric(spec, brief=brief, local=local)
-        prompt = USER_TEMPLATE.format(answer=answer)
+        prompt = user_message(answer)
         t0 = time.monotonic()
         async with self._sem:
             why = ""

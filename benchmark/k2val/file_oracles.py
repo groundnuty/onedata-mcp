@@ -136,19 +136,81 @@ _FA_NONE = re.compile(
 )
 
 
-def fa_label(answer: str, names: tuple[str, ...]) -> str:
-    """FA, FAi, FAn: one of `names`, "none", or "unclear".
+# An explicit conclusion naming the odd file: "log_20200103.dat is the one that differs".
+_FA_ODD = re.compile(
+    r"\b(?:is|was) the (?:only |odd )?(?:one|file)\b|\bdiffers?\b|\bis different\b|\bstands out\b"
+    r"|\bhas (?:different|other|distinct|unique|more restrictive|stricter) (?:permissions|mode)\b"
+    r"|\bthe odd one\b",
+    re.I,
+)
+_MODE = re.compile(r"\b0?([0-7]{3})\b|\b([r-][w-][x-]){3}\b")
+# A contrast: one clause about one file, another about the others ("..., whereas a, b and c all
+# have the same permissions").
+_CONTRAST = re.compile(r"\s(?:whereas|while|but|and)\s|;", re.I)
+_OTHERS_SAME = re.compile(
+    r"\b(?:all|the (?:other|remaining) (?:three|ones|files)|the others|others)\b[^.\n]{0,60}"
+    r"\b(?:same|identical|share)",
+    re.I,
+)
 
-    A name mentioned alone, with no "none" wording, is the answer. Otherwise the last sentence
-    that names a file or says none decides: one name and no "none" wording is that name; "none"
-    wording with no single name is "none"; anything else is "unclear"."""
+
+def _modes_listed(answer: str, names: tuple[str, ...]) -> dict[str, str]:
+    """A per-file listing of modes: each of `names` on a line (or a clause) with one mode."""
+    out: dict[str, str] = {}
+    for part in re.split(r"\n|;|,(?=\s*(?:log_|`))", _plain(answer)):
+        named = [n for n in names if n in part]
+        modes = [m.group(0).lstrip("0") or "0" for m in _MODE.finditer(part.replace(".dat", ""))]
+        if len(named) == 1 and len(set(modes)) == 1:
+            out[named[0]] = modes[0]
+    return out
+
+
+def fa_label(answer: str, names: tuple[str, ...]) -> str:
+    """FA, FAi, FAn: one of `names`, "none", or "unclear". In order:
+
+    1. a sentence naming exactly one file as the odd one ("X is the one that differs", "X
+       has different permissions"), or a contrast of one named file against the others ("X is
+       600, whereas a, b and c all have the same permissions"): that file;
+    2. a sentence with "none" wording and no single named odd file: "none" ("None of the files
+       differ:" before a listing of four equal modes);
+    3. a per-file listing of the four modes: the one file whose mode differs, or "none" when all
+       are equal;
+    4. else the last sentence that names one file or says none."""
     text = _plain(answer)
+    sentences = _sentences(answer)
+    for sentence in sentences:
+        clauses = [c for c in _CONTRAST.split(sentence) if c.strip()]
+        for k, clause in enumerate(clauses):
+            here = [n for n in names if n in clause]
+            if len(here) != 1:
+                continue
+            rest = " ".join(clauses[k + 1 :] + clauses[:k])
+            if _FA_ODD.search(clause) and not _FA_NONE.search(clause):
+                return here[0]
+            if _OTHERS_SAME.search(rest) and here[0] not in rest:
+                return here[0]
+    for sentence in sentences:
+        in_sentence = [n for n in names if n in sentence]
+        says_none = _FA_NONE.search(sentence) and not _FA_ODD.search(sentence)
+        if says_none and (not in_sentence or len(in_sentence) == len(names)):
+            return "none"
+    modes = _modes_listed(answer, names)
+    if len(modes) == len(names):
+        counts: dict[str, list[str]] = {}
+        for n, m in modes.items():
+            counts.setdefault(m, []).append(n)
+        if len(counts) == 1:
+            return "none"
+        odd = [ns[0] for ns in counts.values() if len(ns) == 1]
+        if len(counts) == 2 and len(odd) == 1:
+            return odd[0]
+        return "unclear"
     named = {n for n in names if n in text}
     if len(named) == 1 and not _FA_NONE.search(text):
         return named.pop()
     if not named and _FA_NONE.search(text):
         return "none"
-    for sentence in reversed(_sentences(answer)):
+    for sentence in reversed(sentences):
         in_sentence = {n for n in names if n in sentence}
         says_none = bool(_FA_NONE.search(sentence))
         if not in_sentence and not says_none:
@@ -195,6 +257,7 @@ LOG_NAME = re.compile(r"log_\d{8}\.dat")
 # "no subdirectories", "none", "zero subdirectories", "it has only files", "does not contain any"
 _NO_SUBDIRS = re.compile(
     r"\bno (?:sub-?)?director(?:y|ies)\b|\bnone\b|\bzero (?:sub-?)?director"
+    r"|\b(?:sub-?)?director(?:y|ies)\s*:\s*0\b|\b0 (?:sub-?)?director"
     r"|\bonly (?:two )?(?:regular )?files\b|\b(?:has|have|contains?) no\b"
     r"|\b(?:does|do)(?:n['’]t| not) (?:have|contain) any\b",
     re.I,
@@ -206,7 +269,11 @@ _NOT_A_NAME = {
     *("none", "no", "nothing", "empty", "n/a", "na", "yes", "and", "or", "the", "it", "there"),
     *("file", "files", "directory", "directories", "subdirectory", "subdirectories", "folder"),
     *("folders", "entries", "entry", "islast", "nextpagetoken", "fileid", "posixpermissions"),
+    # type words and number words: "Subdirectories: 0", "type: DIR"
+    *("dir", "reg", "type", "symlnk", "symlink", "regular"),
+    *("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"),
 }
+_FIXTURE_FILE = re.compile(r"^(?:log_\d{8}|acq_\d{4})\.dat$")
 _FILE_EXT = re.compile(r"\.[A-Za-z0-9]{1,5}$")
 _DIR_WORDS = re.compile(r"\b(?:sub-?)?(?:director(?:y|ies)|folders?)\b", re.I)
 _LIST_SPLIT = re.compile(r",|;|\band\b|\bor\b|\s[—–-]\s")
@@ -224,10 +291,10 @@ def _system_names() -> set[str]:
 
 def _dir_like(token: str, exclude: set[str]) -> str | None:
     """`token` as a directory name the answer gives, or None (a file, a word, a system name)."""
-    name = normalise_name(token).strip(".,;:!?")
-    if not re.fullmatch(r"[A-Za-z0-9][\w-]*", name or "-") or _FILE_EXT.search(name):
+    name = normalise_name(token).strip(".,;:!?()")
+    if not re.fullmatch(r"[A-Za-z0-9][\w.-]*", name or "-") or name.isdigit():
         return None
-    if name.lower() in _NOT_A_NAME or name.lower() in exclude:
+    if name.lower() in _NOT_A_NAME or name.lower() in exclude or _FIXTURE_FILE.match(name):
         return None
     return name
 
@@ -240,7 +307,7 @@ def _extra_names(text: str, candidates: tuple[str, ...], exclude: set[str]) -> s
     # a backticked absolute path is the directory cited, not one of its entries
     tokens.extend(t for t in _BACKTICKED.findall(text) if not t.strip().startswith("/"))
     tokens.extend(_UNDERSCORED.findall(_EMPHASIS.sub("", text)))
-    for line in _plain(text).splitlines():
+    for line in (s for ln in _plain(text).splitlines() for s in re.split(r"(?<=\.)\s+", ln)):
         if not (any(c in line for c in candidates) or _DIR_WORDS.search(line)):
             continue
         body = _PARENS.sub(" ", line)
@@ -307,9 +374,10 @@ def _verify_listing(ctx: K2Context, trace: AgentTrace, got: frozenset[str] | Non
 
 
 def system_names(ctx: K2Context) -> tuple[str, ...]:
-    """Names an answer may cite that are not entries: the trial directory's path components
-    and the two sites."""
-    return (*[p for p in ctx.directory.split("/") if p], ctx.local_name, ctx.owner_name)
+    """Names an answer may cite that are not entries: the trial directory's path components,
+    its id, and the two sites."""
+    parts = [p for p in ctx.directory.split("/") if p]
+    return (*parts, *([ctx.dir_id] if ctx.dir_id else []), ctx.local_name, ctx.owner_name)
 
 
 def verify_lc(ctx: K2Context, trace: AgentTrace) -> OracleResult:
@@ -336,11 +404,13 @@ FILE_ORACLES["LCo"] = verify_lco
 
 # Said first, it wins: "could not be created" is not a creation.
 _NOT_CREATED = re.compile(
-    r"\balready\b|\bis (?:a|an) (?:regular |existing |plain )?file\b"
+    # "already exists" / "already there" refuses; "already created" or "the parent already
+    # existed" does not, nor does "summary.txt is a regular file" (CDo's own result)
+    r"\balready (?:exists?|there|present|taken|in use|occupied)\b"
     r"|\b(?:could|can|did|was|were|has|have|had)(?:n['’]t|\s+not)\s+(?:be\s+|been\s+)?"
     r"(?:create|made|make)|\bcannot\s+(?:be\s+)?(?:create|make)|\bnot created\b|\bunable\b"
-    r"|\bfail(?:ed|s|ure)?\b|\bno directory was\b|\bname is (?:taken|in use)\b|\bconflict"
-    r"|\bnot a directory\b",
+    r"|(?<!without )\bfail(?:ed|s|ure)?\b|\bno directory was\b|\bname is (?:taken|in use)\b"
+    r"|\bconflict|\bnot a directory\b",
     re.I,
 )
 _CREATED = re.compile(

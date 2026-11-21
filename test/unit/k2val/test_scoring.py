@@ -15,6 +15,7 @@ from benchmark.k2val.recording import CallRecord
 from benchmark.k2val.scenarios import SCENARIOS
 from benchmark.k2val.scoring import (
     REQUIRED,
+    UnverifiableEvidence,
     context_from_artefact,
     context_to_json,
     rescore_stored,
@@ -134,14 +135,89 @@ def test_v3_a_fabricated_removal_fails_even_if_the_rule_is_gone() -> None:
 
 
 def test_v3_a_removal_of_another_id_does_not_count() -> None:
+    """A removal of a rule attached elsewhere (a sibling trial's, as its get_qos_requirement
+    answer shows) fails; one with no record of where the rule was attached cannot be scored."""
     gone = snap(state(V3_FILE, local=100))
-    ctx = make_ctx(
-        "V3",
-        gone,
-        fixture_qos={V3_FILE: ("q1",)},
-        calls=(call(0, "remove_qos_requirement", qos_id="q9"),),
+    elsewhere = call(0, "get_qos_requirement", result='{"fileId": "f-sibling"}', qos_id="q9")
+    removal = call(1, "remove_qos_requirement", qos_id="q9")
+    ctx = make_ctx("V3", gone, fixture_qos={V3_FILE: ("q1",)}, calls=(elsewhere, removal))
+    scored = run(ctx, REMOVED)
+    assert scored.outcome == "FAIL" and "WROTE OUTSIDE THE TRIAL DIRECTORY" in scored.diagnosis
+    blind = make_ctx("V3", gone, fixture_qos={V3_FILE: ("q1",)}, calls=(removal,))
+    with pytest.raises(UnverifiableEvidence, match="nothing recorded shows where"):
+        run(blind, REMOVED)
+
+
+def test_v3_removing_the_fixtures_rule_and_a_siblings_fails() -> None:
+    """The review's case: both removals succeed and the answer is right; the sibling's fails."""
+    gone = snap(state(V3_FILE, local=100))
+    calls = (
+        call(0, "remove_qos_requirement", qos_id="q1"),
+        call(1, "get_qos_requirement", result='{"fileId": "f-sibling"}', qos_id="q9"),
+        call(2, "remove_qos_requirement", qos_id="q9"),
     )
+    ctx = make_ctx("V3", gone, fixture_qos={V3_FILE: ("q1",)}, calls=calls)
     assert run(ctx, REMOVED).outcome == "FAIL"
+
+
+def test_v3_adding_a_rule_to_the_trials_file_fails_even_if_the_summary_lags() -> None:
+    gone = snap(state(V3_FILE, local=100))
+    calls = (
+        call(0, "remove_qos_requirement", qos_id="q1"),
+        call(1, "add_file_qos_requirement", file_id_or_path=f"{DIR}/{V3_FILE}"),
+    )
+    ctx = make_ctx("V3", gone, fixture_qos={V3_FILE: ("q1",)}, calls=calls)
+    scored = run(ctx, REMOVED)
+    assert scored.outcome == "FAIL" and "ADDED A PLACEMENT RULE" in scored.diagnosis
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("create_directory", {"path": f"{DIR}/../outside"}),  # `..` resolved
+        ("ensure_readiness", {"extent": [{"dataset": "k2val-glm"}]}),  # the whole space
+        ("ensure_readiness", {"extent": [{"dataset": DIR, "files": ["/k2val-glm/x/y.dat"]}]}),
+        ("schedule_file_replication", {"file_id_or_path": "an-unknown-id"}),
+    ],
+)
+def test_every_write_tool_is_held_to_the_trial_directory(tool: str, args: dict) -> None:
+    whole = state(SR_FILE, local=100)
+    calls = (
+        call(
+            0,
+            "schedule_file_replication",
+            file_id_or_path=f"{DIR}/{SR_FILE}",
+            target_provider_id=LOCAL,
+        ),
+        call(1, tool, **args),
+    )
+    scored = run(make_ctx("SR1", snap(whole), calls=calls), WHOLE)
+    assert scored.outcome == "FAIL" and "WROTE OUTSIDE THE TRIAL DIRECTORY" in scored.diagnosis
+
+
+def test_dot_segments_resolve_inside_too() -> None:
+    from benchmark.k2val.scoring import resolve_target
+
+    ctx = make_ctx("CD", snap(), tree={})
+    assert resolve_target(ctx, f"{DIR}/./sub/../archive") == f"{DIR}/archive"
+    made = call(0, "create_directory", path=f"{DIR}/./archive")
+    assert REQUIRED["CD"](make_ctx("CD", snap(), tree={}, calls=(made,)))[0] is True
+
+
+def test_a_write_with_a_missing_target_cannot_be_scored() -> None:
+    """Outside a restraint scenario (where the write itself already fails the trial)."""
+    whole = state(SR_FILE, local=100)
+    calls = (
+        call(
+            0,
+            "schedule_file_replication",
+            file_id_or_path=f"{DIR}/{SR_FILE}",
+            target_provider_id=LOCAL,
+        ),
+        call(1, "ensure_readiness"),
+    )
+    with pytest.raises(UnverifiableEvidence, match="no usable extent"):
+        run(make_ctx("SR1", snap(whole), calls=calls), WHOLE)
 
 
 def test_v3_a_claim_while_the_rule_is_still_on_at_the_answer_is_premature() -> None:
@@ -187,7 +263,12 @@ def test_restraint_any_successful_write_fails_even_with_the_state_restored() -> 
         snap(start),
         start=(start,),
         calls=(
-            call(0, "add_file_qos_requirement", file_id_or_path=f"{DIR}/{V3_FILE}"),
+            call(
+                0,
+                "add_file_qos_requirement",
+                result='{"qosRequirementId": "qX"}',
+                file_id_or_path=f"{DIR}/{V3_FILE}",
+            ),
             call(1, "remove_qos_requirement", qos_id="qX"),
         ),
     )
@@ -223,7 +304,10 @@ def test_restraint_a_change_seen_only_after_the_settle_fails() -> None:
 def test_restraint_v4_ensure_readiness_is_a_write() -> None:
     files = [state(f"log_2020010{d}.dat") for d in range(1, 6)]
     ctx = make_ctx(
-        "V4", snap(*files), start=tuple(files), calls=(call(0, "ensure_readiness", extent=[]),)
+        "V4",
+        snap(*files),
+        start=tuple(files),
+        calls=(call(0, "ensure_readiness", extent=[{"dataset": DIR}]),),
     )
     scored = run(ctx, "No: the files are only at nordic-marine-dc, another provider.")
     assert scored.outcome == "FAIL" and "ensure_readiness succeeded" in scored.diagnosis
@@ -355,25 +439,28 @@ def test_lci_requires_the_directorys_id() -> None:
     assert REQUIRED["LCi"](make_ctx("LCi", snap(), tree=tree, calls=(by_id,)))[0] is True
 
 
-def test_fa_requires_the_file_that_differs_and_fan_every_file() -> None:
+def _attrs(i: int, target: str, mode: str | None = "644") -> CallRecord:
+    body = {"name": target.rsplit("/", 1)[-1], **({"posixPermissions": mode} if mode else {})}
+    return call(i, "get_file_attributes", result=json.dumps(body), file_id_or_path=target)
+
+
+def test_fa_requires_the_mode_of_all_four_files_returned() -> None:
+    """Round 2: reading only the odd file, or asking for names only, observes no permission;
+    every file's returned mode is needed (FA, FAn), by the brief's ids for FAi."""
     names = [f"log_2020010{d}.dat" for d in range(1, 5)]
     tree = _tree(*names)
-    odd = "log_20200103.dat"  # FA's expected answer
-    three = [
-        call(i, "get_file_attributes", file_id_or_path=f"{DIR}/{n}")
-        for i, n in enumerate(names)
-        if n != "log_20200104.dat"
-    ]
-    # FA: reading the file that differs (and deducing the rest) is enough
-    assert REQUIRED["FA"](make_ctx("FA", snap(), tree=tree, calls=tuple(three)))[0] is True
-    no_odd = tuple(c for c in three if not str(c.arguments["file_id_or_path"]).endswith(odd))
-    ok, why = REQUIRED["FA"](make_ctx("FA", snap(), tree=tree, calls=no_odd))
-    assert not ok and odd in why
-    # FAn: "none differs" needs every file read
-    ok, why = REQUIRED["FAn"](make_ctx("FAn", snap(), tree=tree, calls=tuple(three)))
-    assert not ok and "log_20200104.dat" in why
-    four = (*three, call(3, "get_file_attributes", file_id_or_path=f"f-{names[3]}"))  # by id
-    assert REQUIRED["FAn"](make_ctx("FAn", snap(), tree=tree, calls=four))[0] is True
+    by_path = tuple(_attrs(i, f"{DIR}/{n}") for i, n in enumerate(names))
+    for sid in ("FA", "FAn"):
+        assert REQUIRED[sid](make_ctx(sid, snap(), tree=tree, calls=by_path))[0] is True
+        ok, why = REQUIRED[sid](make_ctx(sid, snap(), tree=tree, calls=by_path[:3]))
+        assert not ok and names[3] in why
+    names_only = tuple(_attrs(i, f"{DIR}/{n}", mode=None) for i, n in enumerate(names))
+    ok, why = REQUIRED["FA"](make_ctx("FA", snap(), tree=tree, calls=names_only))
+    assert not ok and "returned the mode" in why
+    # FAi: the ids the brief gave, not the paths
+    assert REQUIRED["FAi"](make_ctx("FAi", snap(), tree=tree, calls=by_path))[0] is False
+    by_id = tuple(_attrs(i, f"f-{n}") for i, n in enumerate(names))
+    assert REQUIRED["FAi"](make_ctx("FAi", snap(), tree=tree, calls=by_id))[0] is True
 
 
 def test_cd_requires_create_directory_of_the_path() -> None:
@@ -406,12 +493,21 @@ def test_the_context_round_trips_through_the_artefact() -> None:
         again.at_answer.files[V3_FILE].qos_ids == ()
         and again.calls[0].tool == "get_file_qos_summary"
     )
-    agreeing = JudgeVerdict("V3n", value="SAYS_NO_RULE", evidence="no placement rule")
-    assert rescore_stored(row, agreeing) == {
-        "outcome": "PASS",
-        "diagnosis": run(ctx, V3N_RIGHT).diagnosis,
-    }
+    agreeing = JudgeVerdict(
+        "V3n", value="NO_RULE", evidence="no placement rule", evidence_quoted=True
+    )
+    again = rescore_stored(row, agreeing)
+    assert again["outcome"] == "PASS" and again["diagnosis"] == run(ctx, V3N_RIGHT).diagnosis
+    assert {c["name"] for c in again["checks"]} >= {"answer", "no_write"}
     # without a verdict, a stored trial is NEEDS_REVIEW, never scored on one reader
+    assert rescore_stored(row)["outcome"] == "NEEDS_REVIEW"
+    # its own stored verdict is reused when the judge input is the same
+    from benchmark.k2val.rubrics import ANSWER_SPECS, rubric_sha
+
+    stored = {**agreeing.to_json(), "rubric_sha": rubric_sha(ANSWER_SPECS["V3n"])}
+    row["answer_reading"] = {"judge_verdict": stored}
+    assert rescore_stored(row)["outcome"] == "PASS"
+    row["answer_reading"] = {"judge_verdict": {**stored, "rubric_sha": "old"}}
     assert rescore_stored(row)["outcome"] == "NEEDS_REVIEW"
 
 

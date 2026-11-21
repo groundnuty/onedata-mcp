@@ -86,68 +86,122 @@ def covered_bytes(blocks: list[Any], size: int) -> int:
 
 @dataclass
 class DistView:
-    """One provider's answer to `GET /data/{id}/distribution`, reduced to what the panel needs."""
+    """One provider's answer to `GET /data/{id}/distribution`, reduced to what the panel needs.
 
-    size: int = 0
-    # bytes of [0, size) each provider holds, from the blocks it reports
-    covered: dict[str, int] = field(default_factory=dict)
+    Each provider entry is read on its own: its own size (`sizes`), the size field it carried,
+    and its blocks as validated intervals. A provider whose entry failed, has no size, has an
+    empty or missing storage map, one storage failed, or an interval that is not
+    `[offset >= 0, length > 0]` inside its size is in `failed`: its bytes are unknown, never 0.
+    """
+
+    sizes: dict[str, int] = field(default_factory=dict)
+    size_fields: dict[str, str] = field(default_factory=dict)
+    # validated, merged `(offset, length)` intervals of each readable provider
+    intervals: dict[str, list[tuple[int, int]]] = field(default_factory=dict)
     failed: frozenset[str] = frozenset()
-    # which size field the answer carried: PPAM saw `virtualSize` on 25.0, the swagger says
-    # `logicalSize`. Recorded so a live run shows which one this federation answers.
-    size_field: str = ""
 
-    def covers(self, provider_id: str) -> bool:
-        """The provider's blocks cover the whole file. A size of 0 covers nothing: every file
-        the panel judges has data, and "0 of 0 bytes" is a reading to distrust, not a copy."""
-        return self.size > 0 and self.covered.get(provider_id, 0) >= self.size and self.size_known
+    def readable(self, provider_id: str) -> bool:
+        return provider_id in self.intervals and provider_id not in self.failed
+
+    def size_of(self, provider_id: str) -> int:
+        return self.sizes.get(provider_id, 0)
+
+    @property
+    def size(self) -> int:
+        """The largest size any readable entry gives (fixture waits on the owner's own view
+        use `size_of`)."""
+        return max((self.sizes[p] for p in self.intervals), default=0)
 
     @property
     def size_known(self) -> bool:
-        return bool(self.size_field)
+        return any(p in self.size_fields for p in self.intervals)
+
+    @property
+    def size_field(self) -> str:
+        return next((self.size_fields[p] for p in self.intervals if p in self.size_fields), "")
+
+    @property
+    def covered(self) -> dict[str, int]:
+        return {p: self.bytes_of(p) for p in self.intervals}
+
+    def covers(self, provider_id: str) -> bool:
+        """The provider's own blocks cover its own size, and that size is above 0 (every file
+        the panel judges has data: "0 of 0 bytes" is a reading to distrust, not a copy)."""
+        size = self.size_of(provider_id)
+        return self.readable(provider_id) and size > 0 and self.bytes_of(provider_id) >= size
 
     def bytes_of(self, provider_id: str) -> int:
-        return self.covered.get(provider_id, 0)
+        return sum(n for _, n in self.intervals.get(provider_id, ()))
+
+    def observed(self) -> dict[str, dict]:
+        """The validated source observations, kept in a snapshot for offline rescoring."""
+        out: dict[str, dict] = {
+            p: {
+                "size": self.sizes.get(p),
+                "size_field": self.size_fields.get(p, ""),
+                "intervals": [list(b) for b in self.intervals[p]],
+            }
+            for p in self.intervals
+        }
+        for p in self.failed:
+            out[p] = {"failed": True}
+        return out
+
+
+def _interval(block: Any) -> tuple[int, int] | None:
+    """`[offset, length]`: two non-negative ints (not bools), length above 0."""
+    if not isinstance(block, list | tuple) or len(block) != 2:
+        return None
+    if any(not isinstance(v, int) or isinstance(v, bool) or v < 0 for v in block):
+        return None
+    return (block[0], block[1]) if block[1] > 0 else None
+
+
+def _merge(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    out: list[list[int]] = []
+    for start, length in sorted(intervals):
+        end = start + length
+        if out and start <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], end)
+        else:
+            out.append([start, end])
+    return [(a, b - a) for a, b in out]
 
 
 def parse_dist(body: Any) -> DistView:
     per_provider = body.get("distributionPerProvider") if isinstance(body, dict) else None
     if not isinstance(per_provider, dict):
         return DistView()
-    size = 0
-    size_field = ""
+    view = DistView()
     failed: set[str] = set()
-    blocks_of: dict[str, list[Any]] = {}
     for pid, entry in per_provider.items():
         if not isinstance(entry, dict) or entry.get("success") is False:
             failed.add(pid)
             continue
         for key in ("logicalSize", "virtualSize"):
             value = entry.get(key)
-            if isinstance(value, int) and not isinstance(value, bool):
-                if value >= size:
-                    size, size_field = value, key
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                view.sizes[pid], view.size_fields[pid] = value, key
                 break
-        # A provider whose storage map is missing, or one of whose storages failed or answered
-        # blocks that are not a list, is a failed reading: its bytes are unknown, not 0.
         storages = entry.get("distributionPerStorageBackend")
-        if not isinstance(storages, dict):
+        if pid not in view.sizes or not isinstance(storages, dict) or not storages:
             failed.add(pid)
             continue
-        blocks: list[Any] = []
+        intervals: list[tuple[int, int]] = []
         for storage in storages.values():
             raw = storage.get("blocks") if isinstance(storage, dict) else None
             if not isinstance(storage, dict) or storage.get("success") is False:
                 failed.add(pid)
                 break
-            if not isinstance(raw, list):
+            parsed = [_interval(b) for b in raw] if isinstance(raw, list) else [None]
+            if any(b is None or b[0] + b[1] > view.sizes[pid] for b in parsed):
                 failed.add(pid)
                 break
-            blocks.extend(raw)
-        if pid in failed:
-            continue
-        blocks_of[pid] = blocks
-    covered = {pid: covered_bytes(blocks, size) for pid, blocks in blocks_of.items()}
-    return DistView(size, covered, frozenset(failed), size_field)
+            intervals.extend(b for b in parsed if b is not None)
+        if pid not in failed:
+            view.intervals[pid] = _merge(intervals)
+    view.failed = frozenset(failed)
+    return view
 
 
 def _is_absent(e: OnedataApiError) -> bool:
@@ -238,17 +292,9 @@ class FedApi:
         )
 
     async def children(self, role: Role, dir_id: str) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        token: str | None = None
-        while True:
-            body: dict[str, Any] = {"attributes": ["fileId", "name", "type"], "limit": 1000}
-            if token:
-                body["token"] = token
-            r = await request(self._cfg[role], "GET", f"/data/{dir_id}/children", json_body=body)
-            out.extend(r["body"].get("children", []))
-            token = r["body"].get("nextPageToken")
-            if r["body"].get("isLast", True) or not token:
-                return out
+        """Every entry of a directory (sweep and teardown): the same bounded, strict listing as
+        the snapshots' (`_listing`), so a repeated token cannot hang a cleanup."""
+        return await self._listing(role, dir_id, ("fileId", "name", "type"))
 
     # --- the file-tool scenarios (design/13-15) --------------------------
 
@@ -267,17 +313,29 @@ class FedApi:
             base_url=cfg.base_url, headers=headers, verify=cfg.verify_ssl
         ) as client:
             response = await client.get(f"/data/{file_id}/content")
-        if response.is_error:
+        # 200 only: a redirect (3xx, not followed) or a partial answer is not the file's bytes
+        if response.status_code != 200:
             raise OnedataApiError(
-                f"GET /data/<id>/content failed (status={response.status_code})",
+                f"GET /data/<id>/content answered status {response.status_code}, not 200",
+                response={"status_code": response.status_code, "body": None},
+            )
+        declared = response.headers.get("content-length")
+        if declared is not None and declared.isdigit() and int(declared) != len(response.content):
+            raise OnedataApiError(
+                f"GET /data/<id>/content: {len(response.content)} bytes, {declared} declared",
                 response={"status_code": response.status_code, "body": None},
             )
         return response.content
 
     async def _page(
-        self, role: Role, dir_id: str, limit: int, token: str | None
+        self,
+        role: Role,
+        dir_id: str,
+        limit: int,
+        token: str | None,
+        attributes: tuple[str, ...] = TREE_ATTRIBUTES,
     ) -> tuple[list[dict[str, Any]], bool, str | None, dict]:
-        body: dict[str, Any] = {"attributes": list(TREE_ATTRIBUTES), "limit": limit}
+        body: dict[str, Any] = {"attributes": list(attributes), "limit": limit}
         if token:
             body["token"] = token
         r = await request(self._cfg[role], "GET", f"/data/{dir_id}/children", json_body=body)
@@ -287,7 +345,9 @@ class FedApi:
         next_token = page.get("nextPageToken")
         return page["children"], page.get("isLast") is True, next_token or None, r
 
-    async def _listing(self, role: Role, dir_id: str) -> list[dict[str, Any]]:
+    async def _listing(
+        self, role: Role, dir_id: str, attributes: tuple[str, ...] = TREE_ATTRIBUTES
+    ) -> list[dict[str, Any]]:
         """Every entry of a directory, page by page. Strict: an answer without a `children`
         list raises, so an unreadable listing is never taken for an empty directory; so do a
         non-final page without a token, a token seen before (a loop), and more than
@@ -296,7 +356,7 @@ class FedApi:
         token: str | None = None
         seen: set[str] = set()
         for _ in range(MAX_LISTING_PAGES):
-            children, last, token, r = await self._page(role, dir_id, 1000, token)
+            children, last, token, r = await self._page(role, dir_id, 1000, token, attributes)
             out.extend(children)
             if last:
                 return out
@@ -321,9 +381,14 @@ class FedApi:
         while stack:
             prefix, current, depth = stack.pop()
             for entry in await self._listing(role, current):
-                name = entry.get("name")
-                if not isinstance(name, str) or not name:
-                    raise OnedataApiError(f"listing of {current}: an entry has no name")
+                name, fid, kind = entry.get("name"), entry.get("fileId"), entry.get("type")
+                if not isinstance(name, str) or not name or "/" in name:
+                    raise OnedataApiError(f"listing of {current}: an entry has no usable name")
+                if not isinstance(fid, str) or not fid or kind not in ("REG", "DIR", "SYMLNK"):
+                    raise OnedataApiError(f"listing of {current}: {name!r} has no id or type")
+                size = entry.get("size")
+                if kind == "REG" and (not isinstance(size, int) or isinstance(size, bool)):
+                    raise OnedataApiError(f"listing of {current}: file {name!r} has no size")
                 path = f"{prefix}{name}"
                 out[path] = {
                     "fileId": entry.get("fileId"),

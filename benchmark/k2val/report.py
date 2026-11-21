@@ -159,12 +159,19 @@ def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | N
 
     # 1. control
     controls = [m for m in models if cfg.models[m].control]
+    planned_k = meta.get("k")
     for control in controls:
         suspects = []
+        short: list[str] = []
         for sid in scenarios:
             cell = by.get((control, sid), [])
             if cell and any(r["outcome"] != "PASS" for r in cell):
                 suspects.append(sid)
+            # coverage: DISTINCT trial indices that passed, against the K planned (a trial that
+            # never ran, or ran twice, does not count twice)
+            passed = {r["trial_ix"] for r in cell if r["outcome"] == "PASS"}
+            if isinstance(planned_k, int) and len(passed & set(range(planned_k))) < planned_k:
+                short.append(f"{sid} ({len(passed & set(range(planned_k)))}/{planned_k})")
         w(f"## Control: {control}\n")
         if suspects:
             w(
@@ -173,8 +180,14 @@ def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | N
                 + ".** The control did not pass these. Settle a wrong tool, scenario or oracle "
                 "before reading any weak-model result for them.\n"
             )
-        else:
-            w("The control passed every scenario it ran.\n")
+        if short:
+            w(
+                "**CONTROL COVERAGE INCOMPLETE: "
+                + ", ".join(short)
+                + ".** Distinct passing trials against the K planned: re-run the missing ones.\n"
+            )
+        if not suspects and not short:
+            w("The control passed every scenario it ran, K distinct trials each.\n")
 
     # 2. K2 violations
     violations = [r for r in rows if r.get("k2_violations")]
@@ -211,6 +224,12 @@ def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | N
     for sid in scenarios:
         suspect = any(
             by.get((c, sid)) and any(r["outcome"] != "PASS" for r in by[(c, sid)]) for c in controls
+        ) or any(
+            isinstance(planned_k, int)
+            and len({r["trial_ix"] for r in by.get((c, sid), []) if r["outcome"] == "PASS"})
+            < planned_k
+            for c in controls
+            if by.get((c, sid))
         )
         label = f"{sid} {SCENARIOS[sid].title}" + (" **DESIGN SUSPECT**" if suspect else "")
         w(f"| {label} | " + " | ".join(_cell(by.get((m, sid), [])) for m in models) + " |")
