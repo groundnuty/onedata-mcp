@@ -2,8 +2,12 @@
 
 Skipped unless ONEDATA_MCP_LIVE_TRANSFER=1. With it set, the test REFUSES to run (it fails)
 unless every host it is given (the Oneprovider, the Onezone when one is set, and the source
-provider) is `127.0.0.1`, `localhost` or ends in `.datahub.test`: it writes files and schedules
-transfers, and must never touch production.
+provider) is `127.0.0.1`, `localhost` or ends in `.datahub.test` AND resolves only to loopback
+addresses (a `*.datahub.test` name mapped to any other address is refused): it writes files and
+schedules transfers, and must never touch production. Once the check passes, name resolution
+for those hosts, the source provider's included, is pinned to the addresses that were checked
+and proxy variables are ignored, so no connection can go anywhere else (the guard is shared
+with the other live tests: test/live/local_federation.py).
 
     make test-transfer-live      the variables below, set by hand
     make valfed-transfer-live    against the project's own federation, in its space omcp-live
@@ -44,9 +48,9 @@ import contextlib
 import json
 import os
 import secrets
+import socket
 import time
 from dataclasses import dataclass, field
-from urllib.parse import urlparse
 
 import pytest
 import pytest_asyncio
@@ -56,12 +60,14 @@ from benchmark.k2val.federation import FedApi, provider_config
 from benchmark.k2val.fixtures import FILE_SIZE, LARGE_FILE_SIZE, PART
 from onedata_mcp.modules import spaces as spaces_module
 from onedata_mcp.modules import transfers as transfers_module
+from test.live.local_federation import enforce_local_federation
 
 ENABLE = "ONEDATA_MCP_LIVE_TRANSFER"
 SPACE_ENV = "ONEDATA_MCP_LIVE_TRANSFER_SPACE"
 SOURCE_HOST_ENV = "ONEDATA_MCP_LIVE_TRANSFER_SOURCE_HOST"
 SOURCE_TOKEN_ENV = "ONEDATA_MCP_LIVE_TRANSFER_SOURCE_TOKEN"
 TOOL = "schedule_file_replication"
+WHAT = "the live transfer test writes files and schedules transfers"
 # The panel's standard file and the larger one SR1 uses, so that a transfer is still running
 # when a model answers (design/12, gate 4). Written in PART-sized parts at explicit offsets.
 SIZES = (FILE_SIZE, LARGE_FILE_SIZE)
@@ -78,27 +84,26 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def is_local_host(host: str | None) -> bool:
-    return bool(host) and (host in {"127.0.0.1", "localhost"} or host.endswith(".datahub.test"))
-
-
-@pytest.fixture(autouse=True)
-def _local_federation_only() -> None:
-    hosts = {
+def federation_urls() -> dict[str, str]:
+    """Every host URL the test connects to: the agent's provider, the Onezone when one is set,
+    and the SOURCE provider, where the probe files are written."""
+    urls = {
         "ONEDATA_ONEPROVIDER_HOST": os.environ.get("ONEDATA_ONEPROVIDER_HOST", ""),
         SOURCE_HOST_ENV: os.environ.get(SOURCE_HOST_ENV, ""),
     }
     if os.environ.get("ONEDATA_ONEZONE_HOST"):
-        hosts["ONEDATA_ONEZONE_HOST"] = os.environ["ONEDATA_ONEZONE_HOST"]
-    for name, url in hosts.items():
-        host = urlparse(url).hostname
-        if not is_local_host(host):
-            pytest.fail(
-                "refusing to run: the live transfer test writes files and schedules transfers, "
-                f"and runs only against 127.0.0.1, localhost or *.datahub.test ({name} host: "
-                f"{host!r})",
-                pytrace=False,
-            )
+        urls["ONEDATA_ONEZONE_HOST"] = os.environ["ONEDATA_ONEZONE_HOST"]
+    return urls
+
+
+def enforce_local(monkeypatch: pytest.MonkeyPatch, resolve=socket.getaddrinfo) -> None:  # noqa: ANN001
+    """The shared guard over every host this test uses (`resolve` is for the unit tests)."""
+    enforce_local_federation(monkeypatch, federation_urls(), resolve, what=WHAT)
+
+
+@pytest.fixture(autouse=True)
+def _local_federation_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    enforce_local(monkeypatch)
 
 
 @pytest.fixture
