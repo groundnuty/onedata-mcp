@@ -548,13 +548,76 @@ class FedApi:
         )
         return r["body"]["transferId"]
 
-    async def transfer_space_id(self, role: Role, transfer_id: str) -> str:
-        """The space of a transfer (`GET /transfers/{tid}`, its `spaceId`)."""
+    async def transfer(self, role: Role, transfer_id: str) -> dict[str, Any]:
+        """A transfer's details (`GET /transfers/{tid}`, swagger TransferStatus). Strict: an
+        answer that is not an object raises."""
         r = await request(self._cfg[role], "GET", f"/transfers/{quote(transfer_id, safe='')}")
-        space_id = r["body"].get("spaceId") if isinstance(r["body"], dict) else None
+        if not isinstance(r["body"], dict):
+            raise OnedataApiError("transfer details that are not an object", response=r)
+        return r["body"]
+
+    async def transfer_space_id(self, role: Role, transfer_id: str) -> str:
+        """The space of a transfer (its `spaceId`)."""
+        space_id = (await self.transfer(role, transfer_id)).get("spaceId")
         if not isinstance(space_id, str) or not space_id:
-            raise OnedataApiError("transfer without a 'spaceId'", response=r)
+            raise OnedataApiError(f"transfer {transfer_id} without a 'spaceId'")
         return space_id
+
+    # --- QoS rules, read back and evaluated (the stable tools' smoke scenarios, design/16) ---
+
+    async def space_id(self, role: Role, name: str) -> str:
+        """A space's id from its name, as the provider lists the user's spaces (`GET /spaces`:
+        a list of `{spaceId, name}`). Strict: an answer of another shape, or no space of that
+        name, raises."""
+        r = await request(self._cfg[role], "GET", "/spaces")
+        body = r["body"]
+        if not isinstance(body, list):
+            raise OnedataApiError("GET /spaces did not answer a list", response=r)
+        for entry in body:
+            if isinstance(entry, dict) and entry.get("name") == name:
+                sid = entry.get("spaceId")
+                if isinstance(sid, str) and sid:
+                    return sid
+        raise OnedataApiError(f"the provider lists no space named {name!r}", response=r)
+
+    async def qos_requirement(self, role: Role, qos_id: str) -> dict[str, Any]:
+        """A rule as stored (`GET /qos_requirements/{qid}`): its `fileId`, `expression`,
+        `replicasNum` and `status`. Strict: a missing or mistyped field raises (25.0 names the
+        expression `expression`, not the swagger's `qosExpression`)."""
+        r = await request(self._cfg[role], "GET", f"/qos_requirements/{quote(qos_id, safe='')}")
+        body = r["body"]
+        ok = (
+            isinstance(body, dict)
+            and isinstance(body.get("fileId"), str)
+            and isinstance(body.get("expression"), str)
+            and isinstance(body.get("replicasNum"), int)
+            and not isinstance(body.get("replicasNum"), bool)
+            and isinstance(body.get("status"), str)
+        )
+        if not ok:
+            raise OnedataApiError(f"rule {qos_id} without fileId/expression/replicasNum/status")
+        return {k: body[k] for k in ("fileId", "expression", "replicasNum", "status")}
+
+    async def evaluate_qos(self, role: Role, space_id: str, expression: str) -> list[dict]:
+        """The storages of the space that match a QoS expression (swagger
+        evaluate_qos_expression: `POST /spaces/{sid}/evaluate_qos_expression`), each as
+        `{id, providerId}`. Strict: an answer without a list of such storages raises."""
+        r = await request(
+            self._cfg[role],
+            "POST",
+            f"/spaces/{quote(space_id, safe='')}/evaluate_qos_expression",
+            json_body={"expression": expression},
+        )
+        body = r["body"] if isinstance(r["body"], dict) else {}
+        found = body.get("matchingStorageBackends", body.get("matchingStorages"))
+        if not isinstance(found, list) or not all(
+            isinstance(s, dict)
+            and isinstance(s.get("id"), str)
+            and isinstance(s.get("providerId"), str)
+            for s in found
+        ):
+            raise OnedataApiError("evaluate_qos_expression without a list of storages", response=r)
+        return [{"id": s["id"], "providerId": s["providerId"]} for s in found]
 
     async def ended_transfers(self, role: Role, space_id: str, limit: int) -> list[str]:
         """The first page of a space's ended transfers at `limit` (swagger get_all_transfers),

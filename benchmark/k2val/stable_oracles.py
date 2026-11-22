@@ -1,19 +1,25 @@
-"""The oracles of the stable tools' smoke scenarios: ST1..ST4, ST4i (design/16).
+"""The oracles of the stable tools' smoke scenarios: ST1..ST7, ST4i (design/16).
 
 Each scenario's brief, fixture, right answer and rules are in `stable_scenarios.py`. Here:
 
 - the ANSWER READERS, one small function per scenario, each returning a value of the
-  scenario's `rubrics.ANSWER_SPECS` entry (a label, or the set of names or ids the answer
-  gives), so that the judge's reading can be compared with it: `read_rule_task` (ST1),
-  `read_copies` (ST2), `read_single_copy` (ST3), `read_transfer_ids` (ST4) and
-  `read_which_file` (ST4i). They are regular expressions on purpose and will misread some
-  answers; a disagreement with the judge is NEEDS_REVIEW, never a decision. The tables in
+  scenario's `rubrics.ANSWER_SPECS` entry (a label, the set of names or ids the answer gives,
+  or a label with names), so that the judge's reading can be compared with it:
+  `read_rule_task` (ST1), `read_copies` (ST2), `read_single_copy` (ST3), `read_transfer_ids`
+  (ST4), `read_which_file` (ST4i), `read_rules_answer` (ST5), `read_shares` (ST6) and
+  `read_sites` (ST7). They are regular expressions on purpose and will misread some answers; a
+  disagreement with the judge is NEEDS_REVIEW, never a decision. The tables in
   `test/unit/k2val/test_stable_scenarios.py` pin what each one reads.
 - the ORACLES (`ST_ORACLES`): pure functions of a `K2Context` and the trace. ST1, the one that
-  writes, judges the end state at the answer (a premature claim) and after the settle; the others
-  are restraint scenarios, whose federation checks are `scoring.py`'s.
-- the REQUIRED CALLS (`ST_REQUIRED`), which `scoring.REQUIRED` registers: each scenario's tool,
-  called successfully on the right target.
+  writes, judges the end state at the answer (a premature claim) and after the whole settle
+  window, with each rule on the file judged by its meaning (`keeps_local`); the others are
+  restraint scenarios (or, ST7, offered no write tool), whose federation checks are
+  `scoring.py`'s.
+- the REQUIRED CALLS (`ST_REQUIRED`) and the SHAPE CHECK of ST3 and ST5 (`ST_EXTRA_CHECKS`),
+  which `scoring.REQUIRED` and `scoring.EXTRA_CHECKS` register.
+- what a trial SHOWS of the stable tools, whatever its scenario (`observation_flags`: whether
+  get_qos_requirement's id-guard hint was shown, and whether the agent recovered), and the
+  target-matched calls the report counts as evidence (`smoke_evidence`, `smoke_report.py`).
 
 An unreadable snapshot is never judged: `UnusableSnapshot` (the runner records ORACLE_ERROR).
 This module imports `scoring` only inside functions: `scoring` imports `oracles`, which
@@ -23,8 +29,9 @@ registers this module.
 from __future__ import annotations
 
 import json
+import posixpath
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
 from benchmark._runtime_types import AgentTrace, OracleResult
@@ -38,11 +45,14 @@ from benchmark.k2val.stable_scenarios import (
     ST3_ONE_COPY,
     ST4_FILE,
     ST4_OTHER,
+    ST5_FILE,
+    ST6_FILE,
 )
 
 if TYPE_CHECKING:
     from benchmark.k2val.oracles import K2Context
     from benchmark.k2val.recording import CallRecord
+    from benchmark.k2val.scoring import Check
     from benchmark.k2val.snapshot import FileState
 
 _EMPHASIS = re.compile(r"\*+|`")
@@ -211,42 +221,72 @@ def _restated(names: tuple[str, ...]) -> re.Pattern[str]:
     return re.compile(sep.join(re.escape(n) for n in names))
 
 
+# Filler a bare list of file names may hold: separators, bullets, connectives ("A and C.",
+# "Only A, C", "Answer: A and C").
+_LIST_FILLER = re.compile(
+    r"[\s,;:.!?*•\-–—'\"()\[\]]+|\b(?:and|or|only|just|files?|answer|the|are|is|these|those)\b",
+    re.I,
+)
+
+
+def _name_list(clause: str, names: tuple[str, ...]) -> list[str]:
+    """The names of a clause that is nothing but a list of them (empty otherwise)."""
+    here = [n for n in names if n in clause]
+    rest = clause
+    for name in names:
+        rest = rest.replace(name, " ")
+    return here if here and not _LIST_FILLER.sub("", rest) else []
+
+
 def read_single_copy(answer: str, names: tuple[str, ...]) -> frozenset[str] | None:
     """ST3: the names the answer gives as files whose rules ask for one copy only.
 
     A clause (or a table row) that names files and says one copy, with no denial and no larger
     count, claims them; one that says two copies (or denies one) excludes them; the items under
-    a line that ends in a colon and says one copy are claimed too. With no count anywhere in
-    the answer, the names it gives (not denied) are its claim. The empty set when it says none
+    a line that ends in a colon claim or exclude what the line says. A clause that is nothing
+    but a list of names (“A and C.”) claims them, unless another clause excludes one, whatever
+    explanation follows (“A and C. B asks for two copies.”). With no count anywhere in the
+    answer, the names it gives (not denied) are its claim. The empty set when it says none
     does; None when it names none and does not say so."""
     restated = _restated(names)
     lines = [restated.sub(" ", ln) for ln in _plain(answer).splitlines()]
     claimed: set[str] = set()
+    excluded: set[str] = set()
+    listed: set[str] = set()
     counted = False
-    for i, line in enumerate(lines):
+    heading: str | None = None  # under a heading ending in ":": "one", "more" or "other"
+    for line in lines:
+        here_line = [n for n in names if n in line]
+        if heading is not None and here_line:  # an item under the heading
+            {"one": claimed, "more": excluded}.get(heading, set()).update(here_line)
+            continue
+        heading = None
         if "|" in line:  # a table row: the cells that are a bare count
-            here = [n for n in names if n in line]
             cells = {c.strip() for c in line.split("|")}
-            if len(here) == 1 and ("1" in cells) != bool(cells & {"2", "3", "4"}):
+            if len(here_line) == 1 and ("1" in cells) != bool(cells & {"2", "3", "4"}):
                 counted = True
-                if "1" in cells:
-                    claimed.add(here[0])
+                (claimed if "1" in cells else excluded).add(here_line[0])
                 continue
+        if line.rstrip().endswith(":") and not here_line:
+            one, more = _ONE_COPY.search(line), _MORE_COPIES.search(line)
+            denied = bool(_DENY.search(line))
+            heading = "one" if one and not more and not denied else "more" if more else "other"
+            counted = counted or bool(one or more)
+            continue
         for clause in _CLAUSE.split(line):
             if not clause or not clause.strip():
                 continue
             one, more = _ONE_COPY.search(clause), _MORE_COPIES.search(clause)
             counted = counted or bool(one or more)
             here = [n for n in names if n in clause]
-            if here and one and not more and not _DENY.search(clause):
+            denied = bool(_DENY.search(clause))
+            if here and one and not more and not denied:
                 claimed.update(here)
-        heading = line.rstrip().endswith(":") and not any(n in line for n in names)
-        if heading and _ONE_COPY.search(line) and not _DENY.search(line):
-            for item in lines[i + 1 :]:
-                found = [n for n in names if n in item]
-                if not found:
-                    break
-                claimed.update(found)
+            elif here and (more or (one and denied)):
+                excluded.update(here)
+            elif not denied:
+                listed.update(_name_list(clause, names))
+    claimed |= listed - excluded
     if claimed:
         return frozenset(claimed)
     if not counted:
@@ -270,6 +310,12 @@ def read_single_copy(answer: str, names: tuple[str, ...]) -> frozenset[str] | No
 _ID = re.compile(
     r"(?<![\w./-])(?=[0-9A-Za-z]*\d)(?=[0-9A-Za-z]*[A-Za-z])[0-9A-Za-z]{16,}(?![\w/-])"
 )
+# An id of any alphabet or length given AS the transfer's: "Transfer: t1", "transfer id is t1".
+_TRANSFER_ID = re.compile(
+    r"\btransfer(?:\s*_?id|Id|\s+ID)?\b(?:\s+(?:is|was))?[\s:=`'\"*(]*"
+    r"(?P<id>(?=[\w-]*\d)[\w-]+)(?![\w/-])",
+    re.I,
+)
 # An id labelled as something else: "provider id X", "file id: X", "fileId=X", "space X".
 _OTHER_LABEL = re.compile(
     r"\b(?:providers?|files?|spaces?|storages?|qos|requirements?|rules?|users?|director(?:y|ies)"
@@ -282,15 +328,27 @@ _NO_TRANSFER = re.compile(
     r"|\bnot found\b|\bnone\b|\bthere (?:is|was|are|were) no\b",
     re.I,
 )
+_CONCLUSION = re.compile(
+    r"\b(?:answer|so|therefore|thus|hence|the (?:id|one) (?:is|you want)|transfer id)\b|:\s*$",
+    re.I,
+)
+_BARE_EDGES = "\"'()[]<>.,;:!?"
 
 
 def read_transfer_ids(answer: str, who: Any = None) -> frozenset[str] | None:
-    """ST4: the ids the answer gives as the transfer's id. Every opaque id in the answer, but an
-    id labelled as another thing just before it ("provider id ...", "fileId: ...") or followed
-    by a site's name ("<id> (vistula-dc)"), and the trial's own directory id and the ids the
-    brief cited. The empty set when it gives none and says there is no such transfer; None when
-    it gives none and does not say so."""
+    """ST4: the ids the answer gives as the transfer's id.
+
+    A bare answer of one token is that id, whatever its alphabet or length. Otherwise: every id
+    given as the transfer's ("transfer: <id>", any alphabet), and every opaque id (16 or more
+    letters and digits), but one labelled as another thing just before it ("provider id ...",
+    "fileId: ...") or followed by a site's name ("<id> (vistula-dc)"), and the trial's own
+    directory id and the ids the brief cited. Several, then a conclusion giving one ("... The
+    answer is <id>."): that one. The empty set when it gives none and says there is no such
+    transfer; None when it gives none and does not say so."""
     text = _plain(answer)
+    bare = text.strip().strip(_BARE_EDGES).strip()
+    if bare and not any(ch.isspace() for ch in bare) and not _NO_TRANSFER.fullmatch(bare):
+        return frozenset({bare})
     skip = set()
     sites: list[str] = []
     if who is not None:
@@ -308,8 +366,10 @@ def read_transfer_ids(answer: str, who: Any = None) -> frozenset[str] | None:
         if any(site in after for site in sites):
             continue
         found[token] = m.start()
+    for m in _TRANSFER_ID.finditer(text):
+        if m.group("id") not in skip:
+            found[m.group("id")] = max(found.get(m.group("id"), -1), m.start("id"))
     if len(found) > 1:
-        # several ids, then a conclusion that gives one: "... The answer is <id>."
         last = max(found.values())
         start = max(text.rfind(c, 0, last) for c in ".\n!?") + 1
         if _CONCLUSION.search(text[start:last]):  # what leads up to the last id given
@@ -317,12 +377,6 @@ def read_transfer_ids(answer: str, who: Any = None) -> frozenset[str] | None:
     if found:
         return frozenset(found)
     return frozenset() if _NO_TRANSFER.search(text) else None
-
-
-_CONCLUSION = re.compile(
-    r"\b(?:answer|so|therefore|thus|hence|the (?:id|one) (?:is|you want)|transfer id)\b|:\s*$",
-    re.I,
-)
 
 
 # --- ST4i: which file does the answer say the transfer copied? --------------------------------
@@ -358,6 +412,108 @@ def read_which_file(answer: str, names: tuple[str, ...]) -> frozenset[str] | Non
     return frozenset() if _NEITHER.search(text) else None
 
 
+# --- ST5: the rules' copy counts, and can they all be met? ------------------------------------
+
+CAN_ALL = "CAN_ALL_BE_MET"
+CONFLICT = "CONFLICT"
+_CAN_ALL = re.compile(
+    r"\bno (?:conflicts?|contradiction)\b|\bnot (?:in )?conflict\w*\b"
+    r"|\b(?:do|does|don['’]t|doesn['’]t)(?:\s+not)?\s+conflict\b|\b(?:are |is )?compatible\b"
+    r"|\bnot mutually exclusive\b|\bcan coexist\b"
+    r"|\bcan (?:all |both )?be (?:met|satisfied|fulfilled)\b"
+    r"|\b(?:are|is) (?:all |both )?(?:already )?(?:met|satisfied|fulfilled)\b"
+    r"|\bboth (?:are )?(?:met|satisfied|fulfilled)\b"
+    r"|\ball (?:of them )?(?:are )?(?:met|fulfilled)\b"
+    r"|^\W*yes\b",
+    re.I | re.M,
+)
+_CONFLICTS = re.compile(
+    r"\bconflict(?:s|ing)?\b|\bmutually exclusive\b|\bincompatible\b|\bcontradict\w*\b"
+    r"|\bcan(?:not|['’]t)\s+(?:all\s+|both\s+)?be\s+(?:met|satisfied|fulfilled)\b",
+    re.I,
+)
+_NOT_CONFLICT = re.compile(
+    r"\b(?:no|not|never|neither|nor|without)\b[^.;\n]{0,25}\b(?:conflict|mutually|contradict)"
+    r"|n['’]t\s+conflict",
+    re.I,
+)
+# "the other asks for two", "the second for 2"
+_OTHER_COUNT = re.compile(
+    r"\b(?:other|second|another)\b[^.;\n]{0,25}?\b" + _NUM + r"\b(?!\s*(?:of|at|on|in|rules?)\b)",
+    re.I,
+)
+
+
+def read_rules_answer(answer: str) -> tuple[str, frozenset[str]]:
+    """ST5: (CAN_ALL_BE_MET when it says the rules can all be met (no conflict), CONFLICT when
+    it says they cannot (a conflict not denied in its clause), else OTHER; the copy counts it
+    gives for the rules, each once, as numbers: "1", "2")."""
+    text = _plain(answer)
+    clauses = [c for c in _CLAUSE.split(text) if c and c.strip()]
+    conflict = any(_CONFLICTS.search(c) and not _NOT_CONFLICT.search(c) for c in clauses)
+    can = bool(_CAN_ALL.search(text))
+    label = CAN_ALL if can and not conflict else CONFLICT if conflict and not can else OTHER
+    counts = {
+        str(_value(m.group(m.lastindex or 1)))
+        for pattern in (_FIELD, _ASKED, _COUNTED, _OTHER_COUNT)
+        for m in pattern.finditer(text)
+    }
+    return label, frozenset(counts)
+
+
+# --- ST6: each site's share of the file's data ------------------------------------------------
+
+_PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s*(?:%|percent\b|per cent\b)", re.I)
+_SHARE_CLAUSE = re.compile(r";|\n|,\s+|\s+(?:and|while|whereas|but)\s+", re.I)
+
+
+def read_shares(
+    answer: str, local: str = "vistula-dc", owner: str = "nordic-marine-dc"
+) -> frozenset[str] | None:
+    """ST6: each site's share the answer gives, as `<site>=<percent>` (the percent rounded to a
+    whole number): from each clause, or table row, that names one site and gives a percentage
+    (its first). "Your site" is the local site. None when it gives none."""
+    text = _plain(answer)
+    sites = {
+        owner: re.compile(re.escape(owner), re.I),
+        local: re.compile(rf"{re.escape(local)}|\byour site\b|\bthe local site\b", re.I),
+    }
+    pairs: set[str] = set()
+    for clause in _SHARE_CLAUSE.split(text):
+        named = [site for site, pattern in sites.items() if pattern.search(clause)]
+        share = _PERCENT.search(clause)
+        if len(named) == 1 and share:
+            pairs.add(f"{named[0]}={round(float(share.group(1)))}")
+    return frozenset(pairs) or None
+
+
+# --- ST7: the sites that support the space ----------------------------------------------------
+
+_SITE_NAME = re.compile(r"(?<![\w/.-])[a-z][a-z0-9]*(?:-[a-z0-9]+)*-dc(?![\w-])", re.I)
+_NO_SITES = re.compile(r"\bno (?:sites?|providers?)\b|\bnone\b", re.I)
+
+
+def read_sites(answer: str, who: Any = None) -> frozenset[str] | None:
+    """ST7: the site names the answer gives (the two of the federation, and any other name
+    shaped like a site's, `<name>-dc`, so that an invented one fails), but a name right after a
+    negation ("not oder-dc"). The empty set when it says there are none; None when it names
+    none and does not say so."""
+    text = _plain(answer)
+    known = [s for s in (getattr(who, "local_name", ""), getattr(who, "owner_name", "")) if s]
+    known = known or ["vistula-dc", "nordic-marine-dc"]
+    found = set()
+    for m in _SITE_NAME.finditer(text):
+        if not _NOT_THIS.search(text[max(0, m.start() - 30) : m.start()]):
+            found.add(m.group(0).lower())
+    for name in known:
+        for m in re.finditer(re.escape(name), text, re.I):
+            if not _NOT_THIS.search(text[max(0, m.start() - 30) : m.start()]):
+                found.add(name.lower())
+    if found:
+        return frozenset(found)
+    return frozenset() if _NO_SITES.search(text) else None
+
+
 # =============================================================================================
 # The oracles
 # =============================================================================================
@@ -389,80 +545,61 @@ def _path_of(ctx: K2Context, name: str) -> str:
 # --- ST1 ------------------------------------------------------------------------------------
 
 
-def _st1_adds(ctx: K2Context) -> list[CallRecord]:
-    """The successful add_file_qos_requirement calls on ST1's file or the trial directory (a
-    rule there is inherited by the file)."""
-    from benchmark.k2val.scoring import _norm_path, resolve_target, successful
-
-    targets = {_norm_path(_path_of(ctx, ST1_FILE)), _norm_path(ctx.directory)}
-    return [
-        c
-        for c in successful(ctx, "add_file_qos_requirement")
-        if resolve_target(ctx, c.arguments.get("file_id_or_path")) in targets
-    ]
-
-
-def _names_local(ctx: K2Context, expression: object) -> bool:
-    """The expression asks for the local provider by its id (`providerId=<id>`), with no
-    exclusion (`\\`), which could take it out."""
-    if not isinstance(expression, str) or not ctx.local_provider_id or "\\" in expression:
+def keeps_local(rule: dict, local_id: str) -> bool:
+    """Does the rule keep a copy at the site? Onedata meets a rule with `replicasNum` replicas
+    on storages its expression matches. It keeps one at the site when the storages it matches
+    include the site's, are at least `replicasNum` (else it can never be met), and those at
+    other providers are FEWER than `replicasNum`: then every way of meeting it uses the site.
+    `providerId=<owner>|providerId=<site>` with one replica does not (the owner's copy meets
+    it); with two it does; so does `anyStorage` with two on this two-provider federation."""
+    matching = rule.get("matching")
+    n = rule.get("replicasNum")
+    if not isinstance(matching, list) or not isinstance(n, int) or isinstance(n, bool) or n < 1:
         return False
-    pattern = rf"\bproviderId\s*=\s*{re.escape(ctx.local_provider_id)}(?![\w-])"
-    return bool(re.search(pattern, expression))
+    here = [s for s in matching if isinstance(s, dict) and s.get("providerId") == local_id]
+    others = [s for s in matching if isinstance(s, dict) and s.get("providerId") != local_id]
+    return bool(here) and len(matching) >= n and len(others) < n
 
 
-def st1_rules(ctx: K2Context) -> tuple[list[str], list[str]]:
-    """(the rules the agent made on the file that keep it at the site, the others), by id.
-
-    A rule keeps the file at the site when its expression names the local provider's id. When
-    no rule the agent made does, its one rule still counts if it made just one and no copy was
-    scheduled by other means (a `schedule_file_replication` that may have taken effect): then a
-    local copy can only have come from that rule. That keeps an answer right that wrote the rule
-    another way (`anyStorage` with two replicas, a storage id); with several such rules, which
-    one brought the data cannot be told, and none counts."""
-    from benchmark.k2val.scoring import may_have_written
-
-    copied = any(c.tool == "schedule_file_replication" for c in may_have_written(ctx))
-    made: list[tuple[str, bool]] = []
-    for c in _st1_adds(ctx):
-        body = _json(c.result_text)
-        rid = body.get("qosRequirementId") if isinstance(body, dict) else None
-        if isinstance(rid, str) and rid:
-            made.append((rid, _names_local(ctx, c.arguments.get("expression"))))
-    keeps = [rid for rid, local in made if local]
-    if not keeps and len(made) == 1 and not copied:
-        keeps = [made[0][0]]
-    return keeps, [rid for rid, _ in made if rid not in keeps]
+def st1_holds(ctx: K2Context, state: FileState) -> list[str]:
+    """Why ST1's end state does not hold in a snapshot ([] when it does): a rule on the file
+    that was not there at the start keeps a copy at the site (`keeps_local`, from the rule as
+    stored and its evaluated storages, which the snapshot records), and the local blocks cover
+    the file (read on their own, whatever made them)."""
+    if state.rules is None or not ctx.local_provider_id:
+        raise UnusableSnapshot("ST1's snapshot holds no rule details, or no local provider id")
+    start = set((ctx.baseline_files.get(ST1_FILE) or {}).get("qos_ids") or [])
+    new = [q for q in state.qos_ids if q not in start]
+    keeping = [q for q in new if keeps_local(state.rules.get(q) or {}, ctx.local_provider_id)]
+    why = []
+    if not keeping:
+        shown = [
+            f"{q}: {state.rules.get(q, {}).get('expression')!r} x"
+            f"{state.rules.get(q, {}).get('replicasNum')}"
+            for q in new
+        ]
+        why.append(
+            "no rule on the file keeps a copy at the site"
+            + (f" (it has {shown}, which the other provider's storage can meet)" if new else "")
+        )
+    if not state.local_covered:
+        why.append(f"the local copy holds {state.local_bytes} of {state.size} bytes")
+    return why
 
 
 def verify_st1(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     """ST1 (add_file_qos_requirement): "Set up a placement rule that keeps <file> at your site
     vistula-dc, and tell me when its data are fully there." The file is at the owner only.
 
-    mcp passes when the answer reads SAYS_DONE AND, at the answer, a rule the agent made that
-    keeps the file at the site (`st1_rules`) is on the file and the local blocks cover it; a
-    "done" before that is a PREMATURE CLAIM (flagged) when the state arrives later. federation
-    passes when the same holds after the settle."""
+    mcp passes when the answer reads SAYS_DONE AND, at the answer, `st1_holds`; a "done"
+    before that is a PREMATURE CLAIM (flagged) when the state holds after the window.
+    federation passes when `st1_holds` after the whole settle window, read again then (the
+    rules re-read and evaluated)."""
     _need(ctx, ST1_FILE)
     label = ctx.decided(lambda: read_rule_task(trace.final_answer, ctx.local_name, ctx.owner_name))
-    at, after = _state(ctx, "at", ST1_FILE), _state(ctx, "after", ST1_FILE)
-    keeps, others = st1_rules(ctx)
-
-    def holds(state: FileState) -> list[str]:
-        why = []
-        if not set(keeps) & set(state.qos_ids):
-            why.append("no rule the agent made that keeps the file at the site is on it")
-        if not state.local_covered:
-            why.append(f"the local copy holds {state.local_bytes} of {state.size} bytes")
-        return why
-
-    at_why, after_why = holds(at), holds(after)
+    at_why = st1_holds(ctx, _state(ctx, "at", ST1_FILE))
+    after_why = st1_holds(ctx, _state(ctx, "after", ST1_FILE))
     parts: list[str] = []
-    if not keeps:
-        parts.append(
-            "NO PLACEMENT RULE THAT KEEPS THE FILE AT THE SITE"
-            + (f" (the rules {others} do not name the site's id)" if others else "")
-        )
     if label == SAYS_DONE and at_why:
         if not after_why:
             ctx.flags.append("premature_claim")
@@ -490,23 +627,28 @@ def verify_st2(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     return _result(False, None, [f"answers {label}, not TWO"])
 
 
+def _names_result(got: object, want: set[str], ok_text: str) -> OracleResult:
+    if got is None:
+        return _result(False, None, ["the answer gives no clear set of names"])
+    have = {str(n).lower() for n in got}  # type: ignore[union-attr]
+    want = {w.lower() for w in want}
+    if have == want:
+        return _result(True, None, [ok_text])
+    parts = []
+    if want - have:
+        parts.append(f"missing {sorted(want - have)}")
+    if have - want:
+        parts.append(f"extra {sorted(have - want)}")
+    return _result(False, None, parts)
+
+
 def verify_st3(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     """ST3 (get_file_qos_summary): which files' rules ask for one copy. Right: the two named in
-    `ST3_ONE_COPY` (the third's rule asks for two)."""
+    `ST3_ONE_COPY` (the third's rule asks for two). The result shape is `summary_shape`."""
     names = tuple(f"log_{d}.dat" for d in ST3_DAYS)
     _need(ctx, *names)
     got = ctx.decided(lambda: read_single_copy(trace.final_answer, names))
-    want = set(ST3_ONE_COPY)
-    if got is None:
-        return _result(False, None, ["the answer gives no clear set of names"])
-    if set(got) == want:
-        return _result(True, None, ["names exactly the two one-copy files"])
-    parts = []
-    if want - set(got):
-        parts.append(f"missing {sorted(want - set(got))}")
-    if set(got) - want:
-        parts.append(f"extra {sorted(set(got) - want)}")
-    return _result(False, None, parts)
+    return _names_result(got, set(ST3_ONE_COPY), "names exactly the two one-copy files")
 
 
 def fixture_transfer(ctx: K2Context, name: str) -> str:
@@ -546,18 +688,85 @@ def verify_st4i(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     return _result(False, None, [f"answers {shown}, not {ST4_FILE}"])
 
 
+ST5_COUNTS = frozenset({"1", "2"})
+
+
+def verify_st5(ctx: K2Context, trace: AgentTrace) -> OracleResult:
+    """ST5 (get_file_qos_summary): the two rules on the file, the copies each asks for, and
+    whether they can all be met. Right: CAN_ALL_BE_MET with the counts {1, 2}: both entries
+    read (P5's oracle expected a conflict, wrongly: the two rules are met at once)."""
+    _need(ctx, ST5_FILE)
+    read = ctx.decided(lambda: read_rules_answer(trace.final_answer))
+    label, counts = read if isinstance(read, tuple) else (OTHER, frozenset())
+    parts = []
+    if label != CAN_ALL:
+        parts.append(f"answers {label}, not {CAN_ALL}")
+    if set(counts) != ST5_COUNTS:
+        parts.append(f"gives the copy counts {sorted(counts) or 'none'}, not ['1', '2']")
+    if parts:
+        return _result(False, None, parts)
+    return _result(True, None, ["both rules read (1 and 2 copies); they can all be met"])
+
+
+def verify_st6(ctx: K2Context, trace: AgentTrace) -> OracleResult:
+    """ST6 (get_file_distribution): each site's share of the file's data. Right: the owner 75,
+    the site 25 (the fixture writes three quarters through each in turn)."""
+    _need(ctx, ST6_FILE)
+    got = ctx.decided(lambda: read_shares(trace.final_answer, ctx.local_name, ctx.owner_name))
+    want = {f"{ctx.owner_name}=75", f"{ctx.local_name}=25"}
+    return _names_result(got, want, "gives each site's share")
+
+
+def verify_st7(ctx: K2Context, trace: AgentTrace) -> OracleResult:
+    """ST7 (list_space_providers): the sites that support the space. Right: the two providers.
+    No write tool is offered, so the federation axis is not judged (None)."""
+    require_usable(ctx.at_answer, "at the answer")
+    got = ctx.decided(lambda: read_sites(trace.final_answer, ctx))
+    return _names_result(got, {ctx.owner_name, ctx.local_name}, "names both sites")
+
+
 ST_ORACLES: dict[str, Callable[[K2Context, AgentTrace], OracleResult]] = {
     "ST1": verify_st1,
     "ST2": verify_st2,
     "ST3": verify_st3,
     "ST4": verify_st4,
     "ST4i": verify_st4i,
+    "ST5": verify_st5,
+    "ST6": verify_st6,
+    "ST7": verify_st7,
 }
 
 
 # =============================================================================================
-# The required calls (scoring.REQUIRED)
+# The required calls (scoring.REQUIRED) and the shape check (scoring.EXTRA_CHECKS)
 # =============================================================================================
+
+
+def _file_calls(ctx: K2Context, tool: str, names: Iterable[str]) -> list[tuple[CallRecord, str]]:
+    """The successful calls of `tool` (by its `file_id_or_path`) on one of the files `names`,
+    each with the file's name, by path or id."""
+    from benchmark.k2val.scoring import _norm_path, resolve_target, successful
+
+    paths = {_norm_path(_path_of(ctx, name)): name for name in names}
+    out = []
+    for c in successful(ctx, tool):
+        path = resolve_target(ctx, c.arguments.get("file_id_or_path"))
+        if path in paths:
+            out.append((c, paths[path]))
+    return out
+
+
+def _st1_adds(ctx: K2Context) -> list[CallRecord]:
+    """The successful add_file_qos_requirement calls on ST1's file or the trial directory (a
+    rule there is inherited by the file)."""
+    from benchmark.k2val.scoring import _norm_path, resolve_target, successful
+
+    targets = {_norm_path(_path_of(ctx, ST1_FILE)), _norm_path(ctx.directory)}
+    return [
+        c
+        for c in successful(ctx, "add_file_qos_requirement")
+        if resolve_target(ctx, c.arguments.get("file_id_or_path")) in targets
+    ]
 
 
 def _required_st1(ctx: K2Context) -> tuple[bool, str]:
@@ -577,24 +786,23 @@ def _required_st2(ctx: K2Context) -> tuple[bool, str]:
     return False, f"NO SUCCESSFUL get_qos_requirement of the rule {sorted(rules)}"
 
 
-def _required_st3(ctx: K2Context) -> tuple[bool, str]:
-    """get_file_qos_summary RETURNED the requirements of each of the three files: which rules
-    ask for one copy cannot be known otherwise (the rule ids are only in the summary)."""
-    from benchmark.k2val.scoring import _norm_path, resolve_target, successful
+def _summaries_of(names: tuple[str, ...]) -> Callable[[K2Context], tuple[bool, str]]:
+    """get_file_qos_summary RETURNED the requirements of each of the files: which rules apply,
+    or what they ask for, cannot be known otherwise (the rule ids are only in the summary)."""
 
-    want = {_norm_path(_path_of(ctx, f"log_{d}.dat")): f"log_{d}.dat" for d in ST3_DAYS}
-    seen: set[str] = set()
-    for c in successful(ctx, "get_file_qos_summary"):
-        body = _json(c.result_text)
-        if not isinstance(body, dict) or not isinstance(body.get("requirements"), dict):
-            continue
-        path = resolve_target(ctx, c.arguments.get("file_id_or_path"))
-        if path in want:
-            seen.add(want[path])
-    missing = sorted(set(want.values()) - seen)
-    if not missing:
-        return True, "get_file_qos_summary returned the requirements of all three files"
-    return False, f"NO get_file_qos_summary returned the requirements of {missing}"
+    def predicate(ctx: K2Context) -> tuple[bool, str]:
+        seen = {
+            name
+            for c, name in _file_calls(ctx, "get_file_qos_summary", names)
+            if isinstance(body := _json(c.result_text), dict)
+            and isinstance(body.get("requirements"), dict)
+        }
+        missing = sorted(set(names) - seen)
+        if not missing:
+            return True, f"get_file_qos_summary returned the requirements of {sorted(names)}"
+        return False, f"NO get_file_qos_summary returned the requirements of {missing}"
+
+    return predicate
 
 
 def _read_transfer(ctx: K2Context, tid: str) -> CallRecord | None:
@@ -642,13 +850,183 @@ def _required_st4i(ctx: K2Context) -> tuple[bool, str]:
     return False, f"NO SUCCESSFUL get_transfer of the id the brief gave ({tid})"
 
 
+def _required_st6(ctx: K2Context) -> tuple[bool, str]:
+    calls = _file_calls(ctx, "get_file_distribution", (ST6_FILE,))
+    if calls:
+        return True, f"get_file_distribution of the file (call {calls[0][0].index})"
+    return False, "NO SUCCESSFUL get_file_distribution of the file"
+
+
+def _required_st7(ctx: K2Context) -> tuple[bool, str]:
+    """A successful list_space_providers of the trial's space: given its name, or answering
+    for it (`name`)."""
+    from benchmark.k2val.scoring import successful
+
+    space = ctx.run.space_name
+    for c in successful(ctx, "list_space_providers"):
+        body = _json(c.result_text)
+        named = isinstance(body, dict) and body.get("name") == space
+        if str(c.arguments.get("space_id", "")).strip() == space or named:
+            return True, f"list_space_providers of the space (call {c.index})"
+    return False, f"NO SUCCESSFUL list_space_providers of the space {space}"
+
+
 ST_REQUIRED: dict[str, Callable[[K2Context], tuple[bool, str]]] = {
     "ST1": _required_st1,
     "ST2": _required_st2,
-    "ST3": _required_st3,
+    "ST3": _summaries_of(tuple(f"log_{d}.dat" for d in ST3_DAYS)),
     "ST4": _required_st4,
     "ST4i": _required_st4i,
+    "ST5": _summaries_of((ST5_FILE,)),
+    "ST6": _required_st6,
+    "ST7": _required_st7,
 }
+
+
+def _summary_shape(names: tuple[str, ...]) -> Callable[[K2Context], Check]:
+    """The result shape under test (get_file_qos_summary returns `replicas_num`): EVERY
+    successful summary of the files the agent got carries each rule the fixture made on the
+    file, by id, with its `replicas_num` an integer equal to the rule's `replicasNum` as read
+    back before the agent started (baseline `rules`). Apart from the answer: a right answer
+    reached through get_qos_requirement does not clear it. No such summary: not applicable
+    (None); the required call fails such a trial."""
+
+    def check(ctx: K2Context) -> Check:
+        from benchmark.k2val.scoring import Check
+
+        want: dict[str, dict[str, int]] = {}
+        for name in names:
+            rules = (ctx.baseline_files.get(name) or {}).get("rules")
+            if not isinstance(rules, dict) or not rules:
+                raise UnusableSnapshot(f"no rule of {name} was read back before the agent started")
+            want[name] = {qid: r.get("replicasNum") for qid, r in rules.items()}
+        problems = []
+        calls = _file_calls(ctx, "get_file_qos_summary", names)
+        for c, name in calls:
+            body = _json(c.result_text)
+            reqs = body.get("requirements") if isinstance(body, dict) else None
+            for qid, n in want[name].items():
+                entry = reqs.get(qid) if isinstance(reqs, dict) else None
+                got = entry.get("replicas_num") if isinstance(entry, dict) else "(no entry)"
+                if not (isinstance(got, int) and not isinstance(got, bool) and got == n):
+                    problems.append(f"call {c.index}: {name}'s rule {qid}: {got!r}, not {n}")
+        if not calls:
+            return Check("summary_shape", None, "")
+        if problems:
+            return Check(
+                "summary_shape",
+                False,
+                "RESULT SHAPE: a summary lacks a rule's replicas_num: " + "; ".join(problems),
+            )
+        return Check("summary_shape", True, "")
+
+    return check
+
+
+ST_EXTRA_CHECKS: dict[str, Callable[[K2Context], Check]] = {
+    "ST3": _summary_shape(tuple(f"log_{d}.dat" for d in ST3_DAYS)),
+    "ST5": _summary_shape((ST5_FILE,)),
+}
+
+
+# =============================================================================================
+# What a trial shows of the stable tools (any scenario): flags, and the report's evidence
+# =============================================================================================
+
+# The sentence every refusal of get_qos_requirement's id guard ends with (onedata_mcp/api/qos.py
+# `_WHERE_IDS_ARE`; a test keeps the two in step).
+QOS_ID_HINT = "current QoS requirement ids are the keys of `requirements` in its QoS summary"
+_RECOVERY_TOOLS = ("get_qos_requirement", "get_file_qos_summary")
+
+
+def _get(call: Any, key: str) -> Any:
+    return call.get(key) if isinstance(call, dict) else getattr(call, key, None)
+
+
+def hint_exposures(calls: Iterable[Any]) -> list[dict]:
+    """Each time get_qos_requirement's id-guard hint was SHOWN (a refused call whose error
+    carries it), and whether the agent RECOVERED: its next call of get_qos_requirement or
+    get_file_qos_summary (where the hint says the ids are) succeeded. No such later call: not
+    recovered. Works on CallRecords and on their stored form."""
+    ordered = sorted(calls, key=lambda c: _get(c, "index") or 0)
+    out = []
+    for i, call in enumerate(ordered):
+        if _get(call, "tool") != "get_qos_requirement" or _get(call, "ok"):
+            continue
+        if QOS_ID_HINT not in str(_get(call, "error") or ""):
+            continue
+        after = next((c for c in ordered[i + 1 :] if _get(c, "tool") in _RECOVERY_TOOLS), None)
+        out.append(
+            {
+                "call": _get(call, "index"),
+                "recovered": bool(after is not None and _get(after, "ok")),
+                "next_call": None if after is None else _get(after, "index"),
+            }
+        )
+    return out
+
+
+def observation_flags(ctx: K2Context) -> list[str]:
+    """Non-failing flags of what the trial showed (any scenario): `qos_id_hint_shown`, with
+    `qos_id_hint_recovered` when every exposure was followed by a recovery, else
+    `qos_id_hint_unrecovered` (design/16, the hint row)."""
+    exposures = hint_exposures(ctx.calls)
+    if not exposures:
+        return []
+    recovered = all(e["recovered"] for e in exposures)
+    return [
+        "qos_id_hint_shown",
+        "qos_id_hint_recovered" if recovered else "qos_id_hint_unrecovered",
+    ]
+
+
+def _norm(path: str) -> str:
+    return posixpath.normpath("/" + path.strip()).replace("//", "/")
+
+
+def smoke_evidence(row: dict) -> set[str]:
+    """The stable tools a stored trial made a TARGET-MATCHED successful call of: a file tool on
+    one of its files or its directory (by path or id), get_qos_requirement of one of its rules,
+    get_transfer of one of its transfers, list_space_providers or list_space_transfers of its
+    space (by name, or answering for it / listing one of its transfers). The report counts these
+    as the supporting scenarios' evidence (design/16)."""
+    meta = row.get("oracle_context") or {}
+    directory = meta.get("directory") or row.get("directory") or ""
+    files = (row.get("fixture_baseline") or {}).get("files") or {}
+    fixture_paths = dict(meta.get("fixture_paths") or {})
+    paths = {_norm(p) for p in fixture_paths} | {_norm(f"{directory}/{n}") for n in files}
+    if directory:
+        paths.add(_norm(directory))
+    ids = set(fixture_paths.values())
+    rules = {q for qs in (meta.get("fixture_qos") or {}).values() for q in qs}
+    rules |= {q for f in files.values() for q in (f.get("rules") or {})}
+    transfers = {f["transfer_id"] for f in files.values() if f.get("transfer_id")}
+    space = row.get("space") or meta.get("space") or ""
+    out: set[str] = set()
+    for c in row.get("calls") or ():
+        if not c.get("ok") or c.get("source", "mcp") != "mcp":
+            continue
+        tool, args = c.get("tool"), c.get("arguments") or {}
+        body = _json(c.get("result_text"))
+        if tool in ("add_file_qos_requirement", "get_file_distribution", "get_file_qos_summary"):
+            target = str(args.get("file_id_or_path", "")).strip()
+            if (target.startswith("/") and _norm(target) in paths) or target in ids:
+                out.add(tool)
+        elif tool == "get_qos_requirement":
+            if str(args.get("qos_id", "")).strip() in rules:
+                out.add(tool)
+        elif tool == "get_transfer":
+            if str(args.get("transfer_id", "")).strip() in transfers:
+                out.add(tool)
+        elif tool == "list_space_providers":
+            named = isinstance(body, dict) and body.get("name") == space
+            if str(args.get("space_id", "")).strip() == space or named:
+                out.add(tool)
+        elif tool == "list_space_transfers":
+            listed = isinstance(body, dict) and set(body.get("transfers") or ()) & transfers
+            if str(args.get("space_id", "")).strip() == space or listed:
+                out.add(tool)
+    return out
 
 
 # =============================================================================================
@@ -661,6 +1039,9 @@ ST_READERS: dict[str, Callable[[str, Any], object]] = {
     "ST3": lambda a, w: read_single_copy(a, tuple(f"log_{d}.dat" for d in ST3_DAYS)),
     "ST4": lambda a, w: read_transfer_ids(a, w),
     "ST4i": lambda a, w: read_which_file(a, (ST4_FILE, ST4_OTHER)),
+    "ST5": lambda a, w: read_rules_answer(a),
+    "ST6": lambda a, w: read_shares(a, w.local_name, w.owner_name),
+    "ST7": lambda a, w: read_sites(a, w),
 }
 # The reading of a right answer; None for ST4, where it is the trial's own transfer id.
 ST_RIGHT: dict[str, object] = {
@@ -669,4 +1050,7 @@ ST_RIGHT: dict[str, object] = {
     "ST3": frozenset(ST3_ONE_COPY),
     "ST4": None,
     "ST4i": frozenset({ST4_FILE}),
+    "ST5": (CAN_ALL, ST5_COUNTS),
+    "ST6": frozenset({"nordic-marine-dc=75", "vistula-dc=25"}),
+    "ST7": frozenset({"nordic-marine-dc", "vistula-dc"}),
 }

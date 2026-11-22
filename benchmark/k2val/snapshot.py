@@ -57,6 +57,10 @@ class FileState:
     # the validated source observations: each provider's view of every provider (own size,
     # size field, merged intervals, or failed), kept so a stored trial can be rescored offline
     observed: dict | None = None
+    # With the fixture's `rules_detail` (design/16): each rule in the file's effective summary,
+    # as stored (`fileId`, `expression`, `replicasNum`, `status`) with the storages its
+    # expression matches in the space (`matching`: `{id, providerId}`). None: not read.
+    rules: dict[str, dict] | None = None
 
 
 @dataclass
@@ -104,7 +108,25 @@ class Snapshot:
         return out
 
 
-async def _file_state(fed: FedApi, name: str, bf: BuiltFile, owner_id: str, local_id: str):
+async def _rules(fed: FedApi, space_id: str, qos_ids: tuple[str, ...]) -> dict[str, dict]:
+    """Each rule as stored, with the storages its expression matches in the space. Raises on a
+    reading that fails or is malformed (the caller records it as the snapshot's error)."""
+    out: dict[str, dict] = {}
+    for qid in qos_ids:
+        detail = await fed.qos_requirement("local", qid)
+        matching = await fed.evaluate_qos("local", space_id, detail["expression"])
+        out[qid] = {**detail, "matching": matching}
+    return out
+
+
+async def _file_state(
+    fed: FedApi,
+    name: str,
+    bf: BuiltFile,
+    owner_id: str,
+    local_id: str,
+    rules_space: str | None = None,
+):
     file_id = bf.file_id
     state = FileState(name=name, file_id=file_id)
     try:
@@ -143,6 +165,11 @@ async def _file_state(fed: FedApi, name: str, bf: BuiltFile, owner_id: str, loca
     state.owner_covered = via_owner.covers(owner_id)
     state.local_covered = via_local.covers(local_id)
     state.qos_ids = qos
+    if rules_space:
+        try:
+            state.rules = await _rules(fed, rules_space, qos)
+        except Exception as e:  # noqa: BLE001 - an unread rule is an unusable reading
+            state.error = f"the rules on the file could not be read: {type(e).__name__}: {e}"
     return state
 
 
@@ -150,8 +177,12 @@ async def take_snapshot(fed: FedApi, fixture: BuiltFixture, clock: Clock) -> Sna
     owner_id = await fed.provider_id("owner")
     local_id = await fed.provider_id("local")
     taken = clock.time()
+    rules_space = fixture.space_id if fixture.rules_detail else None
     states = await asyncio.gather(
-        *[_file_state(fed, name, bf, owner_id, local_id) for name, bf in fixture.files.items()]
+        *[
+            _file_state(fed, name, bf, owner_id, local_id, rules_space)
+            for name, bf in fixture.files.items()
+        ]
     )
     snap = Snapshot(taken_at=taken, files={s.name: s for s in states})
     if fixture.baseline_tree is not None:

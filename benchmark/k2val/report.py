@@ -405,6 +405,11 @@ def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | N
     )
     w("")
 
+    # 6g. the stable tools' smoke re-run (design/16), when the run holds its scenarios
+    from benchmark.k2val.smoke_report import smoke_section
+
+    out.extend(smoke_section(rows))
+
     # 7. changes
     changes = run_dir / "changes.jsonl"
     w("## Recorded changes (each with its triggering trial; before / after)\n")

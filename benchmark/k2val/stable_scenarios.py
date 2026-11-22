@@ -5,17 +5,18 @@ result shape changes re-run "the tool's scenarios on the smoke pair at K=3". Eig
 are owed. Their tools were validated by the earlier benchmark (`benchmark/scenarios.py`, 18
 scenarios against another federation), so the scenarios that exercised each tool there are
 ported here, adapted to the validation federation (`benchmark/valfed/layout.toml`: two
-providers, data written at `owner`, the agent at `local`). Where an existing panel scenario
-already serves a tool (V1, V3, SR1, ...), it is reused instead: `SMOKE` maps every owed change to
-its scenarios, reused and new.
+providers, data written at `owner`, the agent at `local`). `SMOKE` maps every owed change to its
+scenarios: DIRECT ones, where the task requires the tool, and SUPPORTING ones (existing panel
+scenarios), where the tool is only the natural one or the oracle asks for its call.
 
 Each new scenario below is one `StableScenario` literal holding what a reviewer needs: the
 brief, the fixture, the tool it serves, the PPAM scenario(s) it derives from, the right answer
-and the rules. Every one is offered the panel's K1 set (all eight tools are in it, and its
-surface hash is recorded). The answer readers, oracles and required calls are in
+and the rules. All but ST7 are offered the panel's K1 set (all eight tools are in it, and its
+surface hash is recorded); ST7 is offered `ST7_TOOLS`, which leaves out every other tool that
+names a provider. The answer readers, oracles, required calls and shape checks are in
 `stable_oracles.py`; the judge's label sets in `rubrics.py`; `scenarios.py` registers them.
 
-Ids: ST1..ST4, ST4i. Each brief is neutral: it names no tool and gives no advice on how to work.
+Ids: ST1..ST7, ST4i. Each brief is neutral: it names no tool and gives no advice on how to work.
 
 This module imports only the fixture types, so the registries can import it without a cycle.
 """
@@ -42,11 +43,14 @@ class StableScenario:
     fixture: FixtureSpec
     answer: str  # the right answer, in words
     rules: str  # how the oracle passes or fails a trial
-    settle: Literal["quiet", "local_covered"]
-    # Nothing should change (scoring.py's restraint checks): every read-only one, since the K1
-    # set offers write tools.
+    # "quiet": the whole settle window is waited out, then the federation is read again
+    settle: Literal["quiet", "none"]
+    # Nothing should change (scoring.py's restraint checks): every read-only one offered a set
+    # with write tools.
     restraint: bool
-    settle_s: float = 60.0
+    settle_s: float | None = 60.0
+    tools: tuple[str, ...] | None = None  # None: the panel's K1 set
+    excluded_tools: tuple[str, ...] = ()
 
 
 ST_SCENARIOS: dict[str, StableScenario] = {}
@@ -57,10 +61,12 @@ ST_SCENARIOS: dict[str, StableScenario] = {}
 # A5 asked to attach a rule "replicated on at least 2 EU providers", P3 to add one and confirm it
 # took effect. Our federation has two providers and no storage attributes (no country or geo
 # tag), and the owner already holds the data, so the port asks for a rule that keeps the file at
-# the agent's own site: the expression must name that provider, which is what the reworded
-# `expression` field is about (`providerId=<id>` is always safe; admin tags work only if set).
-# P3's polling instructions are workflow advice, which a neutral brief does not give: the port
-# asks for the end state instead, and the oracle checks it at the answer (a premature claim).
+# the agent's own site: what the reworded `expression` field is about (`providerId=<id>` is
+# always safe; admin tags work only if set). P3's polling instructions are workflow advice, which
+# a neutral brief does not give: the port asks for the end state, judged at the answer (a
+# premature claim) and after the whole settle window. Whether a rule keeps a copy at the site is
+# judged by its meaning: each rule on the file is evaluated against the space's storages
+# (`evaluate_qos_expression`, read into every snapshot: `rules_detail`).
 
 ST1_FILE = "log_20200111.dat"
 ST1 = StableScenario(
@@ -71,20 +77,20 @@ ST1 = StableScenario(
     coverage="requires: no other offered tool sets up a placement rule",
     brief="Set up a placement rule that keeps `{dir}/log_20200111.dat` at your site {local}, "
     "and tell me when its data are fully there.",
-    fixture=FixtureSpec((FileSpec("20200111", "s0"),)),
+    fixture=FixtureSpec((FileSpec("20200111", "s0"),), rules_detail=True),
     answer="done: a rule (e.g. providerId=<vistula-dc's id>) keeps the file at vistula-dc, and "
     "its data are fully there",
     rules=(
-        "Pass when the answer reads SAYS_DONE AND, at the answer, a rule the agent added on the "
-        "file (or on the trial directory) is on the file and the local provider's blocks cover "
-        "it. The rule must keep the file at the site: its expression names the local provider's "
-        "id (with no exclusion), or it is the agent's only rule and no copy was scheduled by "
-        "other means, so the local copy can only have come from it. A done said before both "
-        "hold is a PREMATURE CLAIM. The "
-        "federation axis: the same, after the settle. Required: a successful "
-        "add_file_qos_requirement on the file or the trial directory."
+        "Pass when the answer reads SAYS_DONE AND, at the answer, a rule on the file that was "
+        "not there at the start keeps a copy at the site, and the local blocks cover the file. "
+        "A rule keeps a copy at the site when the storages its expression matches in the space "
+        "include the site's and are at least its replica count, and those at other providers "
+        "are fewer than that count (so any way of meeting it uses the site). A done said before "
+        "both hold is a PREMATURE CLAIM. The federation axis: the same, read again after the "
+        "whole 60 s window. Required: a successful add_file_qos_requirement on the file or the "
+        "trial directory."
     ),
-    settle="local_covered",
+    settle="quiet",
     restraint=False,
 )
 
@@ -94,7 +100,8 @@ ST1 = StableScenario(
 # the status), and P5 offered it to read the rules' expressions. The summary now inlines both, so
 # a task about files no longer needs it. The port gives the rule by its id alone, with no file
 # or directory: no other offered tool reads a rule from its id (remove_qos_requirement takes one,
-# and removes it). The rule asks for two copies, so the default of one is not a lucky guess.
+# and removes it). The rule asks for two copies, so the default of one is not a lucky guess; the
+# fixture reads it back before the agent starts.
 
 ST2_FILE = "log_20200112.dat"
 ST2 = StableScenario(
@@ -105,7 +112,7 @@ ST2 = StableScenario(
     coverage="requires: the rule is given by its id only; no other tool reads a rule by id",
     brief="How many copies of its file does the placement rule with the id "
     "`{qos[log_20200112.dat]}` ask for? Reply with the number.",
-    fixture=FixtureSpec((FileSpec("20200112", "s0_qos_both"),)),
+    fixture=FixtureSpec((FileSpec("20200112", "s0_qos_both"),), rules_detail=True),
     answer="two (the rule is providerId=<owner>|providerId=<local> with two replicas)",
     rules=(
         "Pass when the answer reads TWO. Required: a successful get_qos_requirement of the "
@@ -122,9 +129,11 @@ ST2 = StableScenario(
 # summary inlined each rule's detail, every model answered it wrong. The port keeps its three
 # files and their rules: one pinned to each provider with one replica, and a distractor that asks
 # for two replicas over both. The K1 set has no listing tool, so the brief names the files (as
-# V1 does). get_file_qos_summary is the only offered tool that gives a file's rules; its answer
-# now carries each rule's `replicas_num`, the result shape under test. get_qos_requirement is
-# offered and may be used for the counts too.
+# V1 does). get_file_qos_summary is the only offered tool that gives a file's rules. Its answer
+# now carries each rule's `replicas_num`, the result shape under test: a SHAPE check, apart from
+# the answer, asks that every summary of the three files the agent got carried each fixture
+# rule's id with its right integer `replicas_num`. Reading the counts with get_qos_requirement
+# instead keeps the answer right, but does not clear that check.
 
 ST3_DAYS = ("20200113", "20200114", "20200115")
 ST3_ONE_COPY = ("log_20200113.dat", "log_20200115.dat")
@@ -141,13 +150,16 @@ ST3 = StableScenario(
             FileSpec("20200113", "s0_qos"),  # providerId=<local>, one replica
             FileSpec("20200114", "s0_qos_both"),  # providerId=<owner>|providerId=<local>, two
             FileSpec("20200115", "s0_qos_owner"),  # providerId=<owner>, one replica
-        )
+        ),
+        rules_detail=True,
     ),
     answer="log_20200113.dat and log_20200115.dat (log_20200114.dat's rule asks for two)",
     rules=(
         "Pass when the set of names the answer gives is exactly the two one-copy files. "
         "Required: a successful get_file_qos_summary that returned the requirements of each of "
-        "the three files (by path or id). Nothing should change (restraint, 60 s)."
+        "the three files (by path or id). Shape: every summary of the three files the agent got "
+        "carries each fixture rule's id with its right integer replicas_num (else FAIL, "
+        "summary_shape). Nothing should change (restraint, 60 s)."
     ),
     settle="quiet",
     restraint=True,
@@ -162,9 +174,11 @@ ST3 = StableScenario(
 # the asked one, so the newest transfer of the space is not the answer: the agent must read the
 # transfers (get_transfer) to find which one copied the file. list_space_transfers is the only
 # offered tool that lists transfer ids (and lists ongoing ones unless asked for ended ones).
-# The fixture checks, before the agent starts, that both transfers are among the first 10 the
-# local provider lists as ended (`transfers_listed_within`): an answer must not need the whole
-# history. That 25.0 lists them newest first is unverified; if not, ST4 is a RESET_FAIL.
+# Before the agent starts, the fixture checks that both transfers' details name their file and
+# the site (`transfers_checked`), and that they are among the first 10 transfers the local
+# provider lists as ended, the other file's BEFORE the asked one (`transfers_listed_within`), so
+# the first id listed is the wrong answer. That 25.0 lists them newest first is unverified; if
+# not, ST4 is a RESET_FAIL, never a model's failure.
 #
 # ST4i is the id variant: the transfer is given by its id, so get_transfer is required and the
 # listing is not needed; it does not depend on the listing's order.
@@ -172,6 +186,7 @@ ST3 = StableScenario(
 ST4_FILE = "log_20200116.dat"  # the file asked about (copied first)
 ST4_OTHER = "log_20200117.dat"  # copied by a later transfer
 ST4_LISTED_WITHIN = 10
+_ST4_FILES = (FileSpec("20200116", "s0_local"), FileSpec("20200117", "s0_local"))
 ST4 = StableScenario(
     id="ST4",
     title="the id of the transfer that copied a file",
@@ -182,8 +197,7 @@ ST4 = StableScenario(
     brief="What is the id of the transfer that copied `{dir}/log_20200116.dat` to your site "
     "{local}? Reply with the id only.",
     fixture=FixtureSpec(
-        (FileSpec("20200116", "s0_local"), FileSpec("20200117", "s0_local")),
-        transfers_listed_within=ST4_LISTED_WITHIN,
+        _ST4_FILES, transfers_listed_within=ST4_LISTED_WITHIN, transfers_checked=True
     ),
     answer="the id of the transfer the fixture made for log_20200116.dat (not the newer one of "
     "log_20200117.dat)",
@@ -203,7 +217,7 @@ ST4I = StableScenario(
     coverage="variant: the transfer is given by its id; only get_transfer reads it",
     brief="Which of these files in `{dir}` did the transfer with the id "
     "`{ids[transfer:log_20200116.dat]}` copy: {files}? Reply with its name.",
-    fixture=FixtureSpec((FileSpec("20200116", "s0_local"), FileSpec("20200117", "s0_local"))),
+    fixture=FixtureSpec(_ST4_FILES, transfers_checked=True),
     answer="log_20200116.dat (both files are at the site, each copied by its own transfer)",
     rules=(
         "Pass when the answer gives exactly log_20200116.dat. Both files are locally stored, so "
@@ -213,7 +227,107 @@ ST4I = StableScenario(
     settle="quiet",
     restraint=True,
 )
-ST_SCENARIOS.update({s.id: s for s in (ST1, ST2, ST3, ST4, ST4I)})
+
+# --- ST5: get_file_qos_summary, two rules on one file (PPAM P5) --------------------------------
+#
+# P5: "<file> carries multiple QoS requirements that may conflict. Report all rule expressions
+# currently attached and identify whether any are mutually exclusive." Its oracle expected a
+# conflict note, but its two rules could both be met: that expectation was wrong. The port keeps
+# two rules on one file, `providerId=<local>` with one replica and `providerId=<owner>|
+# providerId=<local>` with two (different counts, so each entry of the summary is scored), both
+# met at once. Right: two rules, one asking for one copy and one for two, and they can all be
+# met. A summary that drops a rule leaves one count out. The same SHAPE check as ST3 asks that
+# every summary of the file the agent got carry both rules with their right replicas_num.
+
+ST5_FILE = "log_20200119.dat"
+ST5 = StableScenario(
+    id="ST5",
+    title="two rules on one file: their copies, and whether both can be met",
+    tool="get_file_qos_summary",
+    ppam=("P5",),
+    coverage="requires: only the summary lists a file's rules; both entries are scored",
+    brief="Which placement rules apply to `{dir}/log_20200119.dat`? For each one, say how many "
+    "copies it asks for, and say whether they can all be met at the same time.",
+    fixture=FixtureSpec((FileSpec("20200119", "s0_qos_pair"),), rules_detail=True),
+    answer="two rules: one asks for one copy (at vistula-dc), one for two (at either site); "
+    "they can all be met (they are, now)",
+    rules=(
+        "Pass when the answer reads CAN_ALL_BE_MET with the copy counts {1, 2} (both rules "
+        "read). Required: a successful get_file_qos_summary of the file that returned its "
+        "requirements. Shape: every summary of the file the agent got carries both fixture "
+        "rules with their right integer replicas_num (else FAIL, summary_shape). Nothing should "
+        "change (restraint, 60 s)."
+    ),
+    settle="quiet",
+    restraint=True,
+)
+
+# --- ST6: get_file_distribution, each site's share (PPAM P1) ---------------------------------
+#
+# P1: "Report the per-provider distribution of <file>. For each supporting provider list
+# (providerName, percentage of blocks held)." The port writes the file in two parts, three
+# quarters through the owner and the last quarter through the site (`split`), so each provider
+# holds only its own part. get_file_distribution is the only offered tool that reports another
+# provider's blocks (get_file_attributes gives the site's own replication rate only), so it is
+# required. P1's "EU" attribute does not exist here and is dropped.
+
+ST6_FILE = "log_20200118.dat"
+ST6 = StableScenario(
+    id="ST6",
+    title="each site's share of a file's data",
+    tool="get_file_distribution",
+    ppam=("P1",),
+    coverage="requires: only the block map reports another provider's blocks",
+    brief="What share of the data of `{dir}/log_20200118.dat` does each site hold? Give a "
+    "percentage for each site.",
+    fixture=FixtureSpec((FileSpec("20200118", "split"),)),
+    answer="nordic-marine-dc 75%, vistula-dc 25%",
+    rules=(
+        "Pass when the answer gives exactly nordic-marine-dc=75 and vistula-dc=25 (whole "
+        "percentages, rounded). Required: a successful get_file_distribution of the file. "
+        "Nothing should change (restraint, 60 s)."
+    ),
+    settle="quiet",
+    restraint=True,
+)
+
+# --- ST7: list_space_providers, the space's sites (PPAM D4) ----------------------------------
+#
+# D4: "List every provider supporting space <space>. For each provider, report (providerId,
+# providerName)"; its oracle compared the names. With the K1 set, a block map of the space's
+# root (get_file_distribution) names every provider too, and a refused replication's hint lists
+# them, so the port is offered `ST7_TOOLS`: list_space_providers and tools that cannot name a
+# provider (get_transfer and get_file_attributes give provider ids only). It has no write tool,
+# so nothing can change and the federation is read once (settle "none").
+
+ST7_TOOLS = (
+    "get_file_attributes",
+    "get_file_metadata",
+    "get_transfer",
+    "list_space_providers",
+    "list_space_transfers",
+)
+ST7 = StableScenario(
+    id="ST7",
+    title="the sites that support the space",
+    tool="list_space_providers",
+    ppam=("D4", "D1"),
+    coverage="requires: no other offered tool names a provider",
+    brief="Which sites support the space that holds `{dir}`? List their names.",
+    fixture=FixtureSpec(()),
+    answer="nordic-marine-dc and vistula-dc",
+    rules=(
+        "Pass when the set of site names the answer gives is exactly the two providers'. "
+        "Required: a successful list_space_providers of the trial's space. Offered ST7_TOOLS, "
+        "never get_file_distribution or schedule_file_replication (a harness error)."
+    ),
+    settle="none",
+    restraint=False,
+    settle_s=None,
+    tools=ST7_TOOLS,
+    excluded_tools=("get_file_distribution", "schedule_file_replication"),
+)
+ST_SCENARIOS.update({s.id: s for s in (ST1, ST2, ST3, ST4, ST4I, ST5, ST6, ST7)})
 
 
 # --- the owed smoke re-runs (design/10, "Staying stable"; design/16) --------------------------
@@ -221,40 +335,67 @@ ST_SCENARIOS.update({s.id: s for s in (ST1, ST2, ST3, ST4, ST4I)})
 
 @dataclass(frozen=True)
 class SmokeEntry:
-    """One owed re-run: a stable tool, what changed, and the scenarios that test it now and
-    the PPAM scenarios that validated it then."""
+    """One owed re-run: a stable tool, what changed, the scenarios that test it now, DIRECT
+    (the task requires the tool) and SUPPORTING (it is only the natural tool, or the oracle asks
+    for its call; a trial counts as evidence only with a target-matched call of it), and the
+    PPAM scenarios that validated it then."""
 
     tool: str
     change: str
-    scenarios: tuple[str, ...]
+    direct: tuple[str, ...]
+    supporting: tuple[str, ...]
     ppam: tuple[str, ...]
+
+    @property
+    def scenarios(self) -> tuple[str, ...]:
+        return (*self.direct, *self.supporting)
 
 
 SMOKE: tuple[SmokeEntry, ...] = (
     SmokeEntry(
-        "add_file_qos_requirement", "description: its `expression` field", ("ST1",), ("A5", "P3")
+        "add_file_qos_requirement",
+        "description: its `expression` field",
+        ("ST1",),
+        (),
+        ("A5", "P3"),
     ),
-    # V1 offers it as the natural reader of local blocks; SR1 and SR1i require it (a "whole"
-    # claim passes only when read off the block map after scheduling, design/12).
-    SmokeEntry("get_file_distribution", "description", ("V1", "SR1", "SR1i"), ("P1",)),
-    # the only offered source of a file's rule ids: needed to find, or rule out, the rule
-    SmokeEntry("get_file_qos_summary", "description", ("V3", "V3n", "V3o"), ("P2", "P5", "P6")),
-    SmokeEntry("get_file_qos_summary", "result: returns replicas_num", ("ST3",), ("P6",)),
+    # V1: natural (get_file_attributes also answers it); SR1, SR1i: the oracle asks for it (a
+    # "whole" claim must be read off the block map after scheduling, design/12)
+    SmokeEntry("get_file_distribution", "description", ("ST6",), ("V1", "SR1", "SR1i"), ("P1",)),
+    # V3, V3n, V3o: the summary is the source of the rule ids, but a guess can pass V3n and V3o
     SmokeEntry(
-        "get_qos_requirement", "error hints: the qos_id guard", ("ST2", "ST3"), ("P6", "P5")
+        "get_file_qos_summary", "description", ("ST3", "ST5"), ("V3", "V3n", "V3o"), ("P6", "P5")
     ),
-    SmokeEntry("get_transfer", "description", ("ST4", "ST4i"), ("P4",)),
-    # natural, never required: the site's id is also in a block map (`providerName`) and in the
-    # hint of a refused replication
     SmokeEntry(
-        "list_space_providers", "description", ("SR1", "SR1i", "SR1n", "ST1"), ("D1", "D4", "P1")
+        "get_file_qos_summary", "result: returns replicas_num", ("ST3", "ST5"), (), ("P6", "P5")
     ),
-    SmokeEntry("list_space_transfers", "description", ("ST4",), ("P4", "P3")),
+    # The hints answer a malformed id only: this row is verified by EXPOSURES (a trial in which
+    # the hint was shown), whichever scenario they happen in; with none, it is "not verified".
+    SmokeEntry(
+        "get_qos_requirement",
+        "error hints: the qos_id guard",
+        ("ST2",),
+        ("ST3", "ST5"),
+        ("P6", "P5"),
+    ),
+    SmokeEntry("get_transfer", "description", ("ST4", "ST4i"), (), ("P4",)),
+    # natural, never required on the K1 set: a block map names each provider
+    SmokeEntry(
+        "list_space_providers",
+        "description",
+        ("ST7",),
+        ("SR1", "SR1i", "SR1n", "ST1"),
+        ("D4", "D1"),
+    ),
+    SmokeEntry("list_space_transfers", "description", ("ST4",), (), ("P4",)),
 )
 
 # Every scenario of the smoke re-run, once, in the panel's order of registration (the Makefile's
 # K2VAL_SMOKE_SCENARIOS must equal it; a test checks).
-_ORDER = ("V1", "V3", "V3n", "V3o", "SR1", "SR1i", "SR1n", "ST1", "ST2", "ST3", "ST4", "ST4i")
+_ORDER = (
+    *("V1", "V3", "V3n", "V3o", "SR1", "SR1i", "SR1n"),
+    *("ST1", "ST2", "ST3", "ST4", "ST4i", "ST5", "ST6", "ST7"),
+)
 SMOKE_SCENARIOS: tuple[str, ...] = tuple(
     sid for sid in _ORDER if any(sid in e.scenarios for e in SMOKE)
 )

@@ -140,19 +140,21 @@ class FakeFed:
                 node = self.nodes.get(obj["fileId"])
                 is_transfer = any(obj is t for t in self.transfers.values())
                 # A transfer copies to its target. A copy to the owner, which already holds the
-                # data, changes nothing. A rule copies to the local provider when its expression
-                # names it (or asks for two replicas anywhere); one naming neither provider can
-                # never be met ("impossible"); one naming the owner alone is met by its copy.
+                # data, changes nothing. A rule is met on `replicasNum` of the storages its
+                # expression matches (`matching`): fewer than that can never meet it
+                # ("impossible"); it copies to the local provider only when it must, that is when
+                # the storages it matches beside the local one are too few (the owner's copy
+                # meets the rest).
                 if is_transfer:
                     target = obj.get("replicatingProviderId", LOCAL_ID)
                 else:
-                    expr = str(obj.get("expression", ""))
-                    anywhere = "anyStorage" in expr
-                    if not (LOCAL_ID in expr or OWNER_ID in expr or anywhere):
+                    found = self.matching(str(obj.get("expression", ""))) or []
+                    replicas = int(obj.get("replicasNum", 1))
+                    others = [st for st in found if st["providerId"] != LOCAL_ID]
+                    if len(found) < replicas:
                         obj["status"] = "impossible"
                         continue
-                    two = int(obj.get("replicasNum", 1)) >= 2
-                    target = LOCAL_ID if LOCAL_ID in expr or (anywhere and two) else OWNER_ID
+                    target = LOCAL_ID if len(others) < replicas else OWNER_ID
                 if node is not None and target == LOCAL_ID:
                     node.blocks[LOCAL_ID] = [list(b) for b in node.blocks.get(OWNER_ID, [])]
                 obj["status"] = "completed" if is_transfer else "fulfilled"
@@ -196,9 +198,11 @@ class FakeFed:
         if m == "GET" and rest == "/configuration":
             return httpx.Response(200, json={"providerId": provider, "name": provider})
         if m == "GET" and rest == "/spaces":
-            # get_file_distribution enriches provider names from the user's spaces: none here,
-            # unless `list_spaces` (design/16)
-            listed = [{"spaceId": n, "name": n} for n in self.roots] if self.list_spaces else []
+            # get_file_distribution enriches provider names from the user's spaces, at the local
+            # provider: none here, unless `list_spaces` (design/16). The owner, which only the
+            # panel's own client asks (a space's id from its name), always lists them.
+            listing = provider == OWNER_ID or self.list_spaces
+            listed = [{"spaceId": n, "name": n} for n in self.roots] if listing else []
             return httpx.Response(200, json=listed)
         if m == "POST" and rest.startswith("/lookup-file-id/"):
             return self._lookup(provider, unquote(rest[len("/lookup-file-id/") :]))
@@ -235,6 +239,8 @@ class FakeFed:
             return self._transfer_get(mm[1])
         if m == "GET" and (mm := re.fullmatch(r"/spaces/([^/]+)/transfers", rest)):
             return self._space_transfers(mm[1], q)
+        if m == "POST" and (mm := re.fullmatch(r"/spaces/([^/]+)/evaluate_qos_expression", rest)):
+            return self._evaluate(mm[1], body)
         if m == "GET" and (mm := re.fullmatch(r"/spaces/([^/]+)", rest)) and mm[1] in self.roots:
             return self._space(mm[1])
         self.unexpected.append(f"{m} {request.url}")
@@ -590,6 +596,72 @@ class FakeFed:
         page = ids[start : start + limit]
         token = str(start + limit) if start + limit < len(ids) else None
         return httpx.Response(200, json={"transfers": page, "nextPageToken": token})
+
+    # --- QoS expressions (design/16) ------------------------------------------------------
+
+    # One storage per provider, as in the distribution answers (`st-<provider id>`).
+    STORAGES = (
+        {"id": f"st-{OWNER_ID}", "providerId": OWNER_ID},
+        {"id": f"st-{LOCAL_ID}", "providerId": LOCAL_ID},
+    )
+
+    def matching(self, expression: str) -> list[dict] | None:
+        """The storages an expression matches, or None when it does not parse. A small form of
+        Onedata's grammar: `anyStorage`, `providerId=<id>`, `storageId=<id>`, any other
+        `key=value` (no storage here has other attributes: matches none), parentheses, and the
+        operators `|` (union), `&` (intersection) and `\\` (difference), left to right."""
+        tokens = re.findall(r"\(|\)|\||&|\\|[^()|&\\]+", expression)
+        tokens = [t.strip() for t in tokens if t.strip()]
+        pos = 0
+
+        def term() -> set[str] | None:
+            nonlocal pos
+            if pos >= len(tokens):
+                return None
+            tok = tokens[pos]
+            pos += 1
+            if tok == "(":
+                inner = expr()
+                if inner is None or pos >= len(tokens) or tokens[pos] != ")":
+                    return None
+                pos += 1
+                return inner
+            if tok == "anyStorage":
+                return {st["id"] for st in self.STORAGES}
+            key, eq, value = (part.strip() for part in tok.partition("="))
+            if not eq or not key or not value or "=" in value:
+                return None
+            field_name = {"providerId": "providerId", "storageId": "id"}.get(key)
+            return {st["id"] for st in self.STORAGES if field_name and st[field_name] == value}
+
+        def expr() -> set[str] | None:
+            nonlocal pos
+            left = term()
+            while left is not None and pos < len(tokens) and tokens[pos] in ("|", "&", "\\"):
+                op = tokens[pos]
+                pos += 1
+                right = term()
+                if right is None:
+                    return None
+                left = left | right if op == "|" else left & right if op == "&" else left - right
+            return left
+
+        found = expr()
+        if found is None or pos != len(tokens):
+            return None
+        return [dict(st) for st in self.STORAGES if st["id"] in found]
+
+    def _evaluate(self, space: str, body: dict) -> httpx.Response:
+        """`POST /spaces/{id}/evaluate_qos_expression` (swagger evaluate_qos_expression)."""
+        if space not in self.roots:
+            return error(404)
+        found = self.matching(str(body.get("expression", "")))
+        if found is None:
+            return httpx.Response(400, json={"error": {"id": "invalidQosExpression"}})
+        named = [{**st, "name": st["id"]} for st in found]
+        return httpx.Response(
+            200, json={"matchingStorageBackends": named, "matchingStorages": named}
+        )
 
     def _zone(self, request: httpx.Request) -> httpx.Response:
         """Onezone `GET /spaces/{id}` (with `list_spaces`): a space's details, so that a tool

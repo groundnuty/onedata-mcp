@@ -437,7 +437,7 @@ k2val:
 # error hints or result shape changed: the smoke pair (Qwen3-Coder, Haiku at effort low) at K=3
 # on every scenario design/16 maps to the stable tools (benchmark/k2val/stable_scenarios.py's
 # SMOKE_SCENARIOS; a test keeps the two equal). One tool's scenarios: set K2VAL_SMOKE_SCENARIOS.
-K2VAL_SMOKE_SCENARIOS ?= V1,V3,V3n,V3o,SR1,SR1i,SR1n,ST1,ST2,ST3,ST4,ST4i
+K2VAL_SMOKE_SCENARIOS ?= V1,V3,V3n,V3o,SR1,SR1i,SR1n,ST1,ST2,ST3,ST4,ST4i,ST5,ST6,ST7
 
 k2val-smoke:
 	$(MAKE) k2val K2VAL_MODELS=qwencoder,haiku-low K2VAL_K=3 \

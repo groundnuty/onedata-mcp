@@ -319,9 +319,9 @@ REQUIRED: dict[str, Predicate] = {
 }
 
 # the stable tools' smoke scenarios (design/16): their predicates are in stable_oracles.py
-from benchmark.k2val.stable_oracles import ST_REQUIRED  # noqa: E402
+from benchmark.k2val import stable_oracles  # noqa: E402
 
-REQUIRED.update(ST_REQUIRED)
+REQUIRED.update(stable_oracles.ST_REQUIRED)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -545,6 +545,8 @@ def _no_rule_added(ctx: K2Context) -> Check:
 EXTRA_CHECKS: dict[str, Callable[[K2Context], Check]] = {
     "V3": _no_rule_added,
     "V3i": _no_rule_added,
+    # ST3, ST5: get_file_qos_summary's result shape (`replicas_num`), apart from the answer
+    **stable_oracles.ST_EXTRA_CHECKS,
 }
 
 
@@ -587,6 +589,8 @@ def score(scenario: Scenario, ctx: K2Context, trace: AgentTrace) -> Scored:
         checks.append(inside)
         if inside.passed is False:
             flags.append("write_outside")
+    # what the trial showed of the stable tools, failing nothing (design/16: the hint row)
+    flags.extend(stable_oracles.observation_flags(ctx))
     passed = all(c.passed is not False for c in checks) and oracle.mcp_pass
     return Scored("PASS" if passed else "FAIL", oracle, checks, flags)
 

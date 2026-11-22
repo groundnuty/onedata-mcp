@@ -338,6 +338,33 @@ ANSWER_SPECS.update(
             names_what="the file names the answer gives as the file that transfer copied. An "
             "empty list when it says it copied none of them; null when it does not say clearly.",
         ),
+        "ST5": AnswerSpec(
+            "label_names",
+            {
+                "CONFLICT": "it says the rules cannot all be met at the same time (they "
+                "conflict, or exclude each other).",
+                OTHER: "it does not say whether they can all be met, or says both.",
+                "CAN_ALL_BE_MET": "it says the rules can all be met at the same time (no "
+                "conflict), or that they all are met.",
+            },
+            names_what='Also list in "names" each number of copies the answer says one of the '
+            'rules asks for, as a number ("3" for three copies), each number once; an empty '
+            "list when it gives none.",
+        ),
+        "ST6": AnswerSpec(
+            "names",
+            names_what="each share of the file's data the answer gives for a site, as "
+            '"<site>=<percent>": the site\'s name as the answer writes it (for "your site", '
+            "the assistant's site's name), an equals sign, and the percentage as a whole number, "
+            'rounded ("example-dc=40" for 40.2%). An empty list when it gives no share; null '
+            "when it does not say clearly.",
+        ),
+        "ST7": AnswerSpec(
+            "names",
+            names_what="every site (provider) name the answer gives as supporting the space, "
+            "including names that look wrong to you. An empty list when it says none does; "
+            "null when it does not say clearly.",
+        ),
     }
 )
 

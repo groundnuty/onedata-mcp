@@ -319,8 +319,10 @@ SCENARIOS.update(
             s.brief,
             s.fixture,
             settle=s.settle,
+            tools=s.tools,
             restraint=s.restraint,
             settle_s=s.settle_s,
+            excluded_tools=s.excluded_tools,
         )
         for s in ST_SCENARIOS.values()
     }
