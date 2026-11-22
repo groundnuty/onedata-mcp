@@ -17,8 +17,10 @@ failed (`answer_reading`); it is classified by hand, and no record is complete w
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from benchmark._trial_artefact import TrialArtefact, to_json_dict
 from benchmark.k2val.secrets import redact
@@ -38,6 +40,59 @@ OUTCOMES = (
 # Outcomes that count as the model's answer being judged.
 JUDGED = ("PASS", "FAIL")
 # The two answer readers disagreed, or the judge failed: classified by hand before it counts.
+
+# Outcomes of the harness or the deployment, never of the model: the trial did not really run
+# (a federation that was down, a harness bug, an adapter that could not start). A resume runs
+# such a trial again; every other outcome (`NO_RESULT`, a cap reached, included) is a result.
+INFRASTRUCTURE_OUTCOMES = ("RESET_FAIL", "HARNESS_ERROR", "ORACLE_ERROR", "ADAPTER_ERROR")
+
+# (config name, scenario id, trial index): one planned trial of a run.
+TrialKey = tuple[str, str, int]
+
+
+def is_valid_outcome(outcome: object) -> bool:
+    """A record with this outcome is a result: it stays when a run is resumed, and it wins over
+    an earlier infrastructure failure of the same trial."""
+    return outcome not in INFRASTRUCTURE_OUTCOMES
+
+
+def trial_key(row: dict[str, Any]) -> TrialKey | None:
+    """The planned trial a record belongs to; None for a record that does not say (an artefact
+    from before `trial_ix`), which then counts for itself."""
+    ix = row.get("trial_ix")
+    name, scenario = row.get("llm_name"), row.get("scenario_id")
+    if isinstance(ix, int) and not isinstance(ix, bool) and name and scenario:
+        return (str(name), str(scenario), ix)
+    return None
+
+
+def latest_per_trial[T](items: Iterable[T], row_of: Callable[[T], dict[str, Any]]) -> list[T]:
+    """The records that count, `items` being in the order they were written.
+
+    A trial can have several records: a resume appends a new one to a run's files, and a
+    trial that failed for the infrastructure's sake is run again. Per trial the LAST valid
+    record wins (`is_valid_outcome`), else the last record: an earlier infrastructure failure
+    of a trial that later ran validly is not counted, and a valid record is never replaced by
+    a later failure. The order of `items` is kept."""
+    listed = list(items)
+    chosen: dict[TrialKey, int] = {}
+    for i, item in enumerate(listed):
+        key = trial_key(row_of(item))
+        if key is None:
+            continue
+        j = chosen.get(key)
+        if (
+            j is None
+            or is_valid_outcome(row_of(item).get("outcome"))
+            or not is_valid_outcome(row_of(listed[j]).get("outcome"))
+        ):
+            chosen[key] = i
+    keep = set(chosen.values())
+    return [
+        item
+        for i, item in enumerate(listed)
+        if (key := trial_key(row_of(item))) is None or i in keep
+    ]
 
 
 @dataclass(frozen=True)
@@ -95,10 +150,21 @@ def write_trial(artefact: K2TrialArtefact, run_dir: Path) -> Path:
     return path
 
 
-def read_trials(run_dir: Path) -> list[dict]:
+def read_trials(run_dir: Path, *, all_records: bool = False) -> list[dict]:
+    """The records of a run that count: per trial the last valid one, else the last
+    (`latest_per_trial`). `all_records=True`: every line of every file, as written."""
     rows: list[dict] = []
     for path in sorted(run_dir.glob("*__*.jsonl")):
         for line in path.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 rows.append(json.loads(line))
-    return rows
+    return rows if all_records else latest_per_trial(rows, lambda r: r)
+
+
+def valid_trial_keys(run_dir: Path) -> set[TrialKey]:
+    """The trials of a run that already have a valid record (a resume does not run them)."""
+    return {
+        key
+        for row in read_trials(run_dir, all_records=True)
+        if is_valid_outcome(row.get("outcome")) and (key := trial_key(row)) is not None
+    }
