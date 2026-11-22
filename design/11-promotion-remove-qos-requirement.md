@@ -187,6 +187,8 @@ PASS per config and scenario, after classification (K=8):
     - deepseek V3n, 6 of 8: NO_RESULT. It would not accept the brief's premise was false: every summary showed no rule, it said so, and it kept searching until its output limit (finish `length`). A known trait of this probe (design/10: it reads "incomplete" as "absent"; here it reads "absent" as "hidden").
     - qwencoder V3o #1: found the rule and its provider id, then stopped before checking that the id is the local site's. Inconclusive answer: FAIL.
 - **Tool-attributable findings: none.**
+
+**Evidence retention (note added 2026-11-22).** The raw trial artefacts of runs `rmqos-k8-*` and `rmqos-k8-repl-*` (federation snapshots, tool-call arguments, timings) were deleted by mistake, together with the scratch worktree that held them, after the classification above had been made from them. What is preserved is the offline re-score output for the 182 trials that produced an answer: each answer, both readings, the judge's evidence and quote check, every scoring check, and the stored and re-scored outcomes. The ten trials without an answer (six NO_RESULT, three RESET_FAIL and one ORACLE_ERROR) are described above. These trials can no longer be re-scored from full evidence. Validation runs now write their artefacts to a durable evidence store outside any worktree.
 - **The run passes when** (design/10, gate 4): every control trial passes, with control trials lost to a harness bug or deployment artefact re-run after the fix, so each scenario ends with K passing control trials; and no tool-attributable finding is open (fixed and re-run, or accepted only with its cause outside the tool and the operator's sign-off).
 
 ## Gate 5: record
