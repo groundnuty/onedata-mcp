@@ -66,7 +66,7 @@ ST_SCENARIOS: dict[str, StableScenario] = {}
 # a neutral brief does not give: the port asks for the end state, judged at the answer (a
 # premature claim) and after the whole settle window. Whether a rule keeps a copy at the site is
 # judged by its meaning: each rule on the file is evaluated against the space's storages
-# (`evaluate_qos_expression`, read into every snapshot: `rules_detail`).
+# (`evaluate_qos_expression`, read into every snapshot: `rules_in_snapshots`).
 
 ST1_FILE = "log_20200111.dat"
 ST1 = StableScenario(
@@ -77,7 +77,7 @@ ST1 = StableScenario(
     coverage="requires: no other offered tool sets up a placement rule",
     brief="Set up a placement rule that keeps `{dir}/log_20200111.dat` at your site {local}, "
     "and tell me when its data are fully there.",
-    fixture=FixtureSpec((FileSpec("20200111", "s0"),), rules_detail=True),
+    fixture=FixtureSpec((FileSpec("20200111", "s0"),), rules_in_snapshots=True),
     answer="done: a rule (e.g. providerId=<vistula-dc's id>) keeps the file at vistula-dc, and "
     "its data are fully there",
     rules=(
@@ -265,11 +265,12 @@ ST5 = StableScenario(
 # --- ST6: get_file_distribution, each site's share (PPAM P1) ---------------------------------
 #
 # P1: "Report the per-provider distribution of <file>. For each supporting provider list
-# (providerName, percentage of blocks held)." The port writes the file in two parts, three
-# quarters through the owner and the last quarter through the site (`split`), so each provider
-# holds only its own part. get_file_distribution is the only offered tool that reports another
-# provider's blocks (get_file_attributes gives the site's own replication rate only), so it is
-# required. P1's "EU" attribute does not exist here and is dropped.
+# (providerName, percentage of blocks held)." The port writes the file in two parts with a gap
+# between (`split`): the first half through the owner, the last quarter through the site, the
+# third quarter by none. So the shares are 50 and 25, which do not add up to the whole: the
+# owner's cannot be had by subtracting the site's own replication rate (get_file_attributes'
+# `localReplicationRate`) from 100. get_file_distribution is the only offered tool that reports
+# another provider's blocks, so it is required. P1's "EU" attribute does not exist here.
 
 ST6_FILE = "log_20200118.dat"
 ST6 = StableScenario(
@@ -281,9 +282,9 @@ ST6 = StableScenario(
     brief="What share of the data of `{dir}/log_20200118.dat` does each site hold? Give a "
     "percentage for each site.",
     fixture=FixtureSpec((FileSpec("20200118", "split"),)),
-    answer="nordic-marine-dc 75%, vistula-dc 25%",
+    answer="nordic-marine-dc 50%, vistula-dc 25% (the third quarter is held by none)",
     rules=(
-        "Pass when the answer gives exactly nordic-marine-dc=75 and vistula-dc=25 (whole "
+        "Pass when the answer gives exactly nordic-marine-dc=50 and vistula-dc=25 (whole "
         "percentages, rounded). Required: a successful get_file_distribution of the file. "
         "Nothing should change (restraint, 60 s)."
     ),

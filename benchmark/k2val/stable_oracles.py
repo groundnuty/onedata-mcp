@@ -709,11 +709,12 @@ def verify_st5(ctx: K2Context, trace: AgentTrace) -> OracleResult:
 
 
 def verify_st6(ctx: K2Context, trace: AgentTrace) -> OracleResult:
-    """ST6 (get_file_distribution): each site's share of the file's data. Right: the owner 75,
-    the site 25 (the fixture writes three quarters through each in turn)."""
+    """ST6 (get_file_distribution): each site's share of the file's data. Right: the owner 50,
+    the site 25 (the fixture writes the first half through one and the last quarter through the
+    other; the quarter between is held by none, so 100 minus the site's share is wrong)."""
     _need(ctx, ST6_FILE)
     got = ctx.decided(lambda: read_shares(trace.final_answer, ctx.local_name, ctx.owner_name))
-    want = {f"{ctx.owner_name}=75", f"{ctx.local_name}=25"}
+    want = {f"{ctx.owner_name}=50", f"{ctx.local_name}=25"}
     return _names_result(got, want, "gives each site's share")
 
 
@@ -1051,6 +1052,6 @@ ST_RIGHT: dict[str, object] = {
     "ST4": None,
     "ST4i": frozenset({ST4_FILE}),
     "ST5": (CAN_ALL, ST5_COUNTS),
-    "ST6": frozenset({"nordic-marine-dc=75", "vistula-dc=25"}),
+    "ST6": frozenset({"nordic-marine-dc=50", "vistula-dc=25"}),
     "ST7": frozenset({"nordic-marine-dc", "vistula-dc"}),
 }

@@ -57,9 +57,9 @@ Every brief is neutral: it names no tool and gives no workflow advice. Paths are
   - Right answer: CAN_ALL_BE_MET, with the copy counts {1, 2}. A summary that drops a rule leaves one count out. P5's oracle expected a "conflict" note, which was wrong, since its two rules could both be met; ST5 corrects it.
   - Required: a successful summary of the file. The shape check is ST3's, so every summary of the file must carry both rules with their counts.
 - **ST6**, from P1: "What share of the data of `<dir>/log_20200118.dat` does each site hold? Give a percentage for each site."
-  - The file is written in two parts: the first three quarters through the owner, the last quarter through the site (fixture kind `split`).
-  - Right answer: nordic-marine-dc 75, vistula-dc 25, as whole percentages.
-  - Required: a successful `get_file_distribution` of the file. It is the only offered tool that reports another provider's blocks; `get_file_attributes` gives only the site's own replication rate.
+  - The file is written in two parts with a gap between (fixture kind `split`): the first half through the owner, the last quarter through the site. The third quarter is written by neither, so no provider holds it.
+  - Right answer: nordic-marine-dc 50, vistula-dc 25, as whole percentages. The two shares do not add up to the whole, so the owner's share cannot be had by subtracting the site's own replication rate (`get_file_attributes`' `localReplicationRate`) from 100: that gives 75, a wrong answer.
+  - Required: a successful `get_file_distribution` of the file, the only offered tool that reports another provider's blocks.
 - **ST7**, from D4: "Which sites support the space that holds `<dir>`? List their names." Right answer: nordic-marine-dc and vistula-dc.
   - On the K1 set a block map of the space's root, or a refused replication's hint, names the providers too. ST7 is therefore offered `ST7_TOOLS`: `list_space_providers`, plus `get_file_attributes`, `get_file_metadata`, `get_transfer` and `list_space_transfers`, which give provider ids only.
   - Offering `get_file_distribution` or `schedule_file_replication` is a harness error.
@@ -68,14 +68,14 @@ Every brief is neutral: it names no tool and gives no workflow advice. Paths are
 **Restraint** (ST2, ST3, ST4, ST4i, ST5, ST6): the K1 set offers write tools. Any write that may have taken effect fails the trial, and the files' local blocks and rule ids are compared with the start state at the answer and again after a 60 s window (design/08, "Scoring").
 
 **Preconditions checked before the agent starts.** A failure is a FixtureError, recorded as RESET_FAIL, so the trial never reaches a model.
-- **Rules read back** (`rules_detail`: ST1, ST2, ST3, ST5). Each rule the fixture made is read as stored: its attachment (`fileId`), expression and `replicasNum`. Its expression is evaluated in the space and must match exactly the providers intended. The details are recorded in the file's baseline (`rules`).
+- **Rules read back** (`rules_detail`: ST2, ST3, ST5). Each rule the fixture made is read as stored: its attachment (`fileId`), expression and `replicasNum`. The expression is checked by evaluating it in the space: it must match storages of exactly the providers intended (not by comparing strings, which 25.0 may reformat). The details are recorded in the file's baseline (`rules`). Only ST1's snapshots read the rules again (`rules_in_snapshots`), since only its oracle judges rules.
 - **Transfer details** (`transfers_checked`: ST4, ST4i). Each fixture transfer's details must name its file (by `fileId` or `filePath`) and the site as the destination. They are recorded in the baseline (`transfer`, beside `transfer_id`).
 - **The listing's order** (`transfers_listed_within`: ST4). The local provider must list both transfers among its first 10 ended ones, the other file's before the asked one, so the first id listed is the wrong answer. The order is checked, not just the set: in a fresh space an oldest-first listing would hold both, with the right answer first.
 
 **Harness additions**, all additive:
 - **Fixture kinds** `s0_qos_owner`, `s0_qos_both`, `s0_qos_pair` (two rules) and `split`.
 - **Federation reads** in `FedApi`: `space_id`, `qos_requirement`, `evaluate_qos` and `transfer`.
-- **Snapshots** record each rule with its evaluated storages when the fixture asks for it.
+- **Snapshots** record each rule with its evaluated storages when the fixture asks for it (ST1 only).
 - **Offered set and flags.** A new offered set `ST7_TOOLS`, with its surface hash, and observation flags for the hint.
 - **Report section** on the stable tools' smoke re-run (`smoke_report.py`).
 - **Fake federation.** It gains a small expression evaluator, used both for `evaluate_qos_expression` and to decide which rules bring a copy to the site, plus the transfer listing, `TransferStatus` fields, and opt-in space listing.
@@ -84,8 +84,8 @@ Every brief is neutral: it names no tool and gives no workflow advice. Paths are
 ## The hint row
 
 `get_qos_requirement`'s hints answer only a malformed id, so no scenario can be relied on to show them without a contrived brief, and none is added. The row is verified by **exposures**: trials, in any scenario, in which a model sent such an id and was shown the hint.
-- **Per trial**, the scorer flags `qos_id_hint_shown`. It adds `qos_id_hint_recovered` when the agent's next call of a rule tool succeeded after every exposure (`get_qos_requirement`, or `get_file_qos_summary`, where the hint says the ids are), and `qos_id_hint_unrecovered` otherwise (`stable_oracles.hint_exposures`).
-- **The report's section** lists every exposure, from every trial of the run, scored or not.
+- **Per trial**, the scorer flags `qos_id_hint_shown`. It adds `qos_id_hint_recovered` when the agent's next call of a rule tool succeeded after every exposure (`get_qos_requirement`, or `get_file_qos_summary`, where the hint says the ids are), and `qos_id_hint_unrecovered` otherwise (`stable_oracles.hint_exposures`). Flags are set on scored trials only.
+- **The report's section** lists every exposure, from every trial of the run, scored or not, read from the recorded calls. The HTTP legs (the Claude configs, the CLI legs) record a refused call's error with the hint in it, as the in-process leg does (a unit test).
 - **Pass rule for this row.** An unrecovered exposure is a finding to classify like any other non-pass. With no exposure at all, the hint wording is **not verified**: the row stays an open item, and design/10's "Transition" is not cleared for it.
 - `get_qos_requirement`'s description wording is unchanged; ST2 still shows that the tool works by id.
 
@@ -134,7 +134,7 @@ That is the same as:
 
 To re-run one tool after a later wording change, set `K2VAL_SMOKE_SCENARIOS` to that tool's row of the map. Every scenario is named explicitly, since `--scenarios` expands only `V` ranges.
 
-The smoke pair has no control. Before reading the pair's results, run the control once on the new scenarios (`K2VAL_MODELS=sonnet-medium K2VAL_K=1 K2VAL_SCENARIOS=ST1,ST2,ST3,ST4,ST4i,ST5,ST6,ST7`). A new scenario the control fails is suspect, as design/10 says, and is fixed before anything counts.
+The smoke pair has no control. Before reading the pair's results, run the control once on the new scenarios (`K2VAL_MODELS=sonnet-medium K2VAL_K=1 K2VAL_SCENARIOS=ST1,ST2,ST3,ST4,ST4i,ST5,ST6,ST7`). A new scenario the control fails is suspect, as design/10 says, and is fixed before anything counts. That run also shows whether the judge keeps the formats ST5 and ST6 ask of it (copy counts as bare numbers, shares as `<site>=<percent>`): the comparison is exact, so a judge writing `75%` sends a right answer to NEEDS_REVIEW, never to a wrong verdict.
 
 ### The pass rule
 
@@ -156,7 +156,7 @@ An external frontier-model review of the first version answered "not ready". Eac
 | 3 (MAJOR) | ST2/ST3 never read the requested count back | Fixtures read back each rule's attachment, expression (evaluated) and `replicasNum`; a mismatch is a FixtureError |
 | 4 (MAJOR) | ST4's order guard was a set; details unchecked | The ordered page is checked (the other file's transfer first); both transfers' details must name the file and the site, for ST4 and ST4i |
 | 5 (MAJOR) | ST1's settle could end early | ST1 waits out the whole window (`settle "quiet"`) and re-evaluates the rules at its end; the premature claim stays on the answer-time snapshot |
-| 6 (MAJOR) | The map conflated natural or oracle-mandated use with required use; no direct `get_file_distribution` or provider-listing scenario | Direct and supporting scenarios are told apart; ST6 (P1's per-provider shares) and ST7 (D4's providers, on `ST7_TOOLS`) added; supporting trials count only with a target-matched call |
+| 6 (MAJOR) | The map conflated natural or oracle-mandated use with required use; no direct `get_file_distribution` or provider-listing scenario | Direct and supporting scenarios are told apart; ST6 (P1's per-provider shares, which do not add up to the whole, so subtraction cannot answer it) and ST7 (D4's providers, on `ST7_TOOLS`) added; supporting trials count only with a target-matched call, counted in the report (V3, V3n and V3o score as before) |
 | 7 (MAJOR) | The hint row could pass without an exposure | Per-trial flags and a report line; with no exposure the row is "not verified" |
 | 8 (MAJOR) | P5 dropped; P2 and P3 gaps not stated | ST5 (two rules, both entries scored, the conflict expectation corrected); P2 and P3 recorded as gaps |
 | 9 (MAJOR) | Conflicting definitions of a "new" failure | Defined once, by tool and documented cause, with a citation required for "known" |
@@ -165,11 +165,12 @@ An external frontier-model review of the first version answered "not ready". Eac
 
 ## To verify on the first live run
 
-`make valfed-check` covers 1–5 before any model runs:
+`make valfed-check` covers 1–6 before any model runs:
 
 1. **The order of the ended-transfer listing.** ST4 assumes 25.0 lists ended transfers newest first. If it does not, every ST4 trial is a RESET_FAIL and `list_space_transfers` has no direct scenario until ST4 is redesigned; ST4i still covers `get_transfer`.
 2. **The `get_transfer` body.** The swagger's `TransferStatus` names `fileId`, `filePath`, `spaceId` and `replicatingProviderId`; the fixture reads them.
 3. **Rule read-back and evaluation.** 25.0's `GET /qos_requirements/{id}` is assumed to give `fileId`, `expression`, `replicasNum` and `status`. Its `evaluate_qos_expression` is assumed to answer `matchingStorageBackends` with each storage's `providerId`, one storage per provider here. The token holds `space_manage_qos`, which the operation needs.
 4. **Two-provider rules.** `providerId=<owner>|providerId=<site>` with two replicas is assumed to be met with a copy at each provider, and `providerId=<owner>` with one replica to be met at once, with no copy at the site.
-5. **A `split` file.** A write through the site at an offset is assumed to leave its blocks at the site only, with both providers then reporting the whole size.
-6. **An expression naming a provider by name** (`providerId=vistula-dc`) is assumed to match no storage and never to be met. The fake calls it `impossible`; 25.0 may say `pending`. Either way the file never arrives, and ST1 fails such a trial.
+5. **A `split` file.** A write through the site at an offset past the end (leaving a gap nobody wrote) is assumed to leave its blocks at the site only, with both providers then reporting the whole size and the gap held by neither.
+6. **A space's id from its name.** The fixtures read it from the owner's `GET /spaces`, which the swagger documents as a list of `{name, spaceId, ...}`.
+7. **An expression naming a provider by name** (`providerId=vistula-dc`) is assumed to match no storage and never to be met. The fake calls it `impossible`; 25.0 may say `pending`. Either way the file never arrives, and ST1 fails such a trial.

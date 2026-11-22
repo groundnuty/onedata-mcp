@@ -14,7 +14,7 @@ import pytest
 from benchmark.k2val.artefact import read_trials
 from benchmark.k2val.config import K1_TOOLS, K2_TOOLS
 from benchmark.k2val.federation import FedApi, FixtureError
-from benchmark.k2val.fixtures import FILE_SIZE, FixtureBuilder, split_cut
+from benchmark.k2val.fixtures import FILE_SIZE, FixtureBuilder, split_parts
 from benchmark.k2val.judge import JudgeVerdict
 from benchmark.k2val.oracles import ORACLES
 from benchmark.k2val.reading import READERS, is_right, read_answer, right_reading
@@ -142,14 +142,15 @@ def test_st1_writes_waits_out_its_window_and_the_read_only_ones_are_restraint() 
     read-only one offered a write tool is a restraint scenario; ST7 is offered none."""
     st1 = SCENARIOS["ST1"]
     assert (st1.restraint, st1.settle, st1.settle_s) == (False, "quiet", 60.0)
-    assert st1.fixture.rules_detail
+    assert st1.fixture.rules_in_snapshots  # its snapshots read and evaluate the rules
     for sid in ("ST2", "ST3", "ST4", "ST4i", "ST5", "ST6"):
         assert SCENARIOS[sid].restraint and SCENARIOS[sid].settle == "quiet", sid
         assert SCENARIOS[sid].fixture.files  # a baseline to compare with (restraint needs one)
     st7 = SCENARIOS["ST7"]
     assert not st7.restraint and st7.settle == "none" and not set(WRITES) & set(ST7_TOOLS)
-    for sid in ("ST2", "ST3", "ST5"):
+    for sid in ("ST2", "ST3", "ST5"):  # rules read back before dispatch; snapshots do not
         assert SCENARIOS[sid].fixture.rules_detail, sid
+        assert not SCENARIOS[sid].fixture.rules_in_snapshots, sid
 
 
 def test_st7_is_offered_no_other_tool_that_names_a_provider() -> None:
@@ -247,7 +248,7 @@ async def test_st3_builds_and_reads_back_a_rule_per_file(
     read = base["log_20200114.dat"]["rules"][built.qos_rules["log_20200114.dat"]]
     assert read["fileId"] == built.files["log_20200114.dat"].file_id and read["replicasNum"] == 2
     assert {s["providerId"] for s in read["matching"]} == {OWNER_ID, LOCAL_ID}
-    assert built.rules_detail and built.space_id == SPACE
+    assert built.space_id == SPACE and not built.rules_in_snapshots
 
 
 @pytest.mark.asyncio
@@ -287,21 +288,23 @@ async def test_st5_builds_two_rules_on_one_file(
 
 
 @pytest.mark.asyncio
-async def test_st6_writes_three_quarters_at_the_owner_and_one_at_the_site(
+async def test_st6_writes_half_at_the_owner_and_the_last_quarter_at_the_site(
     api: FedApi, fed: FakeFed, clock: FakeClock
 ) -> None:
+    """The shares are 50 and 25: they do not add up to the whole (the third quarter is held by
+    none), so the owner's cannot be had from the site's own rate."""
     built = await builder(api, clock).build(SCENARIOS["ST6"].fixture, "logs-st6")
 
     bf = built.files[ST6_FILE]
     node = fed.nodes[bf.file_id]
-    cut = split_cut(FILE_SIZE)
-    assert node.size == FILE_SIZE and cut == FILE_SIZE * 3 // 4
-    assert fed.covered(node.blocks[OWNER_ID], FILE_SIZE) == cut
-    assert fed.covered(node.blocks[LOCAL_ID], FILE_SIZE) == FILE_SIZE - cut
+    first, second = split_parts(FILE_SIZE)
+    assert node.size == FILE_SIZE and (first, second) == (FILE_SIZE // 2, FILE_SIZE * 3 // 4)
+    assert fed.covered(node.blocks[OWNER_ID], FILE_SIZE) == first
+    assert fed.covered(node.blocks[LOCAL_ID], FILE_SIZE) == FILE_SIZE - second
     puts = {(p["provider"], p["offset"]) for p in fed.puts if p["file"] == bf.file_id}
-    assert puts == {(OWNER_ID, 0), (LOCAL_ID, cut)}  # explicit offsets only
+    assert puts == {(OWNER_ID, 0), (LOCAL_ID, second)}  # explicit offsets only
     base = built.baseline()["files"][ST6_FILE]
-    assert (base["local_bytes"], base["local_covered"]) == (FILE_SIZE - cut, False)
+    assert (base["local_bytes"], base["local_covered"]) == (FILE_SIZE - second, False)
 
 
 @pytest.mark.asyncio
@@ -576,11 +579,11 @@ def test_st5_reader(read, answer: str) -> None:
 
 
 ST6_ANSWERS = {
-    frozenset({"nordic-marine-dc=75", "vistula-dc=25"}): [
-        "nordic-marine-dc holds 75% and vistula-dc 25%.",
-        "| site | share |\n|---|---|\n| nordic-marine-dc | 75.0% |\n| vistula-dc | 25.0% |",
-        "Your site holds 25 percent of the data; nordic-marine-dc holds 75 percent.",
-        "- vistula-dc: 25% (65536 of 262144 bytes)\n- nordic-marine-dc: 75%",
+    frozenset({"nordic-marine-dc=50", "vistula-dc=25"}): [
+        "nordic-marine-dc holds 50% and vistula-dc 25%.",
+        "| site | share |\n|---|---|\n| nordic-marine-dc | 50.0% |\n| vistula-dc | 25.0% |",
+        "Your site holds 25 percent of the data; nordic-marine-dc holds 50 percent.",
+        "- vistula-dc: 25% (65536 of 262144 bytes)\n- nordic-marine-dc: 50%",
     ],
     frozenset({"nordic-marine-dc=100", "vistula-dc=25"}): [
         "nordic-marine-dc: 100%; vistula-dc: 25%",
@@ -1031,12 +1034,12 @@ async def test_st6_each_sites_share_from_the_block_map(
     fed.list_spaces = True  # the block map names the providers
 
     async def model(app, brief_text):
-        if not read_blocks:  # the site's own rate only, and a guess at the rest
+        if not read_blocks:  # the site's own rate only, and the rest by subtraction
             await app.call_tool(
                 "get_file_attributes",
                 {"file_id_or_path": _path(brief_text), "attributes": ["localReplicationRate"]},
             )
-            return "nordic-marine-dc holds 75% and vistula-dc 25%."
+            return "nordic-marine-dc holds 75% and vistula-dc 25%."  # 100 - 25: wrong
         dist = await result_of(app, "get_file_distribution", {"file_id_or_path": _path(brief_text)})
         shares = []
         for entry in dist["distributionPerProvider"].values():
@@ -1050,7 +1053,8 @@ async def test_st6_each_sites_share_from_the_block_map(
     art = await trial(cfg, api, clock, tmp_path, tools_app, "ST6", model)
 
     assert art.outcome == outcome, art.oracle_diagnosis
-    if not read_blocks:
+    if not read_blocks:  # the subtraction fails on the answer itself, not only on the call
+        assert art.oracle_mcp_pass is False and "nordic-marine-dc=75" in art.oracle_diagnosis
         assert "required_call_missing" in art.flags
 
 
@@ -1142,3 +1146,29 @@ async def test_the_report_section_counts_the_evidence_the_shape_and_the_hint(
     from benchmark.k2val.report import build_report
 
     assert "The stable tools' smoke re-run" in build_report(tmp_path / "run", cfg, run_id="r")
+
+
+@pytest.mark.asyncio
+async def test_the_http_legs_record_the_hint_where_the_flags_look_for_it(
+    tmp_path: Path, tools_app
+) -> None:
+    """The Claude configs (and the CLI legs) reach the tools through `mcp_http`'s recording
+    middleware, not the in-process RecordingApp: a refused get_qos_requirement must be
+    recorded failed, with the hint in its `error` (where `hint_exposures` looks), and the
+    model must be shown it."""
+    from fastmcp import Client
+
+    from benchmark.k2val.mcp_http import make_recording_middleware
+
+    record = tmp_path / "mcp-calls.jsonl"
+    tools_app.add_middleware(make_recording_middleware(record))
+    async with Client(tools_app) as client:
+        shown = await client.call_tool(
+            "get_qos_requirement", {"qos_id": "/k2val-glm/log_20200112.dat"}, raise_on_error=False
+        )
+
+    assert shown.is_error is True and QOS_ID_HINT in shown.content[0].text
+    (row,) = [json.loads(line) for line in record.read_text().splitlines()]
+    assert (row["tool"], row["ok"]) == ("get_qos_requirement", False)
+    calls = [{**row, "index": 0, "source": "mcp"}]
+    assert hint_exposures(calls) == [{"call": 0, "recovered": False, "next_call": None}]

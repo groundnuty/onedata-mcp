@@ -21,13 +21,15 @@ Kinds of file (design/08, Fixtures):
 - `s0_qos_pair`: an `s0` file with TWO rules, `providerId=<local id>` (one replica) and the
   `s0_qos_both` rule (two replicas), both met at once (design/16, ST5). The first is the file's
   rule in `BuiltFixture.qos_rules`; the second is in `extra_rules`.
-- `split`: written in two parts, the first three quarters through the OWNER provider and the
-  last quarter through the LOCAL provider, so each provider holds only its own part (design/16,
-  ST6: each site's share of the blocks).
+- `split`: written in two parts with a gap between, the first half through the OWNER provider
+  and the last quarter through the LOCAL provider, so each provider holds only its own part and
+  the third quarter is held by none: the two shares (50 and 25) do not add up to the whole, so one
+  cannot be had from the other (design/16, ST6: each site's share of the blocks).
 - With `FixtureSpec.rules_detail`, each rule the fixture made is read back before the agent
   starts (its `fileId`, `expression`, `replicasNum`) and its expression evaluated against the
   space's storages (`evaluate_qos_expression`); a rule stored otherwise than made, or matching
-  other providers, is a FixtureError. The details go in the file's baseline (`rules`).
+  other providers, is a FixtureError. The details go in the file's baseline (`rules`). With
+  `FixtureSpec.rules_in_snapshots`, every snapshot also reads each rule on a file, evaluated.
 - The transfer that replicates an `s0_local` file is recorded (`BuiltFixture.transfers`) and
   kept in the file's baseline (`transfer_id`), so an oracle knows which transfer made the copy.
   With `FixtureSpec.transfers_checked`, each such transfer's details are read before the agent
@@ -74,7 +76,7 @@ Kind = Literal[
     "s0", "s0_local", "s0_qos", "s0_qos_owner", "s0_qos_both", "s0_qos_pair", "split", "s2"
 ]
 # The kinds whose start state holds no local block (the others start locally covered, but
-# `split`, which starts with its last quarter local: `split_cut`).
+# `split`, which starts with its last quarter local: `split_parts`).
 NOT_LOCAL_KINDS = ("s0", "s2", "s0_qos_owner")
 # The kinds with QoS rules the fixture makes: kind -> its rules, each (the providers its
 # expression names, replicas). The expression is `providerId=<id>` per provider, joined by `|`.
@@ -86,9 +88,10 @@ QOS_KINDS: dict[str, tuple[tuple[tuple[str, ...], int], ...]] = {
 }
 
 
-def split_cut(size: int) -> int:
-    """Where a `split` file's owner part ends and its local part begins."""
-    return size * 3 // 4
+def split_parts(size: int) -> tuple[int, int]:
+    """A `split` file's parts: the owner holds [0, first), the local provider [second, size),
+    and [first, second) is held by none."""
+    return size // 2, size * 3 // 4
 
 
 CONFIRM_TIMEOUT_S = 60.0
@@ -171,9 +174,12 @@ class FixtureSpec:
     # Each fixture transfer's details are read before the agent starts and must name the file
     # (`fileId` or `filePath`) and the local provider (ST4, ST4i).
     transfers_checked: bool = False
-    # The rules the fixture makes are read back and evaluated before the agent starts, and every
-    # snapshot records each rule on a file with its evaluated storages (ST1, ST2, ST3, ST5).
+    # The rules the fixture makes are read back and evaluated before the agent starts (ST1, ST2,
+    # ST3, ST5).
     rules_detail: bool = False
+    # Every snapshot records each rule on a file with its evaluated storages (ST1, whose oracle
+    # judges the rules the agent made by their meaning).
+    rules_in_snapshots: bool = False
 
 
 @dataclass
@@ -300,9 +306,9 @@ class BuiltFixture:
     transfers: dict[str, str] = field(default_factory=dict)
     # A file's rules beyond its first (`s0_qos_pair`): file name -> rule ids.
     extra_rules: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    # `FixtureSpec.rules_detail`: snapshots read the rules on each file and evaluate them in
-    # the space (its id), and each rule the fixture made, as read back.
-    rules_detail: bool = False
+    # `FixtureSpec.rules_in_snapshots`: snapshots read the rules on each file and evaluate them
+    # in the space (its id); `rule_details`: each rule the fixture made, as read back.
+    rules_in_snapshots: bool = False
     space_id: str = ""
     rule_details: dict[str, dict] = field(default_factory=dict)
     # `FixtureSpec.transfers_checked`: each fixture transfer's details, as read: file name -> them
@@ -346,7 +352,8 @@ def _baseline_holds(kind: str, reading: dict, want_qos: tuple[str, ...], size: i
     if kind in NOT_LOCAL_KINDS:
         return reading["local_bytes"] == 0
     if kind == "split":
-        return not reading["local_covered"] and reading["local_bytes"] == size - split_cut(size)
+        local_part = size - split_parts(size)[1]
+        return not reading["local_covered"] and reading["local_bytes"] == local_part
     return reading["local_covered"]
 
 
@@ -424,28 +431,29 @@ class FixtureBuilder:
         )
 
     async def _write_local_part(self, bf: BuiltFile, ids: tuple[str, str]) -> None:
-        """A `split` file's last quarter, written through the LOCAL provider at its offset; then
-        each provider must report the whole size and hold exactly its own part."""
+        """A `split` file's last quarter, written through the LOCAL provider at its offset (past
+        the owner's half: the quarter between is written by none); then each provider must
+        report the whole size and hold exactly its own part."""
         owner_id, local_id = ids
         size = bf.spec.size
-        cut = split_cut(size)
-        await self.fed.put("local", bf.file_id, content_for(bf.name)[cut:], cut)
+        first, second = split_parts(size)
+        await self.fed.put("local", bf.file_id, content_for(bf.name)[second:], second)
 
         async def split() -> bool:
             owner = await self.fed.distribution("owner", bf.file_id)
             local = await self.fed.distribution("local", bf.file_id)
             return (
                 owner.size_of(owner_id) == size
-                and owner.bytes_of(owner_id) == cut
+                and owner.bytes_of(owner_id) == first
                 and local.size_of(local_id) == size
-                and local.bytes_of(local_id) == size - cut
+                and local.bytes_of(local_id) == size - second
             )
 
         await self.fed.wait_until(
             split,
             timeout_s=CONFIRM_TIMEOUT_S,
-            what=f"the owner holds the first {cut} bytes of {bf.name} and the local provider "
-            f"the last {size - cut}, both at size {size}",
+            what=f"the owner holds the first {first} bytes of {bf.name} and the local provider "
+            f"the last {size - second}, both at size {size}",
         )
 
     # --- build ----------------------------------------------------------
@@ -480,9 +488,9 @@ class FixtureBuilder:
             bf = BuiltFile(fs, file_id, f"{fixture.dir_path}/{fs.name}")
             fixture.files[fs.name] = bf
             if fs.kind == "split":  # the owner's part now, at offset 0; the local part below
-                cut = split_cut(fs.size)
-                await self.fed.put("owner", file_id, data[:cut], 0)
-                await self._confirm_at_owner(file_id, fs.name, ids, cut)
+                first, _ = split_parts(fs.size)
+                await self.fed.put("owner", file_id, data[:first], 0)
+                await self._confirm_at_owner(file_id, fs.name, ids, first)
             elif fs.kind == "s2":
                 # 1. extend with an empty write at the final size; 2. confirm; 3. the prefix at
                 # offset 0 (explicit: no write here ever goes without an offset); 4. confirm.
@@ -503,13 +511,13 @@ class FixtureBuilder:
         # know each file (at its final size) before it is asked to replicate or hold one.
         for bf in fixture.files.values():
             if bf.spec.kind == "split":
-                await self._wait_local_sees(bf, split_cut(bf.spec.size))
+                await self._wait_local_sees(bf, split_parts(bf.spec.size)[0])
                 await self._write_local_part(bf, ids)
             await self._wait_local_sees(bf)
 
         role_ids = {"owner": owner_id, "local": local_id}
-        if spec.rules_detail:
-            fixture.rules_detail = True
+        if spec.rules_detail or spec.rules_in_snapshots:
+            fixture.rules_in_snapshots = spec.rules_in_snapshots
             fixture.space_id = await self.fed.space_id("owner", self.space)
         for fs in spec.files:
             bf = fixture.files[fs.name]

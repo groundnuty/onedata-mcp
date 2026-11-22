@@ -57,8 +57,8 @@ class FileState:
     # the validated source observations: each provider's view of every provider (own size,
     # size field, merged intervals, or failed), kept so a stored trial can be rescored offline
     observed: dict | None = None
-    # With the fixture's `rules_detail` (design/16): each rule in the file's effective summary,
-    # as stored (`fileId`, `expression`, `replicasNum`, `status`) with the storages its
+    # With the fixture's `rules_in_snapshots` (design/16): each rule in the file's effective
+    # summary, as stored (`fileId`, `expression`, `replicasNum`, `status`) with the storages its
     # expression matches in the space (`matching`: `{id, providerId}`). None: not read.
     rules: dict[str, dict] | None = None
 
@@ -177,7 +177,7 @@ async def take_snapshot(fed: FedApi, fixture: BuiltFixture, clock: Clock) -> Sna
     owner_id = await fed.provider_id("owner")
     local_id = await fed.provider_id("local")
     taken = clock.time()
-    rules_space = fixture.space_id if fixture.rules_detail else None
+    rules_space = fixture.space_id if fixture.rules_in_snapshots else None
     states = await asyncio.gather(
         *[
             _file_state(fed, name, bf, owner_id, local_id, rules_space)
