@@ -19,6 +19,7 @@ from typing import Any
 
 from benchmark.k2val.config import K1_TOOLS, K2_TOOLS
 from benchmark.k2val.file_scenarios import FILE_TOOLS
+from benchmark.k2val.stable_scenarios import ST7_TOOLS
 
 # offered set -> (its name in the records, the recorded hash)
 RECORDED_SURFACES: Mapping[frozenset[str], tuple[str, str]] = {
@@ -33,6 +34,11 @@ RECORDED_SURFACES: Mapping[frozenset[str], tuple[str, str]] = {
     frozenset(FILE_TOOLS): (
         "FILE_TOOLS",
         "c030429d0e04de218f50a1bda935d17e84026c8c24ea1a61fd6d91b0bac31922",
+    ),
+    # the stable tools' smoke scenario ST7 (design/16): no tool but the listing names a provider
+    frozenset(ST7_TOOLS): (
+        "ST7_TOOLS",
+        "76995017fe996f35c81b2437727354ebed1951c6d39d767e57ee3e1372646b1c",
     ),
 }
 

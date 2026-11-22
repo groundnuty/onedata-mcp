@@ -657,6 +657,15 @@ async def _fixture_check() -> None:
         "FA": SCENARIOS["FA"].fixture,  # modes set at the owner, seen at the local provider
         "LCp": SCENARIOS["LCp"].fixture,  # more than a page of entries, two empty directories
         "CDn": SCENARIOS["CDn"].fixture,  # a regular file where CD's directory would go
+        # the stable tools' smoke scenarios (design/16)
+        "ST3": SCENARIOS["ST3"].fixture,  # rules at the site, at the owner, and two replicas,
+        # each read back and its expression evaluated in the space
+        "ST5": SCENARIOS["ST5"].fixture,  # two rules on one file
+        "ST6": SCENARIOS["ST6"].fixture,  # a file written in two parts, one at each provider
+        # two transfers, whose details must name the file and the site, and which the local
+        # provider must list among its first ended ones, newest first (unverified on 25.0:
+        # this is its first check)
+        "ST4": SCENARIOS["ST4"].fixture,
     }
     problems: list[str] = []
     try:

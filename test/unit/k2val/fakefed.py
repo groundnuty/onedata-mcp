@@ -76,6 +76,12 @@ class FakeFed:
         self.unexpected: list[str] = []
         self.fail_owner_distribution = False
         self.offset_with_token = 0  # listings that sent both (25.0 rejects them)
+        # The stable tools' smoke scenarios (design/16): the order `GET /spaces/{id}/transfers`
+        # lists ended transfers in ("newest" first, or "oldest"), and whether the user's spaces
+        # can be listed (Oneprovider `GET /spaces` and Onezone `GET /spaces/{id}`), so that a
+        # tool given a space NAME resolves it. Off by default: the earlier tests expect none.
+        self.ended_order = "newest"
+        self.list_spaces = False
         # the whole federation is stopped: every request is refused, as a stopped container does
         self.down = False
         self._seq = 0
@@ -132,10 +138,23 @@ class FakeFed:
             obj["ticks"] += 1
             if obj["ticks"] >= self.replication_ticks:
                 node = self.nodes.get(obj["fileId"])
-                is_transfer = obj in self.transfers.values()
+                is_transfer = any(obj is t for t in self.transfers.values())
                 # A transfer copies to its target. A copy to the owner, which already holds the
-                # data, changes nothing; rules here are always `providerId=<local>`.
-                target = obj.get("replicatingProviderId", LOCAL_ID) if is_transfer else LOCAL_ID
+                # data, changes nothing. A rule is met on `replicasNum` of the storages its
+                # expression matches (`matching`): fewer than that can never meet it
+                # ("impossible"); it copies to the local provider only when it must, that is when
+                # the storages it matches beside the local one are too few (the owner's copy
+                # meets the rest).
+                if is_transfer:
+                    target = obj.get("replicatingProviderId", LOCAL_ID)
+                else:
+                    found = self.matching(str(obj.get("expression", ""))) or []
+                    replicas = int(obj.get("replicasNum", 1))
+                    others = [st for st in found if st["providerId"] != LOCAL_ID]
+                    if len(found) < replicas:
+                        obj["status"] = "impossible"
+                        continue
+                    target = LOCAL_ID if len(others) < replicas else OWNER_ID
                 if node is not None and target == LOCAL_ID:
                     node.blocks[LOCAL_ID] = [list(b) for b in node.blocks.get(OWNER_ID, [])]
                 obj["status"] = "completed" if is_transfer else "fulfilled"
@@ -152,6 +171,8 @@ class FakeFed:
             "/api/v3/onezone/configuration",
         ):
             return httpx.Response(200, json={"name": "zone"})
+        if host == ZONE_HOST and self.list_spaces:
+            return self._zone(request)
         provider = {OWNER_HOST: OWNER_ID, LOCAL_HOST: LOCAL_ID}.get(host)
         path = request.url.path
         if provider is None or not path.startswith(API):
@@ -177,8 +198,12 @@ class FakeFed:
         if m == "GET" and rest == "/configuration":
             return httpx.Response(200, json={"providerId": provider, "name": provider})
         if m == "GET" and rest == "/spaces":
-            # get_file_distribution enriches provider names from the user's spaces: none here
-            return httpx.Response(200, json=[])
+            # get_file_distribution enriches provider names from the user's spaces, at the local
+            # provider: none here, unless `list_spaces` (design/16). The owner, which only the
+            # panel's own client asks (a space's id from its name), always lists them.
+            listing = provider == OWNER_ID or self.list_spaces
+            listed = [{"spaceId": n, "name": n} for n in self.roots] if listing else []
+            return httpx.Response(200, json=listed)
         if m == "POST" and rest.startswith("/lookup-file-id/"):
             return self._lookup(provider, unquote(rest[len("/lookup-file-id/") :]))
         raw_rest = request.url.raw_path.decode().split("?", 1)[0][len(API) :]
@@ -212,6 +237,10 @@ class FakeFed:
             return self._transfer_post(body)
         if mm := re.fullmatch(r"/transfers/([^/]+)", rest):
             return self._transfer_get(mm[1])
+        if m == "GET" and (mm := re.fullmatch(r"/spaces/([^/]+)/transfers", rest)):
+            return self._space_transfers(mm[1], q)
+        if m == "POST" and (mm := re.fullmatch(r"/spaces/([^/]+)/evaluate_qos_expression", rest)):
+            return self._evaluate(mm[1], body)
         if m == "GET" and (mm := re.fullmatch(r"/spaces/([^/]+)", rest)) and mm[1] in self.roots:
             return self._space(mm[1])
         self.unexpected.append(f"{m} {request.url}")
@@ -510,18 +539,138 @@ class FakeFed:
                 },
             )
         tid = self.new_id("t")
-        self.transfers[tid] = {**body, "status": "pending", "ticks": 0}
+        node = self.nodes[body["fileId"]]
+        self.transfers[tid] = {
+            **body,
+            "status": "pending",
+            "ticks": 0,
+            # kept as at scheduling: a transfer outlives its file, as on 25.0
+            "filePath": self.path_of(node),
+            "spaceId": self.space_of(body["fileId"]),
+            "scheduleTime": 1_700_000_000 + self._seq,
+        }
         return httpx.Response(201, json={"transferId": tid})
 
     def _transfer_get(self, tid: str) -> httpx.Response:
+        """The swagger's TransferStatus fields the tools and tests read (25.0's real body is
+        unverified)."""
         t = self.transfers.get(tid)
         if t is None:
             return error(404)
+        ended = t["status"] == "completed"
+        size = self.nodes[t["fileId"]].size if t["fileId"] in self.nodes else 0
         return httpx.Response(
             200,
             json={
+                "type": t.get("type", "replication"),
+                "spaceId": t.get("spaceId"),
+                "dataSourceType": t.get("dataSourceType", "file"),
                 "fileId": t["fileId"],
+                "filePath": t.get("filePath"),
+                "transferStatus": "completed" if ended else "scheduled",
                 "replicationStatus": t["status"],
                 "replicatingProviderId": t.get("replicatingProviderId"),
+                "bytesReplicated": size if ended else 0,
+                "scheduleTime": t.get("scheduleTime"),
             },
         )
+
+    def _space_transfers(self, space: str, q: dict) -> httpx.Response:
+        """`GET /spaces/{id}/transfers?state=..&limit=..&page_token=..` (swagger
+        get_all_transfers): ids only. `ended` lists completed transfers in `ended_order`;
+        `ongoing` the pending ones; `waiting` none. The token is the next offset."""
+        if space not in self.roots:
+            return error(404)
+        state = q.get("state", "ongoing")
+        mine = [(tid, t) for tid, t in self.transfers.items() if t.get("spaceId") == space]
+        if state == "ended":
+            ids = [tid for tid, t in mine if t["status"] == "completed"]
+            if self.ended_order == "newest":
+                ids.reverse()
+        elif state == "ongoing":
+            ids = [tid for tid, t in mine if t["status"] != "completed"]
+        else:
+            ids = []
+        start = int(q.get("page_token") or 0)
+        limit = int(q.get("limit", 100))
+        page = ids[start : start + limit]
+        token = str(start + limit) if start + limit < len(ids) else None
+        return httpx.Response(200, json={"transfers": page, "nextPageToken": token})
+
+    # --- QoS expressions (design/16) ------------------------------------------------------
+
+    # One storage per provider, as in the distribution answers (`st-<provider id>`).
+    STORAGES = (
+        {"id": f"st-{OWNER_ID}", "providerId": OWNER_ID},
+        {"id": f"st-{LOCAL_ID}", "providerId": LOCAL_ID},
+    )
+
+    def matching(self, expression: str) -> list[dict] | None:
+        """The storages an expression matches, or None when it does not parse. A small form of
+        Onedata's grammar: `anyStorage`, `providerId=<id>`, `storageId=<id>`, any other
+        `key=value` (no storage here has other attributes: matches none), parentheses, and the
+        operators `|` (union), `&` (intersection) and `\\` (difference), left to right."""
+        tokens = re.findall(r"\(|\)|\||&|\\|[^()|&\\]+", expression)
+        tokens = [t.strip() for t in tokens if t.strip()]
+        pos = 0
+
+        def term() -> set[str] | None:
+            nonlocal pos
+            if pos >= len(tokens):
+                return None
+            tok = tokens[pos]
+            pos += 1
+            if tok == "(":
+                inner = expr()
+                if inner is None or pos >= len(tokens) or tokens[pos] != ")":
+                    return None
+                pos += 1
+                return inner
+            if tok == "anyStorage":
+                return {st["id"] for st in self.STORAGES}
+            key, eq, value = (part.strip() for part in tok.partition("="))
+            if not eq or not key or not value or "=" in value:
+                return None
+            field_name = {"providerId": "providerId", "storageId": "id"}.get(key)
+            return {st["id"] for st in self.STORAGES if field_name and st[field_name] == value}
+
+        def expr() -> set[str] | None:
+            nonlocal pos
+            left = term()
+            while left is not None and pos < len(tokens) and tokens[pos] in ("|", "&", "\\"):
+                op = tokens[pos]
+                pos += 1
+                right = term()
+                if right is None:
+                    return None
+                left = left | right if op == "|" else left & right if op == "&" else left - right
+            return left
+
+        found = expr()
+        if found is None or pos != len(tokens):
+            return None
+        return [dict(st) for st in self.STORAGES if st["id"] in found]
+
+    def _evaluate(self, space: str, body: dict) -> httpx.Response:
+        """`POST /spaces/{id}/evaluate_qos_expression` (swagger evaluate_qos_expression)."""
+        if space not in self.roots:
+            return error(404)
+        found = self.matching(str(body.get("expression", "")))
+        if found is None:
+            return httpx.Response(400, json={"error": {"id": "invalidQosExpression"}})
+        named = [{**st, "name": st["id"]} for st in found]
+        return httpx.Response(
+            200, json={"matchingStorageBackends": named, "matchingStorages": named}
+        )
+
+    def _zone(self, request: httpx.Request) -> httpx.Response:
+        """Onezone `GET /spaces/{id}` (with `list_spaces`): a space's details, so that a tool
+        given a space name finds its id. Anything else at the zone is unexpected."""
+        mm = re.fullmatch(r"/api/v3/onezone/spaces/([^/]+)", request.url.path)
+        if request.method == "GET" and mm and mm[1] in self.roots:
+            providers = dict.fromkeys(self.PROVIDER_NAMES, 2_147_483_648)
+            return httpx.Response(
+                200, json={"spaceId": mm[1], "name": mm[1], "providers": providers}
+            )
+        self.unexpected.append(f"{request.method} {request.url}")
+        return error(404)

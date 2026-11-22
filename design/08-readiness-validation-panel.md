@@ -469,6 +469,13 @@ Nothing should change in V1, V3n, V3o, V4, V5, SR1n, SR1o, FA, FAi, FAn, LC, LCn
    first turn, that none of its three subdirectories is on the first page at `list_children`'s largest limit (100),
    whatever order the provider lists in. LCi gives the directory by its id only. CDn's right answer gives the reason:
    a regular file is in the way ("a directory already exists" or a bare failure is wrong).
+10. **The smoke scenarios of the stable tools** (ST1–ST7, ST4i; design/16), in `stable_scenarios.py` and
+    `stable_oracles.py`: the earlier benchmark's scenarios of the eight stable tools that owe design/10's smoke
+    re-run, ported to this federation. All use the K1 set but ST7, offered `ST7_TOOLS` (no other tool that names a
+    provider). ST1 writes (a placement rule), judged by each rule's meaning (evaluated in the space) at the answer and
+    after the whole settle window; ST2–ST6 and ST4i are restraint scenarios (60 s); ST3 and ST5 add a shape check of
+    `get_file_qos_summary`'s `replicas_num`. Their fixtures read back their rules, check their transfers' details,
+    and (ST4) check that the local provider lists the two transfers newest first among its first 10 ended ones.
 
 ## Scoring (design/10, gate 4)
 

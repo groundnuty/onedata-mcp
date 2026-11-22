@@ -293,6 +293,81 @@ ANSWER_SPECS: dict[str, AnswerSpec] = {
     "CDo": _cd("the file asked for"),
 }
 
+# The stable tools' smoke scenarios (design/16; stable_scenarios.py), each with its own brief.
+ANSWER_SPECS.update(
+    {
+        "ST1": AnswerSpec(
+            "label",
+            {
+                "SAYS_NOT_DONE": "it says it is not done (yet): no placement rule was set up (it "
+                "failed, was refused, or cannot be met), or the file's data are not yet fully at "
+                f"{_SITE} (pending, in progress, partial).",
+                OTHER: "it says neither, or says both without settling on one.",
+                "SAYS_DONE": "it says the task is done (the placement rule set up and the file's "
+                f"data fully at {_SITE}), that the data are now fully there, or that the rule is "
+                "fulfilled (met). A transfer's status alone is not that, nor is a statement "
+                "about another site's copy.",
+            },
+        ),
+        "ST2": AnswerSpec(
+            "label",
+            {
+                "OTHER_NUMBER": "it says the rule asks for a number of copies other than one or "
+                "two.",
+                "ONE": "it says the rule asks for one copy (replica) of its file.",
+                "TWO": "it says the rule asks for two copies (replicas) of its file.",
+                OTHER: "it gives no number of copies, gives several without settling on one, or "
+                "says it could not find out.",
+            },
+        ),
+        "ST3": AnswerSpec(
+            "names",
+            names_what="the file names the answer gives as files whose placement rule asks for "
+            "only one copy (replica). An empty list when it says none does; null when it does "
+            "not say clearly.",
+        ),
+        "ST4": AnswerSpec(
+            "names",
+            names_what="every id the answer gives as the id of the transfer asked about, as "
+            "written (not an id it gives as a file's, a provider's or a space's). An empty list "
+            "when it says there is no such transfer; null when it gives none and does not say "
+            "so.",
+        ),
+        "ST4i": AnswerSpec(
+            "names",
+            names_what="the file names the answer gives as the file that transfer copied. An "
+            "empty list when it says it copied none of them; null when it does not say clearly.",
+        ),
+        "ST5": AnswerSpec(
+            "label_names",
+            {
+                "CONFLICT": "it says the rules cannot all be met at the same time (they "
+                "conflict, or exclude each other).",
+                OTHER: "it does not say whether they can all be met, or says both.",
+                "CAN_ALL_BE_MET": "it says the rules can all be met at the same time (no "
+                "conflict), or that they all are met.",
+            },
+            names_what='Also list in "names" each number of copies the answer says one of the '
+            'rules asks for, as a number ("3" for three copies), each number once; an empty '
+            "list when it gives none.",
+        ),
+        "ST6": AnswerSpec(
+            "names",
+            names_what="each share of the file's data the answer gives for a site, as "
+            '"<site>=<percent>": the site\'s name as the answer writes it (for "your site", '
+            "the assistant's site's name), an equals sign, and the percentage as a whole number, "
+            'rounded ("example-dc=40" for 40.2%). An empty list when it gives no share; null '
+            "when it does not say clearly.",
+        ),
+        "ST7": AnswerSpec(
+            "names",
+            names_what="every site (provider) name the answer gives as supporting the space, "
+            "including names that look wrong to you. An empty list when it says none does; "
+            "null when it does not say clearly.",
+        ),
+    }
+)
+
 
 RUBRIC_TEMPLATE = """\
 You label the final answer an assistant gave to a task in a data management system. You do \

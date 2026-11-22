@@ -950,3 +950,8 @@ ORACLES.update(SR_ORACLES)
 from benchmark.k2val.file_oracles import FILE_ORACLES  # noqa: E402
 
 ORACLES.update(FILE_ORACLES)
+
+# --- the stable tools' smoke scenarios (ST*; design/16), in stable_oracles.py -----------------
+from benchmark.k2val.stable_oracles import ST_ORACLES  # noqa: E402
+
+ORACLES.update(ST_ORACLES)

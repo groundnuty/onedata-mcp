@@ -19,7 +19,8 @@
         smoke smoke-d1 smoke-fast \
         sweep sweep-cyfronet sweep-deepseek sweep-claude sweep-all \
         sweep-headline sweep-k8 \
-        k2val k2val-rejudge k2val-scan k2val-jail-probe k2val-jail-smoke test-k2val-jail-live \
+        k2val k2val-smoke k2val-rejudge k2val-scan k2val-jail-probe k2val-jail-smoke \
+        test-k2val-jail-live \
         valfed-up valfed-reset valfed-down valfed-status valfed-check valfed-readiness-live \
         valfed-qos-live valfed-transfer-live test-transfer-live \
         test-files-live valfed-files-live \
@@ -86,6 +87,8 @@ help:
 	@echo "                       Each answer is read by its deterministic reader AND a rubric judge"
 	@echo "                       ([judge], default claude-sonnet-5-5 at effort medium, on the"
 	@echo "                       subscription); a disagreement is NEEDS_REVIEW (design/08)"
+	@echo "    k2val-smoke        the stable tools' smoke re-run (design/10, design/16): the smoke"
+	@echo "                       pair at K=3 on K2VAL_SMOKE_SCENARIOS (K2VAL_CONFIG=...)"
 	@echo "    k2val-rejudge      read a run's stored answers again, offline: RID=<run id> (or"
 	@echo "                       K2VAL_RUN_DIRS=\"dir1 dir2\"); cached verdicts are reused; no trial runs"
 	@echo "    k2val-scan         pre-flight scan for the CLI legs (wave 2; K2VAL_MODELS=gpt-luna-low,..)"
@@ -429,6 +432,16 @@ k2val:
 	  --scenarios $(K2VAL_SCENARIOS) --k $(K2VAL_K) \
 	  $(if $(K2VAL_RID),--run-id $(K2VAL_RID)) \
 	  $(if $(K2VAL_RESUME),--resume)
+
+# The smoke re-run that design/10 ("Staying stable") asks of a stable tool whose description,
+# error hints or result shape changed: the smoke pair (Qwen3-Coder, Haiku at effort low) at K=3
+# on every scenario design/16 maps to the stable tools (benchmark/k2val/stable_scenarios.py's
+# SMOKE_SCENARIOS; a test keeps the two equal). One tool's scenarios: set K2VAL_SMOKE_SCENARIOS.
+K2VAL_SMOKE_SCENARIOS ?= V1,V3,V3n,V3o,SR1,SR1i,SR1n,ST1,ST2,ST3,ST4,ST4i,ST5,ST6,ST7
+
+k2val-smoke:
+	$(MAKE) k2val K2VAL_MODELS=qwencoder,haiku-low K2VAL_K=3 \
+	  K2VAL_SCENARIOS=$(K2VAL_SMOKE_SCENARIOS)
 
 k2val-scan:
 	uv run python -m benchmark.k2val.run scan --config $(K2VAL_CONFIG) \
