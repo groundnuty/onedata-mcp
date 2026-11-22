@@ -55,6 +55,7 @@ STABLE: frozenset[str] = frozenset(
         "list_user_spaces",
         "move_file",
         "query_by_metadata",
+        "remove_qos_requirement",  # promoted 2026-11-21, design/11
         "set_file_metadata",
     }
 )
@@ -64,7 +65,6 @@ EXPERIMENTAL: frozenset[str] = frozenset(
     {
         # ours, not yet validated
         "create_directory",
-        "remove_qos_requirement",
         "schedule_file_replication",
         # ours, the readiness tools (design/07-readiness-tools.md)
         "check_readiness",
