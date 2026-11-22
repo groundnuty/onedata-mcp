@@ -561,6 +561,8 @@ async def test_the_probe_asks_each_service_for_its_configuration_and_names_the_o
         (LOCAL_HOST, "/api/v3/oneprovider/configuration"),
         (OWNER_HOST, "/api/v3/oneprovider/configuration"),
         (ZONE_HOST, "/api/v3/onezone/configuration"),
+        (LOCAL_HOST, "/api/v3/oneprovider/spaces"),
+        (OWNER_HOST, "/api/v3/oneprovider/spaces"),
     ]
     fed.down = True
     with pytest.raises(FederationUnreachable, match="local provider: connection_error"):
@@ -573,6 +575,9 @@ async def test_the_probe_calls_a_5xx_down_but_any_other_answer_up(httpx_mock) ->
     for host in (LOCAL_HOST, OWNER_HOST):
         httpx_mock.add_response(
             url=f"{host}/api/v3/oneprovider/configuration", json={}, is_reusable=True
+        )
+        httpx_mock.add_response(
+            url=f"{host}/api/v3/oneprovider/spaces", json=[], is_reusable=True, is_optional=True
         )
     zone = f"{ZONE_HOST}/api/v3/onezone/configuration"
     httpx_mock.add_response(url=zone, status_code=503)
@@ -685,3 +690,24 @@ async def test_a_trial_waits_for_the_federation_before_it_reserves_budget_and_ti
     )
     assert art_.fixture_error == art_.error and art_.rounds_used == 0  # the model was never called
     assert read_trials(deps.run_dir)[0]["outcome"] == "RESET_FAIL"
+
+
+@pytest.mark.asyncio
+async def test_the_probe_waits_while_a_provider_does_not_accept_the_token_yet(httpx_mock) -> None:
+    """A provider just restarted answers /configuration before it can check a token with the
+    zone; the panel's own requests then get 401 (seen on the 2026-11-22 runs)."""
+    api = api_with_zone(FakeClock())
+    for host in (LOCAL_HOST, OWNER_HOST):
+        httpx_mock.add_response(
+            url=f"{host}/api/v3/oneprovider/configuration", json={}, is_reusable=True
+        )
+    httpx_mock.add_response(
+        url=f"{ZONE_HOST}/api/v3/onezone/configuration", json={}, is_reusable=True
+    )
+    spaces = f"{LOCAL_HOST}/api/v3/oneprovider/spaces"
+    httpx_mock.add_response(url=spaces, status_code=401)
+    with pytest.raises(FederationUnreachable, match="local provider: token not accepted yet"):
+        await api.ping()
+    httpx_mock.add_response(url=spaces, json=[])
+    httpx_mock.add_response(url=f"{OWNER_HOST}/api/v3/oneprovider/spaces", json=[])
+    await api.ping()
