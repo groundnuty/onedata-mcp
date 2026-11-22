@@ -104,7 +104,7 @@ A tool that cannot be validated in any environment we have, or that duplicates a
 
 ## Transition
 
-Six stable tools had wording-only description fixes after the earlier benchmark froze: `add_file_qos_requirement` (its `expression` field), `get_file_distribution`, `get_file_qos_summary`, `get_transfer`, `list_space_providers` and `list_space_transfers`. They stay stable pending the smoke re-run that the wording rule requires; it runs as soon as the test environment exists.
+Six stable tools had wording-only description fixes after the earlier benchmark froze: `add_file_qos_requirement` (its `expression` field), `get_file_distribution`, `get_file_qos_summary`, `get_transfer`, `list_space_providers` and `list_space_transfers`. They stay stable pending the smoke re-run that the wording rule requires; it runs as soon as the test environment exists. Its scenarios (the earlier benchmark's, ported to the panel), the map from tool to scenario and the command are in [`16-stable-smoke-scenarios.md`](16-stable-smoke-scenarios.md); the same run covers `get_qos_requirement`'s new error hints and `get_file_qos_summary`'s `replicas_num`.
 
 ## Relation to the earlier benchmark
 

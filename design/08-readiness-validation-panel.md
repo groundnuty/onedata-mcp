@@ -469,6 +469,12 @@ Nothing should change in V1, V3n, V3o, V4, V5, SR1n, SR1o, FA, FAi, FAn, LC, LCn
    first turn, that none of its three subdirectories is on the first page at `list_children`'s largest limit (100),
    whatever order the provider lists in. LCi gives the directory by its id only. CDn's right answer gives the reason:
    a regular file is in the way ("a directory already exists" or a bare failure is wrong).
+10. **The smoke scenarios of the stable tools** (ST1, ST2, ST3, ST4, ST4i; design/16), in `stable_scenarios.py` and
+    `stable_oracles.py`: the earlier benchmark's scenarios of `add_file_qos_requirement`, `get_qos_requirement`,
+    `get_file_qos_summary`, `list_space_transfers` and `get_transfer`, ported to this federation for design/10's smoke
+    re-run. All use the K1 set. ST1 writes (a placement rule) and is judged at the answer and after the settle; ST2,
+    ST3, ST4 and ST4i are restraint scenarios (60 s). ST4's fixture checks, before the agent starts, that its two
+    transfers are among the first 10 ended transfers the local provider lists.
 
 ## Scoring (design/10, gate 4)
 

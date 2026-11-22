@@ -37,6 +37,7 @@ make sweep LLMS=glm-4.7-flash RID=<existing-run-id>   # attach to run
 make k2val                # all configs, V1..V7, K=3 (needs benchmark/k2val/k2val.toml)
 make k2val K2VAL_MODELS=sonnet-medium,haiku-low K2VAL_SCENARIOS=V2,V5 K2VAL_K=1
 make k2val-scan           # pre-flight scan for the CLI legs (wave 2)
+make k2val-smoke K2VAL_CONFIG=...   # the stable tools' smoke re-run (design/16)
 
 # Reporting + inspection
 make report               # regenerate REPORT_paper.md, REPORT_cyfronet.md
