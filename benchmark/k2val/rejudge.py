@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from benchmark.k2val.artefact import latest_per_trial
 from benchmark.k2val.judge import Judge, JudgeConf, JudgeVerdict, judge_input_sha
 from benchmark.k2val.rubrics import ANSWER_SPECS, rubric_sha
 
@@ -56,15 +57,21 @@ class StoredTrial:
         return self.row.get("final_answer") or ""
 
 
-def iter_trials(run_dirs: Iterable[Path]) -> Iterator[StoredTrial]:
+def iter_trials(run_dirs: Iterable[Path], *, all_records: bool = False) -> Iterator[StoredTrial]:
+    """The stored trials of each run directory. A trial that has several records (a resumed
+    run appends) is read once: its last valid record, else its last (`latest_per_trial`),
+    within its own run directory. A record keeps its own file and line, so its key (and a
+    cached verdict) stays the same. `all_records=True`: every line."""
     for run_dir in run_dirs:
+        stored: list[StoredTrial] = []
         for path in sorted(run_dir.glob("*__*.jsonl")):
             for i, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
                 if not line.strip():
                     continue
                 row = json.loads(line)
                 if isinstance(row, dict) and "scenario_id" in row:
-                    yield StoredTrial(run_dir.name, path.name, i, row)
+                    stored.append(StoredTrial(run_dir.name, path.name, i, row))
+        yield from stored if all_records else latest_per_trial(stored, lambda t: t.row)
 
 
 def local_site(trial: StoredTrial, by_source: dict[str, str]) -> str:

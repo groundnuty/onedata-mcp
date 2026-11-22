@@ -4,6 +4,7 @@
         --models glm,qwen36,qwencoder,deepseek,haiku-low,haiku-medium,haiku-high,sonnet-medium \\
         --scenarios V1..V7 --k 3
 
+    python -m benchmark.k2val.run --config ... --run-id <id> --resume    (continue that run)
     python -m benchmark.k2val.run scan   --config ... --models gpt-luna-low,gemini-flash-low
     python -m benchmark.k2val.run change --run-id ... --target ... --trigger-trial ... \\
         --reason ... --before-file ... --after-file ...
@@ -22,7 +23,7 @@ import sys
 import time
 from pathlib import Path
 
-from benchmark.k2val.artefact import K2TrialArtefact
+from benchmark.k2val.artefact import K2TrialArtefact, TrialKey, valid_trial_keys
 from benchmark.k2val.config import (
     ConfigError,
     K2valConfig,
@@ -48,7 +49,19 @@ def _run_parser() -> argparse.ArgumentParser:
     p.add_argument("--models", default="", help="comma-separated config names; empty = all")
     p.add_argument("--scenarios", default=ALL_SCENARIOS, help="e.g. V1..V7 or V2,V5")
     p.add_argument("--k", type=int, default=3, help="trials per (config, scenario)")
-    p.add_argument("--run-id", default="", help="default: a UTC timestamp. Reuse to resume.")
+    p.add_argument(
+        "--run-id",
+        default="",
+        help="default: a UTC timestamp. A run id that already has artefacts is refused, unless "
+        "--resume is given",
+    )
+    p.add_argument(
+        "--resume",
+        action="store_true",
+        help="continue the run named by --run-id: a trial that already has a valid record "
+        "(anything but RESET_FAIL, HARNESS_ERROR, ORACLE_ERROR, ADAPTER_ERROR) is skipped; the "
+        "others run again, their records appended",
+    )
     p.add_argument("--artefact-root", default="", help="override [run] artefact_root")
     p.add_argument("--no-report", action="store_true", help="do not write research/k2val-<id>.md")
     p.add_argument(
@@ -78,9 +91,10 @@ def _select(cfg: K2valConfig, wanted: str) -> list[ModelConf]:
     return [cfg.models[n] for n in names]
 
 
-async def _tools_snapshot(app, cfg: K2valConfig, run_dir: Path) -> None:
+async def _tools_snapshot(app, cfg: K2valConfig, run_dir: Path, *, resumed: bool = False) -> None:
     """The tool definitions the models see, written once per run: a later change to a
-    description shows as a difference between two runs' snapshots."""
+    description shows as a difference between two runs' snapshots. A resumed run keeps the
+    snapshot it has; definitions that changed since go to a file of their own, with a warning."""
     import hashlib
 
     async def collect() -> dict:
@@ -94,9 +108,69 @@ async def _tools_snapshot(app, cfg: K2valConfig, run_dir: Path) -> None:
         digest = hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()
         return {"sha256": digest, "tools": rows}
 
-    (run_dir / "tools_snapshot.json").write_text(
-        json.dumps(await collect(), indent=2, sort_keys=True), encoding="utf-8"
-    )
+    snapshot = await collect()
+    path = run_dir / "tools_snapshot.json"
+    if resumed and path.exists():
+        try:
+            same = json.loads(path.read_text(encoding="utf-8")).get("sha256") == snapshot["sha256"]
+        except (OSError, ValueError):
+            same = False
+        if same:
+            return
+        stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+        path = run_dir / f"tools_snapshot.resumed-{stamp}.json"
+        say(
+            f"[k2val] WARNING: the tool definitions differ from this run's first snapshot -> {path}"
+        )
+    path.write_text(json.dumps(snapshot, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _merge_meta(prev: dict, new: dict) -> dict:
+    """A resumed run's `run.json`: the plan of the first run and of this one together (a narrower
+    resume must not shrink what the report counts as planned), the first start, each resume."""
+    out = dict(new)
+    for key in ("models", "scenarios"):
+        out[key] = list(dict.fromkeys([*(prev.get(key) or []), *(new.get(key) or [])]))
+    ks = [k for k in (prev.get("k"), new.get("k")) if isinstance(k, int)]
+    out["k"] = max(ks) if ks else new.get("k")
+    out["started_at"] = prev.get("started_at", new.get("started_at"))
+    out["resumed_at"] = [*(prev.get("resumed_at") or []), new.get("started_at")]
+    return out
+
+
+def _read_meta(run_dir: Path) -> dict:
+    try:
+        meta = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def refuse_run_id(args: argparse.Namespace, run_dir: Path) -> str | None:
+    """Why this invocation may not use this run directory, or None. Runs before anything is
+    created or read: a run id that already holds artefacts is never silently written to again
+    (every trial would run again and append to the files); `--resume` continues it."""
+    holds = run_dir.is_dir() and any(run_dir.iterdir())
+    if args.resume:
+        if not args.run_id:
+            return "--resume needs --run-id: the run to continue"
+        if not holds:
+            return f"--resume: {run_dir} holds no run to continue"
+        return None
+    if holds:
+        return (
+            f"run id {run_dir.name!r} already has artefacts in {run_dir}: pass --resume to "
+            "continue it (trials with a valid record are skipped), or a new --run-id"
+        )
+    return None
+
+
+def resume_plan(
+    run_dir: Path, models: list[ModelConf], scenarios: list, k: int
+) -> tuple[set[TrialKey], int]:
+    """(the planned trials that already have a valid record, how many planned trials there are)."""
+    planned = {(m.name, s.id, ix) for m in models for s in scenarios for ix in range(k)}
+    return planned & valid_trial_keys(run_dir), len(planned)
 
 
 def run_main(argv: list[str]) -> int:
@@ -114,6 +188,11 @@ def run_main(argv: list[str]) -> int:
     models: list[ModelConf] = []
     skipped: list[str] = []
     root = Path(args.artefact_root) if args.artefact_root else cfg.artefact_root
+    run_id = args.run_id or time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+    run_dir = root / run_id
+    if (refusal := refuse_run_id(args, run_dir)) is not None:
+        say(f"[k2val] {refusal}", file=sys.stderr)
+        return 2
     for conf in selected:
         if conf.is_cli:
             ok, why = cli_agents.leg_enabled(cfg, conf, root)
@@ -146,8 +225,6 @@ def run_main(argv: list[str]) -> int:
         say(f"[k2val] {e}", file=sys.stderr)
         return 2
 
-    run_id = args.run_id or time.strftime("%Y%m%dT%H%M%S", time.gmtime())
-    run_dir = root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     spend = None
     if any(m.is_anthropic for m in models):
@@ -186,6 +263,13 @@ def run_main(argv: list[str]) -> int:
         f"[k2val] run_id={run_id}  artefacts -> {run_dir}  configs={[m.name for m in models]}  "
         f"scenarios={[s.id for s in scenarios]}  K={args.k}"
     )
+    done: set[TrialKey] = set()
+    if args.resume:
+        done, planned = resume_plan(run_dir, models, scenarios, args.k)
+        say(
+            f"[k2val] resuming {run_id}: {len(done)} of {planned} planned trial(s) already have a "
+            f"valid record and are skipped; {planned - len(done)} will run"
+        )
 
     def on_trial(a: K2TrialArtefact) -> None:
         say(
@@ -198,13 +282,17 @@ def run_main(argv: list[str]) -> int:
 
     async def go() -> None:
         # one event loop for the snapshot and the sweep: the app is used in no other
-        await _tools_snapshot(app, cfg, run_dir)
-        await run_sweep(deps, models, scenarios, args.k, on_trial=on_trial)
+        await _tools_snapshot(app, cfg, run_dir, resumed=args.resume)
+        await run_sweep(
+            deps, models, scenarios, args.k, on_trial=on_trial, **({"skip": done} if done else {})
+        )
 
     t0 = time.time()
     asyncio.run(go())
     meta["finished_at"] = time.time()
     meta["spend"] = spend.summary() if spend else None
+    if args.resume:
+        meta = _merge_meta(_read_meta(run_dir), meta)
     (run_dir / "run.json").write_text(redact(json.dumps(meta, indent=2)), encoding="utf-8")
     for note in deps.notes:
         say(f"[k2val] NOTE {note}")

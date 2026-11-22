@@ -79,7 +79,10 @@ help:
 	@echo "    k2val              run the panel. Needs benchmark/k2val/k2val.toml. Examples:"
 	@echo "      make k2val                                  all configs, V1..V7, K=3"
 	@echo "      make k2val K2VAL_MODELS=sonnet-medium,haiku-low K2VAL_SCENARIOS=V2,V5 K2VAL_K=1"
-	@echo "                         (K2VAL_CONFIG=... K2VAL_RID=<run id to resume>)"
+	@echo "                         (K2VAL_CONFIG=... K2VAL_RID=<run id>; an id that has artefacts is refused)"
+	@echo "      make k2val K2VAL_RID=<run id> K2VAL_RESUME=1   continue that run: a trial with a valid"
+	@echo "                       record is skipped, one that ended in RESET_FAIL, HARNESS_ERROR,"
+	@echo "                       ORACLE_ERROR or ADAPTER_ERROR runs again (records are appended)"
 	@echo "                       Each answer is read by its deterministic reader AND a rubric judge"
 	@echo "                       ([judge], default claude-sonnet-5-5 at effort medium, on the"
 	@echo "                       subscription); a disagreement is NEEDS_REVIEW (design/08)"
@@ -409,6 +412,7 @@ K2VAL_MODELS ?=
 K2VAL_SCENARIOS ?= V1..V7
 K2VAL_K ?= 3
 K2VAL_RID ?=
+K2VAL_RESUME ?=
 
 RID ?=
 K2VAL_RUN_DIRS ?= $(if $(RID),artefacts/k2val/$(RID))
@@ -423,7 +427,8 @@ k2val:
 	uv run python -m benchmark.k2val.run --config $(K2VAL_CONFIG) \
 	  $(if $(K2VAL_MODELS),--models $(K2VAL_MODELS)) \
 	  --scenarios $(K2VAL_SCENARIOS) --k $(K2VAL_K) \
-	  $(if $(K2VAL_RID),--run-id $(K2VAL_RID))
+	  $(if $(K2VAL_RID),--run-id $(K2VAL_RID)) \
+	  $(if $(K2VAL_RESUME),--resume)
 
 k2val-scan:
 	uv run python -m benchmark.k2val.run scan --config $(K2VAL_CONFIG) \
