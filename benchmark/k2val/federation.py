@@ -288,6 +288,21 @@ class FedApi:
                 status = (e.response or {}).get("status_code")
                 if status is None or status >= 500:
                     raise FederationUnreachable(f"{name}: {e.kind or f'http_{status}'}") from None
+        # A provider restarted by the host's load guard answers /configuration before it can
+        # check a token with the zone: the panel's own tokens then get 401 for a while (seen on
+        # the 2026-11-22 runs). So each provider must also accept the panel's token: one
+        # authenticated read (`GET /spaces`); a 401, a 403 or a 5xx means not ready yet.
+        for name, cfg in targets[:2]:
+            try:
+                await asyncio.wait_for(request(cfg, "GET", "/spaces"), timeout_s)
+            except TimeoutError:
+                raise FederationUnreachable(f"{name}: token check timeout") from None
+            except OnedataApiError as e:
+                status = (e.response or {}).get("status_code")
+                if status is None or status in (401, 403) or status >= 500:
+                    raise FederationUnreachable(
+                        f"{name}: token not accepted yet ({e.kind or f'http_{status}'})"
+                    ) from None
 
     # --- identity -------------------------------------------------------
 
