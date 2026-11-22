@@ -10,6 +10,10 @@ Concurrency: one trial at a time per config; configs run in parallel (each has i
 so they cannot touch each other's fixtures). A config's trials share its space, so they never
 overlap: whatever the federation shows during a trial was done by that trial or was there
 before it (design/08, "Isolation"). Each trial tears down only its own directory.
+
+Before each trial's fixture the federation health gate (gate.py) waits for the federation to
+answer, so a federation stopped mid-run costs time, not trials; a resumed run (`run_sweep(skip=)`)
+runs only the trials that have no valid record yet (design/08, "Resuming a run").
 """
 
 from __future__ import annotations
@@ -18,17 +22,18 @@ import asyncio
 import hashlib
 import time
 import traceback
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from benchmark._runtime_types import AgentTrace, RunContext, ToolCall
-from benchmark.k2val.artefact import K2TrialArtefact, write_trial
+from benchmark.k2val.artefact import K2TrialArtefact, TrialKey, write_trial
 from benchmark.k2val.clock import REAL_CLOCK, Clock
 from benchmark.k2val.config import MAX_CONCURRENCY_PER_MODEL, K2valConfig, ModelConf
 from benchmark.k2val.federation import FedApi
 from benchmark.k2val.fixtures import BuiltFixture, FixtureBuilder, FixtureSpec
+from benchmark.k2val.gate import FederationGate, FederationWaitTimeout
 from benchmark.k2val.legs import AdapterFactory
 from benchmark.k2val.oracles import K2Context, k2_violations, settled
 from benchmark.k2val.recording import CallRecord, RecordingApp
@@ -98,6 +103,15 @@ class RunDeps:
     surfaces: Mapping[frozenset[str], tuple[str, str]] | None = field(
         default_factory=lambda: RECORDED_SURFACES
     )
+    # Before each trial's fixture the federation must answer (gate.py); a gate of the run, shared
+    # by every config. Default: one that probes `fed` and waits `[run] federation_wait_s`.
+    gate: FederationGate | None = None
+
+    def __post_init__(self) -> None:
+        if self.gate is None:
+            self.gate = FederationGate(
+                self.fed, self.clock, wait_s=self.cfg.limits.federation_wait_s
+            )
 
 
 def _tools_for(deps: RunDeps, scenario: Scenario) -> frozenset[str]:
@@ -192,6 +206,14 @@ async def run_trial(
     def persist(art: K2TrialArtefact) -> K2TrialArtefact:
         write_trial(art, deps.run_dir)
         return art
+
+    # The federation must answer before anything is started or reserved: a trial that waits
+    # holds no budget. A trial already running when it dies is not this gate's business.
+    try:
+        await deps.gate.wait()
+    except FederationWaitTimeout as e:
+        return persist(artefact("RESET_FAIL", error=str(e), fixture_error=str(e)))
+    started = deps.clock.time()
 
     tracked = conf.is_anthropic and deps.spend is not None
     if tracked and not deps.spend.try_begin_trial():
@@ -514,29 +536,48 @@ async def run_sweep(
     k: int,
     *,
     on_trial: Callable[[K2TrialArtefact], None] | None = None,
+    skip: Collection[TrialKey] = (),
 ) -> list[K2TrialArtefact]:
-    """Every model x scenario x trial. One trial of a model at a time (never more than
-    MAX_CONCURRENCY_PER_MODEL, whatever the limits say); models run in parallel."""
+    """Every model x scenario x trial, except the (config, scenario, trial index) in `skip` (a
+    resumed run's trials that already have a valid record). One trial of a model at a time
+    (never more than MAX_CONCURRENCY_PER_MODEL, whatever the limits say); models run in
+    parallel."""
     out: list[K2TrialArtefact] = []
+    done = set(skip)
 
     async def one_model(conf: ModelConf) -> None:
         sem = asyncio.Semaphore(
             max(1, min(deps.cfg.limits.concurrency_per_model, MAX_CONCURRENCY_PER_MODEL))
         )
+        todo = [
+            (scenario, ix)
+            for scenario in scenarios
+            for ix in range(k)
+            if (conf.name, scenario.id, ix) not in done
+        ]
+        if not todo:  # a resume with nothing left of this config's: its space is not touched
+            return
         builder = FixtureBuilder(deps.fed, conf.space, deps.clock)
         try:
+            # a federation that is down now must not turn the sweep into a failure of every trial
+            await deps.gate.wait()
             problems = await builder.sweep_space()
             if problems:
                 deps.notes.append(f"{conf.name}: sweep of {conf.space}: {problems}")
         except Exception as e:  # noqa: BLE001 - a config whose space is unusable gets RESET_FAILs
-            for scenario in scenarios:
-                for ix in range(k):
-                    art = _blank_artefact(
-                        deps, conf, scenario, ix, "RESET_FAIL", f"sweep: {type(e).__name__}: {e}"
-                    )
-                    out.append(art)
-                    if on_trial:
-                        on_trial(art)
+            reason = str(e) if isinstance(e, FederationWaitTimeout) else None
+            for scenario, ix in todo:
+                art = _blank_artefact(
+                    deps,
+                    conf,
+                    scenario,
+                    ix,
+                    "RESET_FAIL",
+                    reason or f"sweep: {type(e).__name__}: {e}",
+                )
+                out.append(art)
+                if on_trial:
+                    on_trial(art)
             return
 
         async def guarded(scenario: Scenario, ix: int) -> None:
@@ -556,7 +597,7 @@ async def run_sweep(
                 if on_trial:
                     on_trial(art)
 
-        await asyncio.gather(*[guarded(s, ix) for s in scenarios for ix in range(k)])
+        await asyncio.gather(*[guarded(s, ix) for s, ix in todo])
 
     results = await asyncio.gather(*[one_model(m) for m in models], return_exceptions=True)
     for res in results:

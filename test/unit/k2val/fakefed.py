@@ -82,6 +82,8 @@ class FakeFed:
         # tool given a space NAME resolves it. Off by default: the earlier tests expect none.
         self.ended_order = "newest"
         self.list_spaces = False
+        # the whole federation is stopped: every request is refused, as a stopped container does
+        self.down = False
         self._seq = 0
 
     # --- helpers --------------------------------------------------------
@@ -160,6 +162,13 @@ class FakeFed:
     async def __call__(self, request: httpx.Request) -> httpx.Response:
         host = f"{request.url.scheme}://{request.url.host}"
         self.requests.append((request.method, host, request.url.path))
+        if self.down:
+            raise httpx.ConnectError("connection refused")
+        if host == ZONE_HOST and (request.method, request.url.path) == (
+            "GET",
+            "/api/v3/onezone/configuration",
+        ):
+            return httpx.Response(200, json={"name": "zone"})
         if host == ZONE_HOST and self.list_spaces:
             return self._zone(request)
         provider = {OWNER_HOST: OWNER_ID, LOCAL_HOST: LOCAL_ID}.get(host)

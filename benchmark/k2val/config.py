@@ -57,6 +57,13 @@ def _concurrency(run: dict) -> int:
     return value
 
 
+def _federation_wait(run: dict) -> float:
+    value = float(run.get("federation_wait_s", RunLimits.federation_wait_s))
+    if not value >= 0:  # also refuses NaN
+        raise ConfigError(f"run.federation_wait_s must be 0 or more (got {value})")
+    return value
+
+
 class ConfigError(ValueError):
     """The configuration is wrong. The message names the key, never a secret."""
 
@@ -122,6 +129,10 @@ class RunLimits:
     # read once more after this long (the writer keeps running meanwhile).
     settle_s: float = 60.0
     concurrency_per_model: int = MAX_CONCURRENCY_PER_MODEL
+    # Before each trial's fixture the federation must answer. One that does not (a shared host
+    # stopped its containers) is waited for, polled every minute, for at most this long; then
+    # the trial is a RESET_FAIL. 0: do not wait. Default 6 h.
+    federation_wait_s: float = 21600.0
 
 
 @dataclass(frozen=True)
@@ -372,6 +383,7 @@ def parse_config(raw: dict[str, Any], *, path: Path | None = None) -> K2valConfi
         tool_call_cap_s=float(run.get("tool_call_cap_s", 300)),
         settle_s=float(run.get("settle_s", 60)),
         concurrency_per_model=_concurrency(run),
+        federation_wait_s=_federation_wait(run),
     )
     spend_raw = _table(raw, "spend")
     spend = SpendConf(

@@ -12,6 +12,7 @@ Everything is async; waiting goes through an injectable `Clock`.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -33,11 +34,18 @@ TREE_ATTRIBUTES = ("fileId", "name", "type", "size", "posixPermissions")
 _MODE_RE = re.compile(r"[0-7]{1,4}")
 # A listing of more pages than this is malformed (at 1000 entries a page, no trial comes near).
 MAX_LISTING_PAGES = 20
+# One probe request of `FedApi.ping`: a federation that does not answer in this long is down.
+PING_TIMEOUT_S = 15.0
 
 
 class FixtureError(RuntimeError):
     """The federation did not reach a state the fixture needs. Counts as a deployment
     artefact (RESET_FAIL), never as a model failure."""
+
+
+class FederationUnreachable(RuntimeError):
+    """A service of the federation did not answer (a refused or timed out connection, or a
+    5xx). The message names the service and the kind, never a host."""
 
 
 @dataclass(frozen=True)
@@ -62,6 +70,20 @@ def provider_config(host: str, token: str, *, insecure_tls: bool) -> ProviderCon
             "Content-Type": "application/json",
         },
         verify_ssl=not insecure_tls,
+    )
+
+
+def zone_config(host: str, token: str, *, insecure_tls: bool) -> ProviderConfig:
+    """The Onezone, for `FedApi.ping` only (the panel's fixtures and oracles never use it)."""
+    return ProviderConfig(
+        base_url=f"{host.rstrip('/')}/api/v3/onezone",
+        auth_headers={
+            "X-Auth-Token": token,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        verify_ssl=not insecure_tls,
+        service="onezone",
     )
 
 
@@ -221,8 +243,10 @@ class FedApi:
         *,
         clock: Clock = REAL_CLOCK,
         poll_s: float = POLL_S,
+        zone: ProviderConfig | None = None,
     ) -> None:
         self._cfg = {"local": local, "owner": owner}
+        self._zone = zone  # only `ping` reads it
         self.clock = clock
         self.poll_s = poll_s
         self._ids: dict[str, str] = {}
@@ -236,8 +260,34 @@ class FedApi:
             provider_config(
                 fed.owner.host, secrets.owner_token.reveal(), insecure_tls=fed.allow_insecure_tls
             ),
+            zone=zone_config(
+                fed.onezone_host,
+                secrets.onezone_token.reveal(),
+                insecure_tls=fed.allow_insecure_tls,
+            ),
             **kw,
         )
+
+    # --- reachability ---------------------------------------------------
+
+    async def ping(self, *, timeout_s: float = PING_TIMEOUT_S) -> None:
+        """Does the federation answer? One cheap request (`GET /configuration`) to the local
+        provider, the owner provider and the zone (when one is configured), none of it cached
+        (`provider_id` is). Raises FederationUnreachable for the first that gives no answer in
+        `timeout_s` or answers with a 5xx; any other answer, a 4xx included, is an answer: the
+        service is up, and whatever is wrong with the request is a trial's own matter."""
+        targets = [("local provider", self._cfg["local"]), ("owner provider", self._cfg["owner"])]
+        if self._zone is not None:
+            targets.append(("zone", self._zone))
+        for name, cfg in targets:
+            try:
+                await asyncio.wait_for(request(cfg, "GET", "/configuration"), timeout_s)
+            except TimeoutError:
+                raise FederationUnreachable(f"{name}: timeout") from None
+            except OnedataApiError as e:
+                status = (e.response or {}).get("status_code")
+                if status is None or status >= 500:
+                    raise FederationUnreachable(f"{name}: {e.kind or f'http_{status}'}") from None
 
     # --- identity -------------------------------------------------------
 

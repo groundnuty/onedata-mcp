@@ -140,7 +140,10 @@ def _cost_cell(rows: list[dict]) -> str:
 
 
 def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | None = None) -> str:
+    # One record per trial: the last valid one, else the last (a resumed run appends; an earlier
+    # infrastructure failure of a trial that later ran validly is not counted).
     rows = read_trials(run_dir)
+    superseded = len(read_trials(run_dir, all_records=True)) - len(rows)
     meta = meta or {}
     # The matrix is the RUN PLAN (every planned config x scenario), with any cell that has
     # trials but was not planned added; a planned cell with no trial shows as MISSING.
@@ -173,6 +176,11 @@ def build_report(run_dir: Path, cfg: K2valConfig, *, run_id: str, meta: dict | N
         )
     for n in meta.get("skipped", []):
         w(f"- SKIPPED: {n}")
+    if superseded:
+        w(
+            f"- Resumed: {superseded} earlier record(s) of trials that were run again are "
+            "superseded by a later record and not counted (the artefact files keep them)."
+        )
     w("")
 
     # 1. control

@@ -642,6 +642,29 @@ Every final answer is read twice (design/10, gate 4).
     trial that is not a pass) is flagged **DESIGN SUSPECT** (a wrong tool, scenario or oracle), before any weak-model
     result for that scenario is read.
 
+### Resuming a run
+
+The federation may live on a shared host whose load guard stops its containers; a batch must survive that.
+- **`--resume`** (`make k2val K2VAL_RID=<id> K2VAL_RESUME=1`) continues the run `--run-id` names. A planned
+  (config, scenario, trial index) that already has a record with a valid outcome is skipped; the others run, and
+  their records are appended to the same files. The command prints how many were skipped and how many will run. Valid
+  is every outcome except `RESET_FAIL`, `HARNESS_ERROR`, `ORACLE_ERROR` and `ADAPTER_ERROR` (the harness or the
+  deployment, never the model): `NO_RESULT`, `NEEDS_REVIEW` and the budget stops are results and stay. Without
+  `--resume` a run id that already has artefacts is refused (use `--resume` or a new id), so no trial runs twice by
+  accident. `run.json` keeps the plan of the first run and of the resume together.
+- **Latest record wins.** A trial can have several records. The report, `rejudge` and the rescore read, per
+  (config, scenario, trial index), the last valid record, else the last record, so an earlier infrastructure failure
+  of a trial that later ran validly is not counted and each planned index counts once. The artefact files are never
+  rewritten (the report notes how many records were superseded).
+- **Federation health gate.** Before each trial's fixture (and before each config's space is swept) the panel asks the
+  local provider, the owner provider and the zone for their configuration (`FedApi.ping`). A refused or timed out
+  connection, or a 5xx, means the federation is down: the panel logs `federation unreachable; waiting` once, polls
+  every 60 s, and logs `federation resumed after N s`. `[run] federation_wait_s` (default 21600, 6 h) bounds the
+  wait; when it runs out the trial is a `RESET_FAIL` whose error reads `federation unreachable for N s`. One gate
+  serves all configs, so one outage is one wait, and trials that ask while it lasts fail at once instead of waiting
+  again. A trial already running when the federation stops keeps its usual handling; the next one waits. A trial
+  waits before it reserves any Anthropic budget.
+
 ## Tests (unit, no network)
 
 - Adapters: request shape, including the sampling/extra fields; thinking blocks passed back; tool-call round trip.
@@ -655,4 +678,7 @@ Every final answer is read twice (design/10, gate 4).
 - Runner: one trial at a time per config, configs in parallel; the recorded surface hash checked before dispatch;
   the Haiku budget refusal; secrets never in the artefacts (assert that the token
   string from a fake token file does not appear in any written file).
+- Resuming (`test_resume.py`): valid trials skipped, infrastructure ones run again, `NO_RESULT` kept; a reused run id
+  refused without `--resume`; the latest valid record counted once in the report and the rescore; the health gate
+  waits, resumes and times out, against a fake federation that can be switched off and a fake clock.
 - The host guard refuses non-local hosts.

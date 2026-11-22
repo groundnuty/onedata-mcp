@@ -30,6 +30,9 @@ wall_cap_s = 1200                    # 20 minutes per trial
 tool_call_cap_s = 300                # one tool call is bounded at 300 s, as in the agent study
 settle_s = 60                        # how long the federation axis waits for the end state
 concurrency_per_model = 1            # one trial at a time per config (the only value accepted)
+federation_wait_s = 21600            # a federation that does not answer (a shared host stopped its
+                                     # containers) is waited for, polled every 60 s, up to 6 h before
+                                     # each trial; then the trial is a RESET_FAIL. 0: do not wait
 artefact_root = "artefacts/k2val"    # gitignored
 research_dir = "research"            # where research/k2val-<run_id>.md is written
 
