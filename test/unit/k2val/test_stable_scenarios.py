@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1172,3 +1173,87 @@ async def test_the_http_legs_record_the_hint_where_the_flags_look_for_it(
     assert (row["tool"], row["ok"]) == ("get_qos_requirement", False)
     calls = [{**row, "index": 0, "source": "mcp"}]
     assert hint_exposures(calls) == [{"call": 0, "recovered": False, "next_call": None}]
+
+
+# --- regression cases of the second external review (the deterministic readers) --------------
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "nordic-marine-dc holds 50%. vistula-dc holds 25%.",
+        "The sites are nordic-marine-dc and vistula-dc. nordic-marine-dc holds 50% and "
+        "vistula-dc holds 25%.",
+        "nordic-marine-dc holds 131,072 bytes, or 50%, and vistula-dc holds 65,536 bytes, or 25%.",
+        "At vistula-dc, the share is 25%; at nordic-marine-dc, it is 50%.",
+        "nordic-marine-dc: 50.0%. vistula-dc: 25.0%.",
+        "vistula-dc: 25%, nordic-marine-dc: 50%",
+    ],
+)
+def test_st6_reader_keeps_a_site_and_its_share_together(answer: str) -> None:
+    assert read_shares(answer) == frozenset({"nordic-marine-dc=50", "vistula-dc=25"})
+
+
+@pytest.mark.parametrize(
+    ("answer", "label"),
+    [
+        ("Two rules: 1 copy and 2 copies. They do conflict.", "CONFLICT"),
+        ("Two rules: 1 copy and 2 copies. They are not compatible.", OTHER),
+        ("Two rules: 1 copy and 2 copies. Rule 1 is fulfilled.", OTHER),
+        ("Two rules: 1 copy and 2 copies. They are not incompatible.", "CAN_ALL_BE_MET"),
+        ("Two rules: 1 copy and 2 copies. They are compatible.", "CAN_ALL_BE_MET"),
+        ("Two rules: 1 copy and 2 copies. They are both fulfilled.", "CAN_ALL_BE_MET"),
+        ("Two rules: 1 copy and 2 copies. They do not conflict.", "CAN_ALL_BE_MET"),
+    ],
+)
+def test_st5_reader_reads_the_verdict_only_where_it_is_said(answer: str, label: str) -> None:
+    assert read_rules_answer(answer) == (label, frozenset({"1", "2"}))
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "| rule | expression | replicas | status |\n|---|---|---|---|\n"
+        "| q1 | providerId=pLocal | 1 | fulfilled |\n"
+        "| q2 | providerId=pOwner\\|providerId=pLocal | 2 | fulfilled |\n\n"
+        "Both can be met at the same time.",
+        "One rule asks for 1 copy and the other for 2 copies; they need 2 copies in total, not "
+        "3 copies, so both can be met.",
+    ],
+)
+def test_st5_reader_takes_table_counts_and_leaves_denied_counts_out(answer: str) -> None:
+    assert read_rules_answer(answer) == ("CAN_ALL_BE_MET", frozenset({"1", "2"}))
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        # a heading with no count is no heading: each item's own count decides
+        f"Placement rules for the files:\n- {A}: 1 copy\n- {B}: 2 copies\n- {C}: 1 copy\n"
+        f"So {A} and {C}.",
+        f"Summary:\n- {A}: 1 copy\n- {B}: 2 copies\n- {C}: 1 copy",
+        # under a one-copy heading, an item with its own larger count is excluded
+        f"Files asking for one copy:\n{A}\n{B} asks for 2 copies.\n{C}",
+    ],
+)
+def test_st3_reader_applies_a_heading_only_with_a_count_and_to_items_without_one(
+    answer: str,
+) -> None:
+    assert read_single_copy(answer, ST3_NAMES) == frozenset(ST3_ONE_COPY)
+
+
+SITES = SimpleNamespace(local_name="vistula-dc", owner_name="nordic-marine-dc", dir_id="", cited=())
+
+
+@pytest.mark.parametrize(
+    ("answer", "ids"),
+    [
+        (f"{TID} copied the file to vistula-dc.", {TID}),
+        (f"{TID} (to vistula-dc)", {TID}),
+        (f"Transfer {TID} replicated it to {PROV} (vistula-dc).", {TID}),
+        (f"{TID}, destination {PROV} (vistula-dc)", {TID}),
+    ],
+)
+def test_st4_reader_with_the_real_sites_skips_only_a_labelled_provider_id(answer: str, ids) -> None:
+    assert read_transfer_ids(answer, SITES) == frozenset(ids)
+    assert read_answer("ST4", answer) == frozenset(ids)  # the in-run reader passes the sites

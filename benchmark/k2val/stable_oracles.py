@@ -243,7 +243,9 @@ def read_single_copy(answer: str, names: tuple[str, ...]) -> frozenset[str] | No
 
     A clause (or a table row) that names files and says one copy, with no denial and no larger
     count, claims them; one that says two copies (or denies one) excludes them; the items under
-    a line that ends in a colon claim or exclude what the line says. A clause that is nothing
+    a line that ends in a colon and states a count claim or exclude what it says (a heading
+    with no count, "Summary:", is none), unless an item states its own count, which then decides
+    for it. A clause that is nothing
     but a list of names (“A and C.”) claims them, unless another clause excludes one, whatever
     explanation follows (“A and C. B asks for two copies.”). With no count anywhere in the
     answer, the names it gives (not denied) are its claim. The empty set when it says none
@@ -254,13 +256,15 @@ def read_single_copy(answer: str, names: tuple[str, ...]) -> frozenset[str] | No
     excluded: set[str] = set()
     listed: set[str] = set()
     counted = False
-    heading: str | None = None  # under a heading ending in ":": "one", "more" or "other"
+    heading: str | None = None  # under a heading ending in ":" that states a count: one, more
     for line in lines:
         here_line = [n for n in names if n in line]
-        if heading is not None and here_line:  # an item under the heading
-            {"one": claimed, "more": excluded}.get(heading, set()).update(here_line)
+        own_count = _ONE_COPY.search(line) or _MORE_COPIES.search(line)
+        if heading is not None and here_line and not own_count:  # an item under the heading
+            (claimed if heading == "one" else excluded).update(here_line)
             continue
-        heading = None
+        if not here_line:  # a line without a name ends the heading's list
+            heading = None
         if "|" in line:  # a table row: the cells that are a bare count
             cells = {c.strip() for c in line.split("|")}
             if len(here_line) == 1 and ("1" in cells) != bool(cells & {"2", "3", "4"}):
@@ -270,7 +274,10 @@ def read_single_copy(answer: str, names: tuple[str, ...]) -> frozenset[str] | No
         if line.rstrip().endswith(":") and not here_line:
             one, more = _ONE_COPY.search(line), _MORE_COPIES.search(line)
             denied = bool(_DENY.search(line))
-            heading = "one" if one and not more and not denied else "more" if more else "other"
+            if one and not more and not denied:
+                heading = "one"
+            elif more or (one and denied):
+                heading = "more"
             counted = counted or bool(one or more)
             continue
         for clause in _CLAUSE.split(line):
@@ -341,7 +348,8 @@ def read_transfer_ids(answer: str, who: Any = None) -> frozenset[str] | None:
     A bare answer of one token is that id, whatever its alphabet or length. Otherwise: every id
     given as the transfer's ("transfer: <id>", any alphabet), and every opaque id (16 or more
     letters and digits), but one labelled as another thing just before it ("provider id ...",
-    "fileId: ...") or followed by a site's name ("<id> (vistula-dc)"), and the trial's own
+    "fileId: ...") or by a site's name in brackets right after it ("<id> (vistula-dc)": a
+    provider's id; "<id> copied it to vistula-dc" keeps it), and the trial's own
     directory id and the ids the brief cited. Several, then a conclusion giving one ("... The
     answer is <id>."): that one. The empty set when it gives none and says there is no such
     transfer; None when it gives none and does not say so."""
@@ -363,8 +371,14 @@ def read_transfer_ids(answer: str, who: Any = None) -> frozenset[str] | None:
         after = text[m.end() : m.end() + 25]
         if token in skip or _OTHER_LABEL.search(before):
             continue
-        if any(site in after for site in sites):
-            continue
+        if sites and re.match(
+            r"\s*\(\s*(?:the\s+)?(?:site|provider)?\s*(?:"
+            + "|".join(re.escape(site) for site in sites)
+            + r")\s*\)",
+            after,
+            re.I,
+        ):
+            continue  # "<id> (vistula-dc)": a provider's id, labelled with its name
         found[token] = m.start()
     for m in _TRANSFER_ID.finditer(text):
         if m.group("id") not in skip:
@@ -418,25 +432,32 @@ CAN_ALL = "CAN_ALL_BE_MET"
 CONFLICT = "CONFLICT"
 _CAN_ALL = re.compile(
     r"\bno (?:conflicts?|contradiction)\b|\bnot (?:in )?conflict\w*\b"
-    r"|\b(?:do|does|don['’]t|doesn['’]t)(?:\s+not)?\s+conflict\b|\b(?:are |is )?compatible\b"
-    r"|\bnot mutually exclusive\b|\bcan coexist\b"
+    r"|\b(?:do|does)\s+not\s+conflict\b|\b(?:don['’]t|doesn['’]t)\s+conflict\b"
+    r"|\bnot (?:mutually exclusive|incompatible)\b|\bcan coexist\b"
     r"|\bcan (?:all |both )?be (?:met|satisfied|fulfilled)\b"
-    r"|\b(?:are|is) (?:all |both )?(?:already )?(?:met|satisfied|fulfilled)\b"
-    r"|\bboth (?:are )?(?:met|satisfied|fulfilled)\b"
-    r"|\ball (?:of them )?(?:are )?(?:met|fulfilled)\b"
+    r"|\b(?:are|is) (?:all|both) (?:already )?(?:met|satisfied|fulfilled)\b"
+    r"|\bboth (?:are )?(?:already )?(?:met|satisfied|fulfilled)\b"
+    r"|\ball (?:of them )?(?:are )?(?:already )?(?:met|satisfied|fulfilled)\b"
     r"|^\W*yes\b",
     re.I | re.M,
 )
+# "compatible", unless denied before it in its clause ("are not compatible", "aren't compatible")
+_COMPATIBLE = re.compile(r"\bcompatible\b", re.I)
+_NOT_COMPATIBLE = re.compile(r"(?:\b(?:not|no|never)\b|n['’]t\b)[^.;\n]{0,20}\bcompatible\b", re.I)
 _CONFLICTS = re.compile(
     r"\bconflict(?:s|ing)?\b|\bmutually exclusive\b|\bincompatible\b|\bcontradict\w*\b"
     r"|\bcan(?:not|['’]t)\s+(?:all\s+|both\s+)?be\s+(?:met|satisfied|fulfilled)\b",
     re.I,
 )
 _NOT_CONFLICT = re.compile(
-    r"\b(?:no|not|never|neither|nor|without)\b[^.;\n]{0,25}\b(?:conflict|mutually|contradict)"
-    r"|n['’]t\s+conflict",
+    r"\b(?:no|not|never|neither|nor|without)\b[^.;\n]{0,25}"
+    r"\b(?:conflict|mutually|contradict|incompatible)"
+    r"|n['’]t\s+(?:conflict|incompatible|mutually)",
     re.I,
 )
+# A count denied right before it: "not 3 copies", "no 3 replicas", "never two".
+_DENIED_BEFORE = re.compile(r"(?:\b(?:not|no|never|without)|n['’]t)\W+(?:\w+\W+)?$", re.I)
+_COUNT_HEADER = re.compile(r"replica|cop(?:y|ies)|count|\bnum", re.I)
 # "the other asks for two", "the second for 2"
 _OTHER_COUNT = re.compile(
     r"\b(?:other|second|another)\b[^.;\n]{0,25}?\b" + _NUM + r"\b(?!\s*(?:of|at|on|in|rules?)\b)",
@@ -451,35 +472,69 @@ def read_rules_answer(answer: str) -> tuple[str, frozenset[str]]:
     text = _plain(answer)
     clauses = [c for c in _CLAUSE.split(text) if c and c.strip()]
     conflict = any(_CONFLICTS.search(c) and not _NOT_CONFLICT.search(c) for c in clauses)
-    can = bool(_CAN_ALL.search(text))
+    can = bool(_CAN_ALL.search(text)) or any(
+        _COMPATIBLE.search(c) and not _NOT_COMPATIBLE.search(c) for c in clauses
+    )
     label = CAN_ALL if can and not conflict else CONFLICT if conflict and not can else OTHER
     counts = {
         str(_value(m.group(m.lastindex or 1)))
         for pattern in (_FIELD, _ASKED, _COUNTED, _OTHER_COUNT)
         for m in pattern.finditer(text)
+        if not _DENIED_BEFORE.search(text[max(0, m.start() - 20) : m.start()])
     }
-    return label, frozenset(counts)
+    return label, frozenset(counts | _table_counts(text))
+
+
+def _table_counts(text: str) -> set[str]:
+    """The bare whole numbers of a Markdown table's count column: the column whose header names
+    replicas, copies or a count (`| rule | expression | replicas | status |`)."""
+    out: set[str] = set()
+    column: int | None = None
+    for line in text.splitlines():
+        if "|" not in line:
+            column = None
+            continue
+        cells = [c.strip() for c in re.split(r"(?<!\\)\|", line.strip().strip("|"))]  # not "\|"
+        if column is None:
+            column = next((i for i, c in enumerate(cells) if _COUNT_HEADER.search(c)), None)
+            continue
+        if column < len(cells) and cells[column].isdigit():
+            out.add(str(int(cells[column])))
+    return out
 
 
 # --- ST6: each site's share of the file's data ------------------------------------------------
 
 _PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s*(?:%|percent\b|per cent\b)", re.I)
-_SHARE_CLAUSE = re.compile(r";|\n|,\s+|\s+(?:and|while|whereas|but)\s+", re.I)
+_CONJUNCTION = r"(?:and|while|whereas|but)\b"
+
+
+def _share_clauses(text: str, site_words: list[str]) -> list[str]:
+    """The answer cut into clauses: at sentence ends (not inside "50.0%"), semicolons, line
+    breaks and the conjunctions; at a comma only when a site's name or a conjunction follows it
+    (so "131,072 bytes, or 50%" and "At vistula-dc, the share is 25%" stay whole)."""
+    sites = "|".join(site_words)
+    cut = re.compile(
+        rf"(?<=[.!?])\s+|;|\n|,\s+(?=(?:{_CONJUNCTION}|{sites}))|\s+{_CONJUNCTION}\s*",
+        re.I,
+    )
+    return [c for c in cut.split(text) if c and c.strip()]
 
 
 def read_shares(
     answer: str, local: str = "vistula-dc", owner: str = "nordic-marine-dc"
 ) -> frozenset[str] | None:
     """ST6: each site's share the answer gives, as `<site>=<percent>` (the percent rounded to a
-    whole number): from each clause, or table row, that names one site and gives a percentage
-    (its first). "Your site" is the local site. None when it gives none."""
+    whole number): from each clause (`_share_clauses`), or table row, that names one site and
+    gives a percentage (its first). "Your site" is the local site. None when it gives none."""
     text = _plain(answer)
     sites = {
         owner: re.compile(re.escape(owner), re.I),
         local: re.compile(rf"{re.escape(local)}|\byour site\b|\bthe local site\b", re.I),
     }
+    words = [re.escape(owner), re.escape(local), r"your site\b", r"the local site\b"]
     pairs: set[str] = set()
-    for clause in _SHARE_CLAUSE.split(text):
+    for clause in _share_clauses(text, words):
         named = [site for site, pattern in sites.items() if pattern.search(clause)]
         share = _PERCENT.search(clause)
         if len(named) == 1 and share:
@@ -667,7 +722,7 @@ def verify_st4(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     _need(ctx, ST4_FILE, ST4_OTHER)
     want = fixture_transfer(ctx, ST4_FILE)
     other = (ctx.baseline_files.get(ST4_OTHER) or {}).get("transfer_id")
-    got = ctx.decided(lambda: read_transfer_ids(trace.final_answer))
+    got = ctx.decided(lambda: read_transfer_ids(trace.final_answer, ctx))
     if got is None:
         return _result(False, None, ["the answer gives no transfer id"])
     if set(got) == {want}:
