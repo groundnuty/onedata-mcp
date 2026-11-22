@@ -33,7 +33,7 @@ Every one is offered the panel's K1 set: all eight tools are in it, and its surf
 
 - **ST1**, from A5 and P3: "Set up a placement rule that keeps `<dir>/log_20200111.dat` at your site vistula-dc, and tell me when its data are fully there." One file, at the owner only.
   - Right answer: SAYS_DONE, said when a rule the agent made keeps the file at the site and the local blocks cover it.
-  - The rule must keep the file at the site. Either its expression names the local provider's id (`providerId=<id>`, with no `\` exclusion), or no copy was scheduled by other means, so the local copy can only have come from the rule. A rule on the trial directory counts, since the file inherits it.
+  - The rule must keep the file at the site. Either its expression names the local provider's id (`providerId=<id>`, with no `\` exclusion), or it is the agent's only rule and no copy was scheduled by other means, so the local copy can only have come from it (`anyStorage` with two replicas passes this way). A rule on the trial directory counts, since the file inherits it. An agent that adds a rule naming the site, lets the data arrive and removes it, keeping only a rule that does not, fails.
   - A done said before that holds fails as a PREMATURE CLAIM. The federation axis checks the same state after the 60 s settle.
   - Required: a successful `add_file_qos_requirement` on the file or its directory.
   - A rule naming the owner, or the site by its name (`providerId=vistula-dc`, which no provider has), never brings the data, and fails. That is the misreading the reworded `expression` text is about.
@@ -117,6 +117,13 @@ To re-run one tool after a later wording change, set `K2VAL_SMOKE_SCENARIOS` to 
 - A tool-attributable failure is new unless the same failure, with the same cause, is in the tool's earlier record: the PPAM K=8 run (`research/k8-headline-2026-05-03.md`, `research/k8-model-failures-detail-2026-05-03.md`).
 - The ST scenarios have no earlier result. Nor, in practice, do the reused panel scenarios, whose promotion runs are still pending (design/11–13, "Results: TODO"). For all of them, any tool-attributable failure is new.
 - The smoke pair has no control. Before reading the pair's results, run the control once on the five new scenarios (`K2VAL_MODELS=sonnet-medium K2VAL_K=1 K2VAL_SCENARIOS=ST1,ST2,ST3,ST4,ST4i`). A new scenario the control fails is suspect, as design/10 says, and is fixed before anything counts.
+
+## Notes for the operator
+
+- **Eight rows, seven tools.** `get_file_qos_summary` owes two re-runs: its wording (V3, V3n, V3o) and its result shape (ST3).
+- **Beyond the scenarios named in the request** (V1, V3/V3o, SR1), the smoke set also reuses V3n, SR1i and SR1n. It adds ST4i, a variant rather than a port, so that `get_transfer` keeps a scenario if ST4 cannot run (below). It also adds the `k2val-smoke` target and two `valfed-check` cases. Each can be trimmed from `SMOKE` and `K2VAL_SMOKE_SCENARIOS` without touching the rest.
+- **The new error hints may not fire.** `get_qos_requirement`'s hints answer only a malformed id (a path, an expression, whitespace). A smoke run in which no model sends one passes that row without evidence about the hint wording. Look in the report's errors-returned-by-tools section for `qos_id ... is a path` (or its siblings) to see whether any trial reached them. The unit trial of ST2 sends a path once to check that the hint reaches the model through the app.
+- **ST4 may never reach a model.** It runs only if 25.0 lists ended transfers newest first (below). Otherwise every ST4 trial is a RESET_FAIL. ST4i still covers `get_transfer`, but `list_space_transfers` then has no smoke scenario until ST4 is redesigned.
 
 ## To verify on the first live run
 

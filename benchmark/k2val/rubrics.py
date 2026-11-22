@@ -304,8 +304,9 @@ ANSWER_SPECS.update(
                 f"{_SITE} (pending, in progress, partial).",
                 OTHER: "it says neither, or says both without settling on one.",
                 "SAYS_DONE": "it says the task is done (the placement rule set up and the file's "
-                f"data fully at {_SITE}), or that the data are now fully there. A transfer's "
-                "status alone is not that, nor is a statement about another site's copy.",
+                f"data fully at {_SITE}), that the data are now fully there, or that the rule is "
+                "fulfilled (met). A transfer's status alone is not that, nor is a statement "
+                "about another site's copy.",
             },
         ),
         "ST2": AnswerSpec(

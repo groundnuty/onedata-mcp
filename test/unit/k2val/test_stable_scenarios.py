@@ -398,6 +398,52 @@ async def test_st1_a_rule_naming_the_site_said_done_once_there_passes(
         "add_file_qos_requirement",
         "get_file_distribution",
     ]
+    assert_rescores_offline(tmp_path, "ST1", "SAYS_DONE", art.final_answer)
+
+
+def assert_rescores_offline(tmp_path: Path, sid: str, value, answer: str) -> None:
+    """The stored trial scores again offline (rejudge): the context the oracle needs (the add
+    call's answer, the site's id, the transfer ids in the baseline) survives the artefact. Its
+    fake verdict has no input digest, so without a verdict it is NEEDS_REVIEW, and PASS is
+    what the deterministic reading would give; with an agreeing verdict it is PASS."""
+    from benchmark.k2val.artefact import read_trials
+    from benchmark.k2val.judge import JudgeVerdict
+    from benchmark.k2val.scoring import rescore_stored
+
+    (row,) = [r for r in read_trials(tmp_path / "run") if r["scenario_id"] == sid]
+    again = rescore_stored(row)
+    assert again["outcome"] == "NEEDS_REVIEW"
+    assert again["outcome_if"]["deterministic"] == "PASS", again
+    verdict = JudgeVerdict(sid, value=value, evidence=answer[:20], evidence_quoted=True)
+    assert rescore_stored(row, verdict)["outcome"] == "PASS"
+
+
+@pytest.mark.asyncio
+async def test_st1_a_rule_naming_the_site_removed_after_the_copy_fails(
+    cfg, api, fed, clock, tmp_path, tools_app
+) -> None:
+    """The data arrive by a rule naming the site, which the agent then removes, keeping one
+    at the owner: no rule keeps the file at the site, though its blocks are still there."""
+
+    async def model(app, brief_text):
+        path = _path(brief_text)
+        for site in (OWNER_ID, LOCAL_ID):
+            made = await result_of(
+                app,
+                "add_file_qos_requirement",
+                {"file_id_or_path": path, "expression": f"providerId={site}"},
+            )
+        fed.tick()
+        await app.call_tool("remove_qos_requirement", {"qos_id": made["qosRequirementId"]})
+        return "Done: the file's data are fully at vistula-dc."
+
+    art = await trial(cfg, api, clock, tmp_path, tools_app, "ST1", model)
+
+    assert art.outcome == "FAIL"
+    assert art.oracle_federation_pass is False
+    assert "no rule the agent made that keeps the file at the site is on it" in (
+        art.oracle_diagnosis
+    )
 
 
 @pytest.mark.asyncio
@@ -583,7 +629,20 @@ async def test_st4_reading_the_ended_transfers_passes(
 
     assert art.outcome == "PASS", art.oracle_diagnosis
     assert defaults == [[]]
-    assert art.final_answer == art.fixture_baseline["files"][ST4_FILE]["transfer_id"]
+    tid = art.fixture_baseline["files"][ST4_FILE]["transfer_id"]
+    assert art.final_answer == tid
+    assert_rescores_offline(tmp_path, "ST4", frozenset({tid}), art.final_answer)
+
+
+def test_st4s_right_reading_is_the_trials_own_id() -> None:
+    """rejudge's "says right" columns: ST4's right reading is the trial's transfer id, not a
+    label, so it cannot be told offline (None), never True for an unreadable answer."""
+    from benchmark.k2val.reading import is_right, right_reading
+
+    assert right_reading("ST4") is None
+    assert is_right("ST4", None) is None and is_right("ST4", frozenset({TID})) is None
+    assert is_right("ST3", frozenset(ST3_ONE_COPY)) is True
+    assert is_right("ST2", "TWO") is True and is_right("ST2", "ONE") is False
 
 
 @pytest.mark.asyncio

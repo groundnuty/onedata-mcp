@@ -414,23 +414,25 @@ def _names_local(ctx: K2Context, expression: object) -> bool:
 def st1_rules(ctx: K2Context) -> tuple[list[str], list[str]]:
     """(the rules the agent made on the file that keep it at the site, the others), by id.
 
-    A rule keeps the file at the site when its expression names the local provider's id, or
-    when no copy was scheduled by other means (a `schedule_file_replication` that may have taken
-    effect): then a local copy can only have come from the rule. The second keeps an answer
-    right that wrote the rule another way (`anyStorage` with two replicas, a storage id)."""
+    A rule keeps the file at the site when its expression names the local provider's id. When
+    no rule the agent made does, its one rule still counts if it made just one and no copy was
+    scheduled by other means (a `schedule_file_replication` that may have taken effect): then a
+    local copy can only have come from that rule. That keeps an answer right that wrote the rule
+    another way (`anyStorage` with two replicas, a storage id); with several such rules, which
+    one brought the data cannot be told, and none counts."""
     from benchmark.k2val.scoring import may_have_written
 
     copied = any(c.tool == "schedule_file_replication" for c in may_have_written(ctx))
-    keeps: list[str] = []
-    others: list[str] = []
+    made: list[tuple[str, bool]] = []
     for c in _st1_adds(ctx):
-        made = _json(c.result_text)
-        rid = made.get("qosRequirementId") if isinstance(made, dict) else None
-        if not isinstance(rid, str) or not rid:
-            continue
-        expression = c.arguments.get("expression")
-        (keeps if _names_local(ctx, expression) or not copied else others).append(rid)
-    return keeps, others
+        body = _json(c.result_text)
+        rid = body.get("qosRequirementId") if isinstance(body, dict) else None
+        if isinstance(rid, str) and rid:
+            made.append((rid, _names_local(ctx, c.arguments.get("expression"))))
+    keeps = [rid for rid, local in made if local]
+    if not keeps and len(made) == 1 and not copied:
+        keeps = [made[0][0]]
+    return keeps, [rid for rid, _ in made if rid not in keeps]
 
 
 def verify_st1(ctx: K2Context, trace: AgentTrace) -> OracleResult:
@@ -459,7 +461,7 @@ def verify_st1(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     if not keeps:
         parts.append(
             "NO PLACEMENT RULE THAT KEEPS THE FILE AT THE SITE"
-            + (f" (rules {others} name another site, and a copy was scheduled)" if others else "")
+            + (f" (the rules {others} do not name the site's id)" if others else "")
         )
     if label == SAYS_DONE and at_why:
         if not after_why:

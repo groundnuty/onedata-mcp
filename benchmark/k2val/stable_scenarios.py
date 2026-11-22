@@ -78,8 +78,9 @@ ST1 = StableScenario(
         "Pass when the answer reads SAYS_DONE AND, at the answer, a rule the agent added on the "
         "file (or on the trial directory) is on the file and the local provider's blocks cover "
         "it. The rule must keep the file at the site: its expression names the local provider's "
-        "id (with no exclusion), or no copy was scheduled by other means, so the local copy can "
-        "only have come from the rule. A done said before both hold is a PREMATURE CLAIM. The "
+        "id (with no exclusion), or it is the agent's only rule and no copy was scheduled by "
+        "other means, so the local copy can only have come from it. A done said before both "
+        "hold is a PREMATURE CLAIM. The "
         "federation axis: the same, after the settle. Required: a successful "
         "add_file_qos_requirement on the file or the trial directory."
     ),

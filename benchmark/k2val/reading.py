@@ -140,12 +140,15 @@ def right_reading(sid: str) -> Reading:
     return spec.expect
 
 
-def is_right(sid: str, value: Reading) -> bool:
+def is_right(sid: str, value: Reading) -> bool | None:
     """Whether a reading is a right answer's, as far as the label goes (the oracle may ask
     more: the state when it was given). V5: the right label, with the two files being written
-    named exactly, or none named (the brief asks for neither)."""
+    named exactly, or none named (the brief asks for neither). None where the right reading
+    depends on the trial (ST4: its own transfer id), so it cannot be told from the label."""
     from benchmark.k2val.rubrics import same_reading
 
+    if sid in _RIGHT and _RIGHT[sid] is None:
+        return None
     if sid == "V5":
         return (
             isinstance(value, tuple)
