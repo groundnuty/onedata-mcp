@@ -16,7 +16,7 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
-from benchmark.k2val import file_oracles, file_scenarios, oracles, sr_oracles
+from benchmark.k2val import file_oracles, file_scenarios, oracles, sr_oracles, stable_oracles
 from benchmark.k2val.rubrics import ANSWER_SPECS, Reading
 from benchmark.k2val.scenarios import SCENARIOS, V1_DAYS
 
@@ -84,6 +84,8 @@ READERS: dict[str, Reader] = {
         sid: (lambda a, w, t=target: file_oracles.cd_label(a, t))
         for sid, target in file_oracles.CD_TARGETS.items()
     },
+    # the stable tools' smoke scenarios (design/16)
+    **stable_oracles.ST_READERS,
 }
 
 
@@ -123,6 +125,8 @@ _RIGHT: dict[str, Reading] = {
     "SR1i": "SAYS_WHOLE",
     "SR1n": "SAYS_NOT_POSSIBLE",
     "SR1o": "SAYS_NOT_COPIED",
+    # None for ST4: its right reading is the trial's own transfer id
+    **stable_oracles.ST_RIGHT,
 }
 
 

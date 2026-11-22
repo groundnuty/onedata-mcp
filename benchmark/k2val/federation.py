@@ -464,12 +464,12 @@ class FedApi:
         file_id = r["body"].get("fileId") if isinstance(r["body"], dict) else None
         return file_id if isinstance(file_id, str) else None
 
-    async def add_qos(self, role: Role, file_id: str, expression: str) -> str:
+    async def add_qos(self, role: Role, file_id: str, expression: str, replicas: int = 1) -> str:
         r = await request(
             self._cfg[role],
             "POST",
             "/qos_requirements",
-            json_body={"expression": expression, "replicasNum": 1, "fileId": file_id},
+            json_body={"expression": expression, "replicasNum": replicas, "fileId": file_id},
         )
         return r["body"]["qosRequirementId"]
 
@@ -497,6 +497,29 @@ class FedApi:
             },
         )
         return r["body"]["transferId"]
+
+    async def transfer_space_id(self, role: Role, transfer_id: str) -> str:
+        """The space of a transfer (`GET /transfers/{tid}`, its `spaceId`)."""
+        r = await request(self._cfg[role], "GET", f"/transfers/{quote(transfer_id, safe='')}")
+        space_id = r["body"].get("spaceId") if isinstance(r["body"], dict) else None
+        if not isinstance(space_id, str) or not space_id:
+            raise OnedataApiError("transfer without a 'spaceId'", response=r)
+        return space_id
+
+    async def ended_transfers(self, role: Role, space_id: str, limit: int) -> list[str]:
+        """The first page of a space's ended transfers at `limit` (swagger get_all_transfers),
+        as the provider lists them. Strict: an answer without a `transfers` list of ids raises,
+        never reads as none."""
+        r = await request(
+            self._cfg[role],
+            "GET",
+            f"/spaces/{quote(space_id, safe='')}/transfers",
+            params={"state": "ended", "limit": limit},
+        )
+        ids = r["body"].get("transfers") if isinstance(r["body"], dict) else None
+        if not isinstance(ids, list) or not all(isinstance(t, str) for t in ids):
+            raise OnedataApiError("transfer listing without a 'transfers' list", response=r)
+        return ids
 
     # --- waiting --------------------------------------------------------
 

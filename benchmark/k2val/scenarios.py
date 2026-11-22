@@ -306,6 +306,26 @@ SCENARIOS.update(
     }
 )
 
+# --- the stable tools' smoke scenarios (ST*; design/16) ---------------------------------------
+# PPAM's scenarios ported to the panel, in stable_scenarios.py (a leaf module: no import cycle).
+from benchmark.k2val.stable_scenarios import ST_SCENARIOS  # noqa: E402
+
+SCENARIOS.update(
+    {
+        s.id: Scenario(
+            s.id,
+            s.title,
+            "K1",
+            s.brief,
+            s.fixture,
+            settle=s.settle,
+            restraint=s.restraint,
+            settle_s=s.settle_s,
+        )
+        for s in ST_SCENARIOS.values()
+    }
+)
+
 
 # The tool each scenario exercises (required, or offered and not needed), independently of the
 # configured tool sets: a run whose offered set lacks it is a harness error before dispatch.
@@ -318,6 +338,7 @@ TOOL_UNDER_TEST: dict[str, str] = {
     **dict.fromkeys(("CD", "CDn", "CDo", "CDp"), "create_directory"),
     **dict.fromkeys(("V4", "V5"), "check_readiness"),
     **dict.fromkeys(("V6", "V7"), "ensure_readiness"),
+    **{s.id: s.tool for s in ST_SCENARIOS.values()},
 }
 
 

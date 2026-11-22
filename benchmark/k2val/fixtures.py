@@ -13,6 +13,13 @@ Kinds of file (design/08, Fixtures):
   is confirmed from the blocks.
 - `s0_qos`: an `s0` file with a QoS rule `providerId=<local id>`, waited until it is fulfilled
   and the file is locally covered.
+- `s0_qos_owner`: an `s0` file with a QoS rule `providerId=<owner id>` (one replica), waited
+  until it is fulfilled; the local provider still holds none of it (the stable tools' smoke
+  scenarios, design/16).
+- `s0_qos_both`: an `s0` file with a QoS rule `providerId=<owner id>|providerId=<local id>` and
+  two replicas, waited until it is fulfilled and the file is locally covered (design/16).
+- The transfer that replicates an `s0_local` file is recorded (`BuiltFixture.transfers`) and
+  kept in the file's baseline (`transfer_id`), so an oracle knows which transfer made the copy.
 - Any kind but `s2` may be larger than the standard 256 KiB (`FileSpec.size`): such a file is
   written in `PART`-sized writes at explicit offsets, so memory stays bounded. The copy scenarios
   of `schedule_file_replication` (SR1, design/12) use `LARGE_FILE_SIZE`, which takes a transfer
@@ -51,7 +58,16 @@ PART = 4 * 1024 * 1024
 REST_PARTS = (FILE_SIZE - CHUNK) // CHUNK  # parts the background writer writes
 SWEEP_PREFIX = "logs"
 
-Kind = Literal["s0", "s0_local", "s0_qos", "s2"]
+Kind = Literal["s0", "s0_local", "s0_qos", "s0_qos_owner", "s0_qos_both", "s2"]
+# The kinds whose start state holds no local block (the others start locally covered).
+NOT_LOCAL_KINDS = ("s0", "s2", "s0_qos_owner")
+# The kinds with a QoS rule the fixture makes: kind -> (the providers its expression names,
+# replicas). The expression is `providerId=<id>` per provider, joined by `|`.
+QOS_KINDS: dict[str, tuple[tuple[str, ...], int]] = {
+    "s0_qos": (("local",), 1),
+    "s0_qos_owner": (("owner",), 1),
+    "s0_qos_both": (("owner", "local"), 2),
+}
 
 CONFIRM_TIMEOUT_S = 60.0
 LOCAL_SEES_TIMEOUT_S = 120.0
@@ -124,6 +140,12 @@ class FixtureSpec:
     # limit (`PAGE_LIMIT_MAX`), as the local provider lists it: checked before the agent starts,
     # so that an answer needs a second page whatever order the provider lists in (LCp).
     beyond_first_page: tuple[str, ...] = ()
+    # The fixture's transfers (of its `s0_local` files) must all be among the first this many
+    # transfers the LOCAL provider lists as ended in the space, before the agent starts (ST4,
+    # design/16): an answer must not depend on reading the space's whole transfer history. That
+    # 25.0 lists ended transfers newest first is unverified; if it does not, the build fails
+    # (RESET_FAIL), never a model.
+    transfers_listed_within: int | None = None
 
 
 @dataclass
@@ -246,6 +268,8 @@ class BuiltFixture:
     # baseline the oracles compare the end state with; `FedApi.tree`'s form).
     entries: dict[str, str] = field(default_factory=dict)
     baseline_tree: dict[str, dict] | None = None
+    # The transfer that replicated each `s0_local` file to the local provider: file name -> id.
+    transfers: dict[str, str] = field(default_factory=dict)
 
     @property
     def dir_path(self) -> str:
@@ -253,8 +277,14 @@ class BuiltFixture:
 
     def ids(self) -> dict[str, str]:
         """File ids by relative path, for a brief that gives an id (`{ids[log_20200102.dat]}`):
-        the entries, the log files, and the trial directory itself (`.`)."""
-        return {".": self.dir_id, **{n: bf.file_id for n, bf in self.files.items()}, **self.entries}
+        the entries, the log files, and the trial directory itself (`.`); and the id of the
+        transfer that copied a log file, as `{ids[transfer:log_20200116.dat]}`."""
+        return {
+            ".": self.dir_id,
+            **{n: bf.file_id for n, bf in self.files.items()},
+            **self.entries,
+            **{f"transfer:{n}": tid for n, tid in self.transfers.items()},
+        }
 
     def baseline(self) -> dict:
         """The start state the agent got, as the LOCAL provider reported it before the first
@@ -271,7 +301,7 @@ def _baseline_holds(kind: str, reading: dict, want_qos: tuple[str, ...], size: i
         return False
     if tuple(reading["qos_ids"]) != want_qos:
         return False
-    if kind in ("s0", "s2"):
+    if kind in NOT_LOCAL_KINDS:
         return reading["local_bytes"] == 0
     return reading["local_covered"]
 
@@ -398,15 +428,23 @@ class FixtureBuilder:
         for bf in fixture.files.values():
             await self._wait_local_sees(bf)
 
+        role_ids = {"owner": owner_id, "local": local_id}
         for fs in spec.files:
             bf = fixture.files[fs.name]
             if fs.kind == "s0_local":
-                await self.fed.replicate("local", bf.file_id, local_id)
+                fixture.transfers[fs.name] = await self.fed.replicate("local", bf.file_id, local_id)
                 await self._wait_local_covered(bf, local_id)
-            elif fs.kind == "s0_qos":
-                rule = await self.fed.add_qos("local", bf.file_id, f"providerId={local_id}")
+            elif fs.kind in QOS_KINDS:
+                roles, replicas = QOS_KINDS[fs.kind]
+                expression = "|".join(f"providerId={role_ids[r]}" for r in roles)
+                rule = await self.fed.add_qos("local", bf.file_id, expression, replicas)
                 fixture.qos_rules[fs.name] = rule
-                await self._wait_rule_fulfilled(bf, rule, local_id)
+                await self._wait_rule_fulfilled(
+                    bf, rule, local_id, local=fs.kind not in NOT_LOCAL_KINDS
+                )
+
+        if spec.transfers_listed_within:  # ST4 (design/16)
+            await self._wait_transfers_listed(fixture, spec.transfers_listed_within)
 
         if spec.entries:  # the file-tool scenarios (design/13-15)
             await self._build_entries(fixture, spec.entries, spec.beyond_first_page)
@@ -449,6 +487,8 @@ class FixtureBuilder:
                 f"(blocks, size, QoS requirements {list(want_qos)})",
             )
             fixture.files_baseline[fs.name] = {"kind": fs.kind, **last["reading"]}
+            if fs.name in fixture.transfers:  # which transfer made the local copy (ST4, ST4i)
+                fixture.files_baseline[fs.name]["transfer_id"] = fixture.transfers[fs.name]
 
     async def _local_reading(self, bf: BuiltFile, local_id: str) -> dict | None:
         """The local provider's own view of a file, or None while it cannot be read."""
@@ -476,16 +516,42 @@ class FixtureBuilder:
             what=f"the local provider covers {bf.name} (blocks, not transfer status)",
         )
 
-    async def _wait_rule_fulfilled(self, bf: BuiltFile, rule: str, local_id: str) -> None:
+    async def _wait_rule_fulfilled(
+        self, bf: BuiltFile, rule: str, local_id: str, *, local: bool = True
+    ) -> None:
+        """The rule is fulfilled and, when it keeps a copy at the local provider (`local`), the
+        file is locally covered (blocks, not the rule's status alone)."""
+
         async def done() -> bool:
             if await self.fed.qos_status("local", rule) != "fulfilled":
                 return False
-            return (await self.fed.distribution("local", bf.file_id)).covers(local_id)
+            return not local or (await self.fed.distribution("local", bf.file_id)).covers(local_id)
 
         await self.fed.wait_until(
             done,
             timeout_s=REPLICATION_TIMEOUT_S,
-            what=f"the placement rule on {bf.name} is fulfilled and the file is locally covered",
+            what=f"the placement rule on {bf.name} is fulfilled"
+            + (" and the file is locally covered" if local else ""),
+        )
+
+    async def _wait_transfers_listed(self, fixture: BuiltFixture, within: int) -> None:
+        """ST4 (design/16): the fixture's transfers are all among the first `within` transfers
+        the LOCAL provider lists as ended in the space (waited for: a transfer whose blocks have
+        arrived may not read ended yet). Else a FixtureError: the listing does not put them
+        first (its order on 25.0 is unverified), and the scenario must not reach a model."""
+        if not fixture.transfers:
+            raise FixtureError("transfers_listed_within is set, but the fixture made no transfer")
+        wanted = set(fixture.transfers.values())
+        space_id = await self.fed.transfer_space_id("local", next(iter(wanted)))
+
+        async def listed() -> bool:
+            return wanted <= set(await self.fed.ended_transfers("local", space_id, within))
+
+        await self.fed.wait_until(
+            listed,
+            timeout_s=CONFIRM_TIMEOUT_S,
+            what=f"the local provider lists the fixture's {len(wanted)} transfers among the first "
+            f"{within} ended transfers of the space (newest first is assumed; unverified on 25.0)",
         )
 
     # --- the file-tool scenarios' entries (design/13-15) -----------------

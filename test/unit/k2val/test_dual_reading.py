@@ -291,6 +291,8 @@ def test_every_scenario_has_a_reader_a_spec_and_a_right_reading() -> None:
             assert next(iter(spec.labels)) != right, f"{sid}: the passing label is listed first"
         elif spec.kind == "label_names":
             assert right[0] in spec.labels and next(iter(spec.labels)) != right[0], sid
+        elif sid == "ST4":  # its right reading is the trial's own transfer id (design/16)
+            assert right is None
         else:
             assert isinstance(right, frozenset), sid
 

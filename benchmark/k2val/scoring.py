@@ -318,6 +318,11 @@ REQUIRED: dict[str, Predicate] = {
     "CDp": _created("2020/01"),
 }
 
+# the stable tools' smoke scenarios (design/16): their predicates are in stable_oracles.py
+from benchmark.k2val.stable_oracles import ST_REQUIRED  # noqa: E402
+
+REQUIRED.update(ST_REQUIRED)
+
 
 # ---------------------------------------------------------------------------------------------
 # Restraint: nothing should change
