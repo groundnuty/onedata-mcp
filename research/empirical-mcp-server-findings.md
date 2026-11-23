@@ -1085,8 +1085,9 @@ docstring and tests use `expression`, which changes no model-facing
 text.
 
 **Decision:** Fixed (PR #35). The first fix changes a stable tool's
-result shape, so `get_file_qos_summary` owes the K=3 smoke re-run
-(design/10, "Staying stable"). Its ST3 and ST5 scenarios check the
+result shape, so `get_file_qos_summary` owed the K=3 smoke re-run
+(design/10, "Staying stable"); run `smoke-stable-1` verified the shape in every
+exposed trial (design/16). Its ST3 and ST5 scenarios check the
 field in every summary a model receives (design/16).
 
 ---
@@ -1410,7 +1411,9 @@ the same stop in a second family or at the control.
 
 **Evidence:** design/12 and design/13, Results.
 
-**Decision:** Not changed: model capability; logged against both
+**Decision:** Superseded by M-37 and M-38 (PR #48): the accommodation
+was made after all, and run `smoke-stable-2` was clean. Originally:
+not changed, model capability; logged against both
 tools for their K=3 smoke re-run (design/16), whose scenarios for
 `get_file_distribution` include V1 and ST6 (per-provider shares). The
 answers were unambiguous: the entry says 0 bytes, and a summary with
