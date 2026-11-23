@@ -20,7 +20,7 @@ import pytest
 from pytest_httpx import HTTPXMock
 
 from onedata_mcp.api import files, harvesters, qos, spaces, transfers
-from onedata_mcp.utils import id_segment
+from onedata_mcp.utils import id_segment, path_segments
 
 PROVIDER = "https://provider.example/api/v3/oneprovider"
 ZONE = "https://onezone.example/api/v3/onezone"
@@ -80,6 +80,25 @@ def test_id_segment_cuts_a_long_value_in_its_error() -> None:
     with pytest.raises(ValueError) as caught:
         id_segment("a/" + "b" * 500)
     assert len(str(caught.value)) < 250
+
+
+@pytest.mark.parametrize(
+    ("value", "encoded"),
+    [
+        ("a/b/c.txt", "a/b/c.txt"),
+        ("a b/c?d#e", "a%20b/c%3Fd%23e"),
+        ("a//b", "a//b"),
+        ("..x/.y", "..x/.y"),
+    ],
+)
+def test_path_segments_encodes_each_segment(value: str, encoded: str) -> None:
+    assert path_segments(value) == encoded
+
+
+@pytest.mark.parametrize("value", ["..", ".", "a/../b", "a/./b", "../..", "a/b/..", "./a"])
+def test_path_segments_refuses_a_dot_component(value: str) -> None:
+    with pytest.raises(ValueError, match="has a '.' or '..' component"):
+        path_segments(value, "path")
 
 
 # --- every call site --------------------------------------------------------------------------
@@ -570,5 +589,77 @@ async def test_list_space_datasets_refuses_an_unusable_resolved_space_id(
 
     with pytest.raises(ValueError):
         await spaces.list_space_datasets("a space name")
+
+    assert httpx_mock.get_requests() == []
+
+
+# --- a path in a URL: no dot component, each segment encoded ------------------------------------
+#
+# The HTTP client resolves `a/../b` to `b` and `../..` out of the path's parent, so the call would
+# create or move something somewhere else. A path is resolved (the lookup) or sent per segment.
+
+
+@pytest.mark.asyncio
+async def test_create_file_with_parents_sends_each_segment_encoded(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        method="POST", url=f"{PROVIDER}/lookup-file-id/%2FAlpha", json={"fileId": ID}
+    )
+    httpx_mock.add_response(method="PUT", json={"fileId": "new"})
+
+    assert await files.create_file("/Alpha/dir/a b/c?d#e.txt", "x", create_parents=True) == "new"
+
+    _, put = httpx_mock.get_requests()
+    assert sent_path(put) == f"/api/v3/oneprovider/data/{ID}/path/dir/a%20b/c%3Fd%23e.txt"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    ["/Alpha/a/../b.txt", "/Alpha/../b.txt", "/Alpha/a/./b.txt", "/Alpha/a/b/..", "/Alpha/../../x"],
+)
+async def test_create_file_with_parents_refuses_a_dot_component_before_any_request(
+    path: str, httpx_mock: HTTPXMock
+) -> None:
+    with pytest.raises(ValueError, match="has a '.' or '..' component"):
+        await files.create_file(path, "x", create_parents=True)
+
+    assert httpx_mock.get_requests() == []
+
+
+@pytest.mark.asyncio
+async def test_move_file_sends_the_destination_encoded(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        method="PUT",
+        url=f"{PROVIDER.removesuffix('/api/v3/oneprovider')}/cdmi/Alpha/a%20b/c%3Fd%23e",
+        status_code=201,
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{PROVIDER}/lookup-file-id/%2FAlpha%2Fa%20b%2Fc%3Fd%23e",
+        json={"fileId": ID},
+    )
+
+    assert await files.move_file("/Alpha/x.txt", "/Alpha/a b/c?d#e") == ID
+
+    put, _ = httpx_mock.get_requests()
+    assert put.url.raw_path.decode() == "/cdmi/Alpha/a%20b/c%3Fd%23e"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("src", "dst"),
+    [
+        ("/Alpha/x.txt", "/Alpha/a/../b.txt"),
+        ("/Alpha/x.txt", "/Alpha/../Beta/x.txt"),  # `..` would leave the space in the URL
+        ("/Alpha/x.txt", "/Alpha/a/./b.txt"),
+        ("/../x.txt", "/../y.txt"),  # the space itself
+        ("/./x.txt", "/./y.txt"),
+    ],
+)
+async def test_move_file_refuses_a_dot_component_in_the_destination_before_any_request(
+    src: str, dst: str, httpx_mock: HTTPXMock
+) -> None:
+    with pytest.raises(ValueError):
+        await files.move_file(src, dst)
 
     assert httpx_mock.get_requests() == []

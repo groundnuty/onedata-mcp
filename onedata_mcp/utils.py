@@ -456,6 +456,20 @@ def id_segment(value: str, what: str = "id", *, hint: str = "") -> str:
     return quote(value, safe="")
 
 
+def path_segments(value: str, what: str = "path", *, hint: str = "") -> str:
+    """A relative path as the last segments of a request path: each segment percent-encoded,
+    the `/` between them kept.
+
+    A `.` or `..` component is refused with a ValueError, before any request: the HTTP client
+    resolves it (`a/../b` is sent as `b`, `../..` climbs out of the path's parent), so the call
+    would act on another object. Empty components are sent as given.
+    """
+    if any(part in {".", ".."} for part in value.split("/")):
+        tail = f" {hint}" if hint else ""
+        raise ValueError(f"{what} {_shown_value(value)} has a '.' or '..' component.{tail}")
+    return quote(value, safe="/")
+
+
 def http_failure_message(
     config: OnedataConfig,
     method: str,

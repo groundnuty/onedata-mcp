@@ -16,6 +16,7 @@ from onedata_mcp.utils import (
     decode_response_body,
     http_failure_message,
     id_segment,
+    path_segments,
     redact_endpoints,
     request,
     transport_failure,
@@ -139,6 +140,7 @@ async def get_file_id(path: str) -> str:
 
 _SHOWN_MAX = 80
 _HOW_TO_NAME_A_FILE = "Give a path, /<space_name>/<path>, or a file id."
+_HOW_TO_NAME_A_FILE_PATH = "Give the full path, /<space_name>/<path>."
 
 
 def _file_id_segment(file_id: str) -> str:
@@ -788,9 +790,10 @@ async def create_file(path: str, content: str, *, create_parents: bool = False) 
         space_name, relative_path = normalized.split("/", 1)
         if not relative_path:
             raise ValueError("path must include a file path under the space")
+        # Refused before the lookup below: the HTTP client resolves `a/../b` to `b`.
+        encoded_path = path_segments(relative_path, "path", hint=_HOW_TO_NAME_A_FILE_PATH)
         root_id = await get_file_id(f"/{space_name}")
         root_segment = _file_id_segment(root_id)
-        encoded_path = quote(relative_path, safe="/")
         try:
             response = await request(
                 config,
@@ -998,7 +1001,7 @@ async def create_directory(path: str, *, create_parents: bool = True) -> dict[st
         response = await request(
             config,
             "PUT",
-            f"/data/{_file_id_segment(root_id)}/path/{quote(relative, safe='/')}",
+            f"/data/{_file_id_segment(root_id)}/path/{path_segments(relative, 'path')}",
             params={"type": "DIR", "create_parents": create_parents},
         )
     except OnedataApiError as e:
@@ -1182,8 +1185,10 @@ async def move_file(
     config = get_oneprovider_config()
     # CDMI is at the host root (/cdmi/...), not under /api/v3/oneprovider/.
     cdmi_base = config.base_url.removesuffix("/api/v3/oneprovider")
-    encoded_dst_inner = quote(dst_inner, safe="/")
-    cdmi_url = f"{cdmi_base}/cdmi/{quote(dst_space, safe='')}/{encoded_dst_inner}"
+    # Guarded: the HTTP client resolves a `..` component, so a destination `/a/../../b` would
+    # be sent to another space.
+    encoded_dst_inner = path_segments(dst_inner, "dst_path", hint=_HOW_TO_NAME_A_FILE_PATH)
+    cdmi_url = f"{cdmi_base}/cdmi/{id_segment(dst_space, 'space name')}/{encoded_dst_inner}"
 
     headers = dict(config.auth_headers)
     headers["X-CDMI-Specification-Version"] = "1.1.1"
