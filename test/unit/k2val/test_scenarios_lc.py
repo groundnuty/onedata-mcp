@@ -14,6 +14,7 @@ from benchmark.k2val.fixtures import PAGE_LIMIT_MAX
 from benchmark.k2val.scenarios import SCENARIOS, parse_scenarios
 from onedata_mcp.tool_maturity import ALL_KNOWN, FLAG_GATED
 from test.unit.k2val.file_tool_support import ctx, directory_of, result_of, snap, trial, verdict
+from test.unit.k2val.whole_ids import whole_id_of
 
 LC_IDS = ("LC", "LCn", "LCo", "LCp", "LCi")
 SYSTEM = ("sp", "logs-x", "vistula-dc", "nordic-marine-dc")  # names an answer may cite
@@ -263,7 +264,7 @@ async def test_lci_listing_by_the_given_id_passes_and_by_a_path_fails_the_requir
     cfg, api, fed, clock, tmp_path, tools_app
 ) -> None:
     real_new_id = fed.new_id
-    fed.new_id = lambda prefix: real_new_id(prefix) + "0" * 14  # 20+ characters, as on 25.0
+    fed.new_id = lambda prefix: whole_id_of(real_new_id(prefix))  # whole ids, as on 25.0
 
     async def by_id(app, brief):
         (dir_id,) = re.findall(r"`([^`]+)`", brief)

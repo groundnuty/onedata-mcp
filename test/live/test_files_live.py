@@ -223,9 +223,21 @@ async def test_attribute_errors_as_the_model_reads_them(files_mcp: FastMCP, prob
     # structured not-found ('Path "..." not found'); a bare 404 gives the possible causes.
     assert result.is_error is True and ("not found" in text or "answered 404" in text)
 
-    made_up = secrets.token_hex(16)
-    result, text = await _call(files_mcp, "get_file_attributes", {"file_id_or_path": made_up})
-    print(f"made-up id answered: {text}")
+    # A truncated copy of a real id (a model drops characters from the 180 it copies): refused
+    # here, before any request, as one that cannot be whole.
+    real_id = await get_file_id(f"{probe}/seed.txt")
+    truncated = real_id[:-2]
+    result, text = await _call(files_mcp, "get_file_attributes", {"file_id_or_path": truncated})
+    print(f"truncated id answered: {text}")
+    assert result.is_error is True
+    assert "is not a complete file id; copy it exactly from the earlier answer" in text
+
+    # A whole id that names nothing: one digit of its uuid changed. The shape check cannot see
+    # it, so Onedata answers; the answer is printed.
+    index = 27  # 16 header digits, 10 for "guid#": the first uuid byte is digits 26-27
+    changed = real_id[:index] + ("5" if real_id[index] != "5" else "6") + real_id[index + 1 :]
+    result, text = await _call(files_mcp, "get_file_attributes", {"file_id_or_path": changed})
+    print(f"well-formed id that names nothing answered: {text}")
     # TODO(first live run): pin 25.0's status and error id, printed above (a structured
     # not-found, badValueIdentifier, or spaceNotSupportedBy for an id it cannot decode).
     assert result.is_error is True

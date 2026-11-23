@@ -21,7 +21,13 @@ import re
 from typing import Any, Literal
 from urllib.parse import quote
 
-from onedata_mcp.api.files import _is_unconfirmed_not_found, _unconfirmed_hint
+from onedata_mcp.api.files import (
+    _file_id_parts,
+    _id_space_note,
+    _incomplete_file_id_message,
+    _is_unconfirmed_not_found,
+    _unconfirmed_hint,
+)
 from onedata_mcp.api.spaces import resolve_space_id_or_name
 from onedata_mcp.config import get_oneprovider_config
 from onedata_mcp.utils import OnedataApiError, bound_message, redact_endpoints, request
@@ -169,9 +175,21 @@ async def create_transfer(
 # passed on unchanged. Every hint is redacted and bounded as a whole. Onedata does not refuse a
 # second replication of a file that is already being copied: no status in the swagger says so,
 # and nothing here pretends otherwise.
+#
+# A file given as an id is the one a model copied out of an earlier answer, and a bad copy (a
+# dropped, changed or doubled character) is answered with a 403 or `spaceNotSupportedBy` that
+# says nothing about a copy. So an id that cannot be whole is refused before any request
+# (`_file_id_parts`), and for an id both answers say the id may be mis-copied. A path keeps its
+# hints.
 # ---------------------------------------------------------------------------
 
 _SHOWN_MAX = 80
+# In the result of a schedule (F2, design/12): gate 4 had models answer "done" from the
+# transfer's status. It names no tool: the tool that reads the blocks may not be offered.
+SCHEDULED_NOTE = (
+    "Scheduled, not yet copied: judge completion by the target provider's blocks of the "
+    "file, not by the transfer's status."
+)
 _PATH_FORM = "a path starting with '/': /<space_name>/<path_to_file>"
 _ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _PROVIDER_FIELDS = {"replicatingProviderId", "replicating_provider_id", "providerId"}
@@ -191,9 +209,10 @@ def _check_replication_args(file_arg: str, target: str) -> None:
 
     A value with a `/` that does not start with one is a relative path (Onedata would read it
     as a malformed file id). A path must name a space and an entry in it, `/<space>/<name>` at
-    least: `/log.dat` is missing its space. `.` and `..` name nothing. Ids are otherwise opaque,
-    so nothing stricter is checked: a provider NAME passes here and is answered with its id
-    after Onedata refuses it.
+    least: `/log.dat` is missing its space. `.` and `..` name nothing. A file that is not a
+    path must be a whole file id (`_file_id_parts`): a truncated, extended or non-hex value
+    cannot be one. A provider id is opaque, so nothing stricter is checked there: a provider
+    NAME passes here and is answered with its id after Onedata refuses it.
     """
     if not file_arg:
         raise ValueError(f"file_id_or_path is empty: give a file id, or {_PATH_FORM}.")
@@ -211,6 +230,8 @@ def _check_replication_args(file_arg: str, target: str) -> None:
             f"file_id_or_path {_shown(file_arg)} is not a file id or a path: give a file id, or "
             f"{_PATH_FORM}."
         )
+    if not file_arg.startswith("/") and _file_id_parts(file_arg) is None:
+        raise ValueError(_incomplete_file_id_message(file_arg))
     if not target:
         raise ValueError(
             "target_provider_id is empty: give the id of a provider that supports the file's space."
@@ -368,12 +389,25 @@ def _lookup_error_hint(shown_file: str, error: OnedataApiError) -> str | None:
     return None
 
 
-def _permission_hint(shown_file: str, error: OnedataApiError) -> str | None:
-    """For a 403, or a 4xx whose body says forbidden. The same body on a 5xx is not one."""
+def _permission_hint(
+    shown_file: str, error: OnedataApiError, *, copied_id: bool = False
+) -> str | None:
+    """For a 403, or a 4xx whose body says forbidden. The same body on a 5xx is not one.
+    `copied_id`: the file was given as an id, which a bad copy is refused like a missing
+    privilege is (the note for the id's space follows, `_replication_error_hint`)."""
     status, error_id, errno, _ = _error_parts(error)
     if status == 403 or (
         _is_client_error(status) and (error_id == "forbidden" or errno in {"eacces", "eperm"})
     ):
+        if copied_id:
+            return (
+                f"Onedata refused the replication of {shown_file} with a permission error. The "
+                "file id may be mis-copied (an id with a missing or changed character is "
+                "refused like this): copy it exactly from the earlier answer, or give the "
+                f"path, {_PATH_FORM}. If the id is exact, the token may not schedule "
+                "replications in this space (the space privilege space_schedule_replication), "
+                "may not read the file, or is read-only."
+            )
         return (
             f"Not allowed to schedule a replication of {shown_file}: the token may not schedule "
             "replications in this space (the space privilege space_schedule_replication), may "
@@ -395,8 +429,10 @@ async def _replication_error_hint(
     - a target that is the name of one of the space's providers: "Pass its id ...", whatever
       Onedata said about it (it never says the provider does not support the space), unless
       Onedata names the file field;
-    - Onedata says the space is not supported by that id: no provider with that id supports
-      the space (true of a name, too, when the providers could not be listed);
+    - Onedata says the space is not supported: for a file given as a path, no provider with
+      the target's id supports the space (true of a name, too, when the providers could not be
+      listed); for a file given as an id it may as well be the id's space, so the id may be
+      mis-copied (and a 403 for an id says so too);
     - `details.key` names the provider field: not a valid provider id for the space (no claim
       about support);
     - the file: blamed only when the key names the file field;
@@ -407,12 +443,12 @@ async def _replication_error_hint(
     """
     status, error_id, errno, key = _error_parts(error)
     shown_file, shown_target = _shown(file_arg), _shown(target)
-    if hint := _permission_hint(shown_file, error):
-        return hint
+    from_path = file_arg.startswith("/")
+    if hint := _permission_hint(shown_file, error, copied_id=not from_path):
+        return hint + (await _id_space_note(file_arg, list_spaces=False) if not from_path else "")
     if not _is_client_error(status):
         return None
     not_found = status == 404 or error_id == "notFound" or errno == "enoent"
-    from_path = file_arg.startswith("/")
     file_blamed = key in _FILE_FIELDS
     provider_blamed = error_id == "spaceNotSupportedBy" or key in _PROVIDER_FIELDS
     if not (provider_blamed or file_blamed or not_found or status == 400):
@@ -424,6 +460,23 @@ async def _replication_error_hint(
         return (
             f"Pass its id {pid!r}, not its name: {shown_target} is the name of a provider that "
             f"supports the space of {shown_file}. {_providers_sentence(providers)}"
+        )
+    if error_id == "spaceNotSupportedBy" and not from_path:
+        # Onedata says a space is not supported, not whose: the target's, or the one in a file
+        # id that was copied wrongly.
+        unseen = (await _id_space_note(file_arg, list_spaces=False)).strip()
+        return " ".join(
+            part
+            for part in (
+                f"Cannot replicate {shown_file} to {shown_target}: Onedata says a space is not "
+                "supported. Either the file id may be mis-copied (an id with a missing or "
+                "changed character gives this answer), so copy it exactly from the earlier "
+                f"answer or give the path, or no provider with the id {shown_target} supports "
+                "the file's space.",
+                unseen,
+                _providers_sentence(providers),
+            )
+            if part
         )
     if error_id == "spaceNotSupportedBy":
         return (
@@ -485,7 +538,8 @@ async def schedule_file_replication(
         target_provider_id: provider the data is copied TO
             (``replicatingProviderId``).
 
-    Returns: ``{"transferId": "<id>"}``.
+    Returns: ``{"transferId": "<id>", "note": SCHEDULED_NOTE}``. The note repeats, where a
+    model reads the result, what the tool's description says: scheduled is not copied.
     """
     file_arg, target = file_id_or_path.strip(), target_provider_id.strip()
     _check_replication_args(file_arg, target)
@@ -497,9 +551,10 @@ async def schedule_file_replication(
             raise
         raise _hinted(hint, error) from error
     try:
-        return await create_transfer(file_id, "replication", replicating_provider_id=target)
+        scheduled = await create_transfer(file_id, "replication", replicating_provider_id=target)
     except OnedataApiError as error:
         hint = await _replication_error_hint(error, file_arg, file_id, target)
         if hint is None:
             raise
         raise _hinted(hint, error) from error
+    return {**scheduled, "note": SCHEDULED_NOTE} if isinstance(scheduled, dict) else scheduled

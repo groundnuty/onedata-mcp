@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from urllib.parse import quote
 
+import httpx
 import pytest
 from fastmcp import Client, FastMCP
 from pytest_httpx import HTTPXMock
@@ -22,8 +24,23 @@ from onedata_mcp.tool_maturity import ALL_KNOWN, FLAG_GATED
 from onedata_mcp.utils import OnedataApiError
 
 API = "https://provider.example/api/v3/oneprovider"
-DIR = "0000000000DiReCt0ry0123456"
+SPACE_ID = "9JO5__9nL1b01YEvwnft1r20gwgwlkIp19ND_n8hgxs"
+
+
+def whole_id(uuid: str = "0cb444f249735948f20eaf93a2dfe54bch3e33", space_id: str = SPACE_ID) -> str:
+    """A file id of the 25.0 shape: an 8-byte header whose sixth byte is the payload's length,
+    then `guid#<uuid>#<space id>`, all in hex."""
+    payload = f"guid#{uuid}#{space_id}".encode()
+    return (bytes([0, 0, 0, 0, 0, len(payload), 0x52, 0x73]) + payload).hex().upper()
+
+
+DIR = whole_id()
 PAGE = {"children": [], "isLast": True, "nextPageToken": None}
+TOKEN_SPACES: list[dict] = []  # what `GET /spaces` answers: the token's spaces; a test sets it
+
+
+def _token_spaces(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, json=TOKEN_SPACES)
 
 
 @pytest.fixture(autouse=True)
@@ -33,8 +50,8 @@ def _env(monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock) -> None:
     monkeypatch.setenv("ONEDATA_ONEZONE_HOST", "https://onezone.example")
     monkeypatch.setenv("ONEDATA_ONEZONE_TOKEN", "token")
     monkeypatch.setenv("ONEDATA_ALLOW_INSECURE_TLS", "false")
-    httpx_mock.add_response(
-        method="GET", url=f"{API}/spaces", json=[], is_reusable=True, is_optional=True
+    httpx_mock.add_callback(
+        _token_spaces, method="GET", url=f"{API}/spaces", is_reusable=True, is_optional=True
     )
 
 
@@ -106,17 +123,70 @@ async def test_a_token_with_a_nonzero_offset_is_refused_before_any_request(
 # --- the id goes into the path percent-encoded -----------------------------------------------
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("value", "encoded"), [("ab?c", "ab%3Fc"), ("ab#c", "ab%23c"), ("ab/x", "ab%2Fx")]
 )
-async def test_an_id_is_percent_encoded(httpx_mock: HTTPXMock, value: str, encoded: str) -> None:
-    httpx_mock.add_response(method="GET", json=PAGE)
+def test_an_id_is_percent_encoded_into_its_path_segment(value: str, encoded: str) -> None:
+    """The last defence: `?` and `#` would cut the request path short and `/` would add
+    segments. No such value reaches it through the tool, which refuses it first (below)."""
+    assert files._id_in_path(value, value) == encoded
 
-    await files.list_children(value, limit=10, offset=0)
 
-    (sent,) = listings(httpx_mock)
-    assert sent.url.raw_path.decode() == f"/api/v3/oneprovider/data/{encoded}/children"
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["ab?c", "ab#c", "ab/x"])
+async def test_an_id_with_url_characters_is_refused_before_any_request(
+    httpx_mock: HTTPXMock, value: str
+) -> None:
+    with pytest.raises(ValueError, match=r"is not a complete file id|Paths must start with"):
+        await files.list_children(value, limit=10, offset=0)
+
+    assert httpx_mock.get_requests() == []
+
+
+def mis_copies() -> dict[str, str]:
+    """What a model does to a copied id (gate 4): drops, changes and doubles characters."""
+    return {
+        "truncated, a digit short": DIR[:-1],
+        "truncated, a byte short": DIR[:-2],
+        "a digit dropped in the middle": DIR[:90] + DIR[91:],
+        "a byte dropped in the middle": DIR[:90] + DIR[92:],
+        "a character changed to a non-hex one": DIR[:60] + "g" + DIR[61:],
+        "doubled": DIR + DIR,
+        "a digit added": DIR[:90] + "a" + DIR[90:],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", list(mis_copies()))
+async def test_an_id_that_cannot_be_whole_is_refused_before_any_request(
+    httpx_mock: HTTPXMock, mcp: FastMCP, name: str
+) -> None:
+    copied = mis_copies()[name]
+
+    with pytest.raises(ValueError) as caught:
+        await files.list_children(copied, limit=10, offset=0)
+    is_error, text = await call(mcp, {"parent_id_or_path": copied})
+
+    for shown in (str(caught.value), text):
+        assert files._shown(copied) in shown
+        assert "is not a complete file id; copy it exactly from the earlier answer" in shown
+        assert "or give the path" in shown
+    assert is_error is True
+    assert httpx_mock.get_requests() == []
+
+
+@pytest.mark.asyncio
+async def test_a_path_is_not_taken_for_an_id_and_a_whole_id_is_sent(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(method="POST", url=lookup_url("/Alpha/d"), json={"fileId": DIR})
+    httpx_mock.add_response(method="GET", url=f"{API}/data/{DIR}/children", json=PAGE)
+    httpx_mock.add_response(method="GET", url=f"{API}/data/{DIR}/children", json=PAGE)
+
+    await files.list_children("/Alpha/d", limit=10, offset=0)
+    await files.list_children(DIR, limit=10, offset=0)
+
+    assert len(listings(httpx_mock)) == 2
 
 
 @pytest.mark.asyncio
@@ -212,7 +282,9 @@ async def test_a_file_given_by_id_is_told_from_a_one_file_directory_by_its_type(
     with pytest.raises(NotADirectoryError) as caught:
         await files.list_children(DIR, limit=10, offset=0)
 
-    assert str(caught.value) == f"'{DIR}' is a regular file, not a directory; it has no children."
+    assert str(caught.value) == (
+        f"{files._shown(DIR)} is a regular file, not a directory; it has no children."
+    )
 
 
 @pytest.mark.asyncio
@@ -377,7 +449,7 @@ async def test_a_5xx_that_mentions_a_missing_item_keeps_the_uncertainty(
     hint = str(caught.value).split(" [", 1)[0]
     assert hint.startswith(
         f"This provider answered {status} and mentioned a missing item: the provider failed, "
-        f"and file id '{DIR}' may also not exist."
+        f"and file id {files._shown(DIR)} may also not exist."
     )
     assert "reports nothing" not in hint
 
@@ -437,25 +509,35 @@ async def test_a_file_on_the_way_of_the_path_names_a_component(httpx_mock: HTTPX
 @pytest.mark.parametrize(
     ("error", "starts"),
     [
-        (onedata_error(404, "notFound"), f"This provider reports nothing at file id '{DIR}'"),
+        (
+            onedata_error(404, "notFound"),
+            f"This provider reports nothing at file id {files._shown(DIR)}",
+        ),
         (
             onedata_error(400, "posix", "enoent"),
-            f"This provider reports nothing at file id '{DIR}'",
+            f"This provider reports nothing at file id {files._shown(DIR)}",
         ),
         (
             onedata_error(400, "badValueIdentifier", key="id"),
-            f"This provider rejected file id '{DIR}'",
+            f"This provider rejected file id {files._shown(DIR)}",
         ),
         (
             onedata_error(400, "spaceNotSupportedBy"),
-            f"This provider does not support the space of file id '{DIR}', so it cannot list",
+            f"Could not list file id {files._shown(DIR)}: this provider reports that it does "
+            "not support the space in the id. The id may be mis-copied",
         ),
         (
             {"status_code": 404, "json": {"error": {"description": "(Onedata's own text)"}}},
-            f"This provider answered 404 for file id '{DIR}' without saying why",
+            f"This provider answered 404 for file id {files._shown(DIR)} without saying why",
         ),
-        (onedata_error(403, "forbidden"), f"Not allowed to list file id '{DIR}'"),
-        (onedata_error(400, "posix", "eacces"), f"Not allowed to list file id '{DIR}'"),
+        (
+            onedata_error(403, "forbidden"),
+            f"Could not list file id {files._shown(DIR)}: the id may be mis-copied",
+        ),
+        (
+            onedata_error(400, "posix", "eacces"),
+            f"Could not list file id {files._shown(DIR)}: the id may be mis-copied",
+        ),
     ],
 )
 async def test_errors_say_what_to_do(httpx_mock: HTTPXMock, error: dict, starts: str) -> None:
@@ -466,6 +548,183 @@ async def test_errors_say_what_to_do(httpx_mock: HTTPXMock, error: dict, starts:
 
     assert str(caught.value).startswith(starts)
     assert "(Onedata's own text)" in str(caught.value)
+
+
+# --- an id the caller copied: a refusal may only mean a bad copy ------------------------------
+
+
+def _the_token_sees(monkeypatch: pytest.MonkeyPatch, *space_ids: str) -> None:
+    spaces = [{"name": f"Space{i}", "spaceId": sid} for i, sid in enumerate(space_ids)]
+    monkeypatch.setattr(sys.modules[__name__], "TOKEN_SPACES", spaces)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [onedata_error(403, "forbidden"), onedata_error(400, "posix", "eacces")],
+    ids=["403", "eacces"],
+)
+async def test_a_permission_refusal_of_an_id_says_it_may_be_mis_copied(
+    httpx_mock: HTTPXMock, monkeypatch: pytest.MonkeyPatch, error: dict
+) -> None:
+    _the_token_sees(monkeypatch, SPACE_ID)  # the id's space is one of them
+    httpx_mock.add_response(method="GET", url=f"{API}/data/{DIR}/children", **error)
+
+    with pytest.raises(OnedataApiError) as caught:
+        await files.list_children(DIR, limit=10, offset=0)
+
+    text = str(caught.value)
+    assert text.startswith(f"Could not list file id {files._shown(DIR)}: the id may be mis-copied")
+    assert "or the token may have no access to the file" in text  # the other reading stays
+    assert "Copy the id exactly from the earlier answer, or give the path" in text
+    assert "will not help" not in text and "Not allowed" not in text
+    assert "not one this token sees" not in text
+    assert "(Onedata's own text)" in text
+
+
+@pytest.mark.asyncio
+async def test_an_id_whose_space_the_token_does_not_see_says_so(
+    httpx_mock: HTTPXMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _the_token_sees(monkeypatch, "someOtherSpace0123456789")
+    httpx_mock.add_response(
+        method="GET", url=f"{API}/data/{DIR}/children", **onedata_error(403, "forbidden")
+    )
+
+    with pytest.raises(OnedataApiError) as caught:
+        await files.list_children(DIR, limit=10, offset=0)
+
+    assert "the id may be mis-copied" in str(caught.value)
+    assert "The space in the id is not one this token sees at this provider." in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_a_space_not_supported_for_an_id_says_it_may_be_mis_copied_and_lists_the_spaces(
+    httpx_mock: HTTPXMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _the_token_sees(monkeypatch, "s0")
+    httpx_mock.add_response(
+        method="GET",
+        url="https://onezone.example/api/v3/onezone/spaces/s0",
+        json={"name": "Alpha", "spaceId": "s0"},
+    )
+    httpx_mock.add_response(
+        method="GET", url=f"{API}/data/{DIR}/children", **onedata_error(400, "spaceNotSupportedBy")
+    )
+
+    with pytest.raises(OnedataApiError) as caught:
+        await files.list_children(DIR, limit=10, offset=0)
+
+    text = str(caught.value)
+    assert text.startswith(f"Could not list file id {files._shown(DIR)}: this provider reports")
+    assert "The id may be mis-copied" in text and "or give the path" in text
+    assert "The space in the id is not one this token sees at this provider." in text
+    assert 'Spaces this token sees at this provider: "Alpha".' in text
+    assert "so it cannot list it here" not in text  # the old claim about the provider
+
+
+@pytest.mark.asyncio
+async def test_the_refusals_of_a_path_keep_their_hints_and_read_no_spaces(
+    httpx_mock: HTTPXMock,
+) -> None:
+    """A path that resolved is not a bad copy: pinned as they always were."""
+    httpx_mock.add_response(method="POST", url=lookup_url("/Alpha/d"), json={"fileId": DIR})
+    httpx_mock.add_response(
+        method="GET", url=f"{API}/data/{DIR}/children", **onedata_error(403, "forbidden")
+    )
+    with pytest.raises(OnedataApiError) as caught:
+        await files.list_children("/Alpha/d", limit=10, offset=0)
+    assert str(caught.value).startswith(
+        "Not allowed to list path '/Alpha/d': the token has no access to it. Calling again "
+        "will not help."
+    )
+
+    httpx_mock.add_response(method="POST", url=lookup_url("/Beta/d"), json={"fileId": DIR})
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{API}/data/{DIR}/children",
+        **onedata_error(400, "spaceNotSupportedBy"),
+    )
+    with pytest.raises(OnedataApiError) as caught:
+        await files.list_children("/Beta/d", limit=10, offset=0)
+    assert str(caught.value).startswith(
+        "This provider does not support the space of path '/Beta/d', so it cannot list it here; "
+        "the space may still exist."
+    )
+    assert "mis-copied" not in str(caught.value)
+
+
+# --- F3: the answer itself says more entries follow --------------------------------------------
+
+MORE = "More entries follow: call again with token set to nextPageToken."
+TWO = [{"name": "a.dat"}, {"name": "b.dat"}]  # one entry would be read as a file listed as itself
+
+
+@pytest.mark.asyncio
+async def test_a_page_that_is_not_the_last_says_more_entries_follow(
+    httpx_mock: HTTPXMock,
+) -> None:
+    page = {"children": TWO, "isLast": False, "nextPageToken": "tok-1"}
+    httpx_mock.add_response(method="GET", url=f"{API}/data/{DIR}/children", json=page)
+
+    out = await files.list_children(DIR, attributes=["name"], limit=1, offset=0)
+
+    assert out["more"] == MORE
+    assert {k: v for k, v in out.items() if k != "more"} == page  # nothing else changed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "page",
+    [
+        {"children": [], "isLast": True, "nextPageToken": None},
+        {"children": TWO, "isLast": True},
+        {"children": TWO},  # an answer that does not say: nothing is claimed
+    ],
+    ids=["last", "last-no-token-key", "no-isLast"],
+)
+async def test_the_last_page_and_an_answer_that_does_not_say_get_no_note(
+    httpx_mock: HTTPXMock, page: dict
+) -> None:
+    httpx_mock.add_response(method="GET", url=f"{API}/data/{DIR}/children", json=page)
+
+    out = await files.list_children(DIR, attributes=["name"], limit=10, offset=0)
+
+    assert "more" not in out
+    assert out == page
+
+
+@pytest.mark.asyncio
+async def test_a_page_that_is_not_the_last_but_has_no_token_does_not_send_the_caller_to_one(
+    httpx_mock: HTTPXMock,
+) -> None:
+    page = {"children": TWO, "isLast": False, "nextPageToken": None}
+    httpx_mock.add_response(method="GET", url=f"{API}/data/{DIR}/children", json=page)
+
+    out = await files.list_children(DIR, attributes=["name"], limit=1, offset=0)
+
+    assert out["more"] == "More entries follow."
+
+
+@pytest.mark.asyncio
+async def test_the_note_reaches_the_model_and_agrees_with_the_description(
+    httpx_mock: HTTPXMock, mcp: FastMCP
+) -> None:
+    page = {"children": TWO, "isLast": False, "nextPageToken": "tok-1"}
+    httpx_mock.add_response(method="GET", url=f"{API}/data/{DIR}/children", json=page)
+
+    async with Client(mcp) as client:
+        result = await client.call_tool("list_children", {"parent_id_or_path": DIR})
+        tool = next(t for t in await client.list_tools() if t.name == "list_children")
+
+    text = "\n".join(c.text for c in result.content if hasattr(c, "text"))
+    assert result.structured_content["more"] == MORE
+    assert MORE in text  # in the text a client shows, as well
+    # the description says the same, in the same words about the same two fields
+    description = " ".join(tool.description.split())
+    assert "call again with `token` set to `nextPageToken`" in description
+    assert "nextPageToken" in MORE and "token set to" in MORE
+    assert [name for name in (ALL_KNOWN | FLAG_GATED) if name in MORE] == []
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ from benchmark.k2val.file_scenarios import FA_NAMES, FILE_SCENARIOS
 from benchmark.k2val.scenarios import SCENARIOS, parse_scenarios
 from onedata_mcp.tool_maturity import ALL_KNOWN, FLAG_GATED
 from test.unit.k2val.file_tool_support import ctx, directory_of, result_of, snap, trial, verdict
+from test.unit.k2val.whole_ids import whole_id_of
 
 FA_IDS = ("FA", "FAi", "FAn")
 
@@ -169,10 +170,10 @@ async def test_fai_gives_the_built_ids_and_wants_a_name(
     cfg, api, fed, clock, tmp_path, tools_app
 ) -> None:
     real_new_id = fed.new_id
-    fed.new_id = lambda prefix: real_new_id(prefix) + "0" * 14  # 20+ characters, as on 25.0
+    fed.new_id = lambda prefix: whole_id_of(real_new_id(prefix))  # whole ids, as on 25.0
 
     async def model(app, brief):
-        ids = re.findall(r"\b(file\d{20})\b", brief)
+        ids = re.findall(r"\b([0-9A-F]{60,})\b", brief)
         assert len(ids) == 4
         return await odd_one_out(app, ids)
 

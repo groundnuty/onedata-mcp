@@ -1,5 +1,6 @@
 import json
 import posixpath
+import re
 from asyncio.log import logger
 from collections.abc import Iterable
 from typing import Any
@@ -7,7 +8,7 @@ from urllib.parse import quote
 
 import httpx
 
-from onedata_mcp.api.spaces import list_user_spaces
+from onedata_mcp.api.spaces import _space_ids_of_provider_listing, list_user_spaces
 from onedata_mcp.config import get_oneprovider_config
 from onedata_mcp.utils import (
     OnedataApiError,
@@ -150,19 +151,111 @@ def _target(file_id_or_path: str) -> str:
     return f"{kind} {_shown(file_id_or_path)}"
 
 
-def _id_in_path(file_id: str, file_id_or_path: str) -> str:
-    """The file id as one percent-encoded path segment.
-
-    Unencoded, a `?` or `#` in an id cuts the request path short, and a `/` adds segments. An
-    empty id, `.` or `..` is refused before any request: the HTTP client resolves dot segments
-    to another URL (`/data/..` is the API root)."""
+def _refuse_unusable_id(file_id: str, file_id_or_path: str) -> None:
+    """An empty id, `.` or `..` is refused before any request: the HTTP client resolves dot
+    segments to another URL (`/data/..` is the API root)."""
     if not file_id.strip():
         raise ValueError(f"The file id or path is empty. {_HOW_TO_NAME_A_FILE}")
     if file_id.strip() in {".", ".."}:
         raise ValueError(
             f"{_shown(file_id_or_path)} is not a file id or path. {_HOW_TO_NAME_A_FILE}"
         )
+
+
+def _id_in_path(file_id: str, file_id_or_path: str) -> str:
+    """The file id as one percent-encoded path segment.
+
+    Unencoded, a `?` or `#` in an id cuts the request path short, and a `/` adds segments. An
+    empty id, `.` or `..` is refused (`_refuse_unusable_id`)."""
+    _refuse_unusable_id(file_id, file_id_or_path)
     return quote(file_id, safe="")
+
+
+# --- A complete file id, and a refusal that may only mean a bad copy ----------------------------
+#
+# A model copies a 180-character hex id out of an earlier answer, and sometimes drops, changes
+# or doubles characters (design/12-14, gate 4). Onedata answers such an id with 403,
+# `spaceNotSupportedBy`, `badValueIdentifier` or a bare 400, none of which says "bad copy". So
+# the tools refuse an id that cannot be whole before any request, and read a 403 or
+# `spaceNotSupportedBy` for an id as possibly a bad copy. Only for an id the caller copied
+# (`copied_id`, which the MCP tool sets): readiness and the stable download tool pass ids that
+# came from Onedata and keep their own handling.
+
+_FILE_ID_HEADER = 8  # bytes
+_FILE_ID_PART = re.compile(r"[A-Za-z0-9_-]{1,128}")
+_UNSEEN_SPACE = " The space in the id is not one this token sees at this provider."
+
+
+def _file_id_parts(value: str) -> tuple[str, str] | None:
+    """(uuid, space id) of a complete 25.0 file id; None for anything else.
+
+    The id is hex. It decodes to an 8-byte header and the ASCII payload `guid#<uuid>#<space
+    id>`. The header's sixth byte is the payload's length (CDMI object-id layout): the
+    swagger's example id has 0x5C = 92 payload bytes, and all 383 distinct ids that a 25.0
+    Oneprovider returned in the validation runs, trash and archive roots included, have their
+    own payload length there, `guid#` at byte 8 and exactly two more `#`. The length byte is
+    what shows a byte dropped from an otherwise well-formed id. The rest of the header is not
+    checked (the 2-byte checksum is not known here), so a header spliced onto another file's
+    payload passes; a changed hex digit inside the uuid passes too, and is Onedata's to refuse.
+    """
+    if not value or len(value) % 2 or not re.fullmatch(r"[0-9A-Fa-f]+", value):
+        return None
+    raw = bytes.fromhex(value)
+    payload = raw[_FILE_ID_HEADER:]
+    if not payload or (len(payload) <= 0xFF and raw[5] != len(payload)):
+        return None
+    try:
+        parts = payload.decode("ascii").split("#")
+    except UnicodeDecodeError:
+        return None
+    if len(parts) != 3 or parts[0] != "guid":
+        return None
+    uuid, space_id = parts[1], parts[2]
+    if not (_FILE_ID_PART.fullmatch(uuid) and _FILE_ID_PART.fullmatch(space_id)):
+        return None
+    return uuid, space_id
+
+
+def _incomplete_file_id_message(value: str) -> str:
+    """What to tell the caller about a value that is not a path and cannot be a whole id."""
+    if "/" in value:  # a relative path
+        return (
+            f"Paths must start with '/': use /<space_name>/<path> (got {_shown(value)}), "
+            "or give a file id."
+        )
+    return (
+        f"{_shown(value)} is not a complete file id; copy it exactly from the earlier answer, "
+        "or give the path, /<space_name>/<path>."
+    )
+
+
+def _require_complete_id(value: str) -> None:
+    """Refuse, before any request, an id that cannot be whole (`_file_id_parts`). A path is not
+    checked."""
+    _refuse_unusable_id(value, value)
+    if _file_id_parts(value) is None:
+        raise ValueError(_incomplete_file_id_message(value))
+
+
+async def _space_of_id_unseen(file_id: str) -> bool:
+    """The id is whole, and its space is not among the token's spaces at this provider
+    (`GET /spaces`, the ids only). False when that cannot be established: it is a hint."""
+    parts = _file_id_parts(file_id)
+    if parts is None:
+        return False
+    try:
+        response = await request(get_oneprovider_config(), "GET", "/spaces")
+        seen = set(_space_ids_of_provider_listing(response["body"]))
+    except Exception:  # noqa: BLE001 - the hint is best effort
+        return False
+    return bool(seen) and parts[1] not in seen
+
+
+async def _id_space_note(file_id: str, *, list_spaces: bool) -> str:
+    """For a refused id: that its space is not one the token sees (when that is so), and with
+    `list_spaces` the names of the spaces it does see. On the error path only."""
+    note = _UNSEEN_SPACE if await _space_of_id_unseen(file_id) else ""
+    return note + (await _visible_spaces() if list_spaces else "")
 
 
 def _status(error: OnedataApiError) -> int | None:
@@ -269,19 +362,42 @@ def _bare_404_hint(target: str, what: str) -> str:
 
 
 async def _file_error(
-    error: OnedataApiError, file_id_or_path: str, action: str, *, lookup: bool = False
+    error: OnedataApiError,
+    file_id_or_path: str,
+    action: str,
+    *,
+    lookup: bool = False,
+    copied_id: bool = False,
 ) -> Exception:
     """What a failed call on a file or directory tells the caller, from what this provider
     established; the error itself when there is nothing to add. A hint is followed by Onedata's
     own message. Specific diagnoses need distinguishing evidence: a 403 or an access errno, a
     structured not-found, `spaceNotSupportedBy`, an `enotdir` while resolving a path, an id
     rejected as such. A bare 404 gets the possible causes, not one of them. `lookup`: the error
-    came from resolving the path."""
+    came from resolving the path. `copied_id`: the caller typed the id from an earlier answer,
+    so for an id a 403 or `spaceNotSupportedBy` may mean a bad copy and says so (a path keeps
+    the diagnoses above)."""
     target = _target(file_id_or_path)
-    if _is_forbidden(error):
+    copied = copied_id and not lookup and not file_id_or_path.startswith("/")
+    if _is_forbidden(error) and copied:
+        hint = (
+            f"Could not {action} {target}: the id may be mis-copied (an id with a missing or "
+            "changed character is refused like this), or the token may have no access to the "
+            "file. Copy the id exactly from the earlier answer, or give the path, "
+            f"/<space_name>/<path>.{await _id_space_note(file_id_or_path, list_spaces=False)}"
+        )
+    elif _is_forbidden(error):
         hint = (
             f"Not allowed to {action} {target}: the token has no access to it. Calling again "
             "will not help."
+        )
+    elif _is_client_error(error) and error.error_id == "spaceNotSupportedBy" and copied:
+        hint = (
+            f"Could not {action} {target}: this provider reports that it does not support the "
+            "space in the id. The id may be mis-copied (an id with a missing or changed "
+            "character gives the same answer): copy it exactly from the earlier answer, or "
+            "give the path, /<space_name>/<path>."
+            f"{await _id_space_note(file_id_or_path, list_spaces=True)}"
         )
     elif _is_client_error(error) and error.error_id == "spaceNotSupportedBy":
         hint = (
@@ -332,10 +448,13 @@ async def _lookup(path: str, action: str) -> str:
     return response["body"]["fileId"]
 
 
-async def _file_id_for(file_id_or_path: str, action: str) -> str:
-    """A path resolved with `_lookup`; an id as given."""
+async def _file_id_for(file_id_or_path: str, action: str, *, copied_id: bool = False) -> str:
+    """A path resolved with `_lookup`; an id as given, refused first when `copied_id` and it
+    cannot be whole (`_require_complete_id`)."""
     if file_id_or_path.startswith("/"):
         return await _lookup(file_id_or_path, action)
+    if copied_id:
+        _require_complete_id(file_id_or_path)
     return file_id_or_path
 
 
@@ -343,18 +462,24 @@ async def get_file_attributes(
     file_id_or_path: str,
     *,
     attributes: Iterable[str] | None = DEFAULT_FILE_ATTRIBUTE_KEYS,
+    copied_id: bool = False,
 ) -> dict[str, Any]:
     """The attributes of a file or directory, given by path or id.
 
     Without `attributes` (or with an empty list), the default set is asked for. A deprecated
     attribute name is refused with its new name; a failure is raised with what this provider
-    established about it (`_file_error`), followed by Onedata's own message."""
+    established about it (`_file_error`), followed by Onedata's own message.
+
+    `copied_id` is set by the MCP tool, whose id a model copied from an earlier answer: an id
+    that cannot be whole is then refused before any request, and a refusal of an id may say it
+    was mis-copied. The other callers (the stable download tool, readiness) pass ids that came
+    from Onedata and keep their handling."""
     config = get_oneprovider_config()
     requested_attributes = tuple[str, ...](attributes or DEFAULT_FILE_ATTRIBUTE_KEYS)
     _reject_deprecated_attributes(requested_attributes)
 
     action = "read the attributes of"
-    file_id = await _file_id_for(file_id_or_path, action)
+    file_id = await _file_id_for(file_id_or_path, action, copied_id=copied_id)
     try:
         response = await request(
             config,
@@ -363,7 +488,7 @@ async def get_file_attributes(
             json_body={"attributes": list(requested_attributes)},
         )
     except OnedataApiError as e:
-        replacement = await _file_error(e, file_id_or_path, action)
+        replacement = await _file_error(e, file_id_or_path, action, copied_id=copied_id)
         if replacement is e:
             raise
         raise replacement from e
@@ -393,7 +518,9 @@ async def list_children(
     sent, and a non-zero offset with a token is refused. A failure is raised with what this
     provider established about it (`_file_error`; not a directory), followed by Onedata's own
     message. 25.0 lists a regular file as its own only entry instead of failing; that first
-    page is refused here (`_lists_itself`)."""
+    page is refused here (`_lists_itself`). An id that cannot be whole is refused before any
+    request, and a 403 or `spaceNotSupportedBy` for an id says it may be mis-copied. When
+    `isLast` is false the answer says so in `more` (`_more_note`)."""
     config = get_oneprovider_config()
     requested_attributes = tuple[str, ...](attributes or DEFAULT_FILE_ATTRIBUTE_KEYS)
     _reject_deprecated_attributes(requested_attributes)
@@ -408,7 +535,7 @@ async def list_children(
     else:
         request_body["offset"] = offset
 
-    parent_id = await _file_id_for(parent_id_or_path, "list")
+    parent_id = await _file_id_for(parent_id_or_path, "list", copied_id=True)
     try:
         response = await request(
             config,
@@ -432,7 +559,7 @@ async def list_children(
                 "the previous page's nextPageToken; to start over, list again without a token."
             )
             raise _with_hint(hint, e) from e
-        replacement = await _file_error(e, parent_id_or_path, "list")
+        replacement = await _file_error(e, parent_id_or_path, "list", copied_id=True)
         if replacement is e:
             raise
         raise replacement from e
@@ -441,7 +568,20 @@ async def list_children(
         raise NotADirectoryError(
             f"{_shown(parent_id_or_path)} is a regular file, not a directory; it has no children."
         )
-    return _strip_deprecated_fields_in_list(body, "children")
+    return _more_note(_strip_deprecated_fields_in_list(body, "children"))
+
+
+_MORE = "More entries follow: call again with token set to nextPageToken."
+
+
+def _more_note(body: Any) -> Any:
+    """While `isLast` is false, say it in the answer itself (`more`), where a model reads the
+    page, not only in the tool's description: gate 4 had models stop at a page that said
+    `isLast: false` and answer for the whole directory. Nothing is added to a last page, or to
+    an answer that does not say."""
+    if isinstance(body, dict) and body.get("isLast") is False:
+        body["more"] = _MORE if body.get("nextPageToken") else "More entries follow."
+    return body
 
 
 async def _kind_of(file_id: str) -> str | None:
