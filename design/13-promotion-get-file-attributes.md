@@ -223,12 +223,13 @@ Nothing here has run. Before starting, check `$VALFED_HOME/HOLD` and the study c
 make valfed-up && make valfed-reset
 SSL_CERT_FILE=$VALFED_HOME/tls/ca-bundle.pem \
   make k2val K2VAL_CONFIG=benchmark/k2val/k2val.valfed.toml \
-    K2VAL_ARTEFACT_ROOT=/mnt/volume2/onedata-mcp-val/evidence/k2val \
-    K2VAL_RID=fa-guard-k3 \
-    K2VAL_SCENARIOS=FAi K2VAL_K=3 K2VAL_MODELS=qwencoder,haiku-low
+    K2VAL_ARTEFACT_ROOT=$VALFED_HOME/evidence/k2val \
+    K2VAL_RID=fa-guard-k8 \
+    K2VAL_SCENARIOS=FAi K2VAL_K=8 \
+    K2VAL_MODELS=sonnet-medium,haiku-low,glm,qwen36,qwencoder,deepseek
 ```
 
-- **FAi on the smoke pair at K=3 (the mis-copied-id guard).** 1 scenario × 2 configs × 3 = 6 trials. Passes when no new tool-attributable failure appears (design/10, "Staying stable"): an id that was not the brief's is refused with "not a complete file id", or reaches Onedata and draws a hint that says the id may be mis-copied. Qwen3.6 and GLM produced most of the mis-copies; the smoke pair may not exercise the guard, so adding them (`K2VAL_MODELS=qwencoder,haiku-low,glm,qwen36`) is a one-word change if the operator wants it. The record then gets this tool's `get_file_attributes` pass confirmed.
+- **FAi at K=8 on the full panel (the mis-copied-id guard).** 1 scenario × 6 configs × 8 = 48 trials, run in batches of two configs as the main run was. The operator's reading (2026-11-23): the full panel and K=8, not the smoke pair, because the mis-copies came from Qwen3.6 and GLM, which the smoke pair lacks, and because the record's FAi row then compares like with like. Passes when every control trial passes and no new tool-attributable failure appears: an id that was not the brief's is refused with "not a complete file id", or reaches Onedata and draws a hint that says the id may be mis-copied.
 
 ## External review (2026-11-20)
 

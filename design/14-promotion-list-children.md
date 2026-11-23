@@ -198,7 +198,7 @@ Nothing here has run. Before starting, check `$VALFED_HOME/HOLD` and the study c
 make valfed-up && make valfed-reset
 SSL_CERT_FILE=$VALFED_HOME/tls/ca-bundle.pem \
   make k2val K2VAL_CONFIG=benchmark/k2val/k2val.valfed.toml \
-    K2VAL_ARTEFACT_ROOT=/mnt/volume2/onedata-mcp-val/evidence/k2val \
+    K2VAL_ARTEFACT_ROOT=$VALFED_HOME/evidence/k2val \
     K2VAL_RID=files-f3-k8-sonnet-medium-glm \
     K2VAL_SCENARIOS=LCp K2VAL_K=8 K2VAL_MODELS=sonnet-medium,glm
 # then the same options with
@@ -208,13 +208,14 @@ SSL_CERT_FILE=$VALFED_HOME/tls/ca-bundle.pem \
 # the mis-copied-id guard, on the smoke pair
 SSL_CERT_FILE=$VALFED_HOME/tls/ca-bundle.pem \
   make k2val K2VAL_CONFIG=benchmark/k2val/k2val.valfed.toml \
-    K2VAL_ARTEFACT_ROOT=/mnt/volume2/onedata-mcp-val/evidence/k2val \
-    K2VAL_RID=lc-guard-k3 \
-    K2VAL_SCENARIOS=LCi K2VAL_K=3 K2VAL_MODELS=qwencoder,haiku-low
+    K2VAL_ARTEFACT_ROOT=$VALFED_HOME/evidence/k2val \
+    K2VAL_RID=lc-guard-k8 \
+    K2VAL_SCENARIOS=LCi K2VAL_K=8 \
+    K2VAL_MODELS=sonnet-medium,haiku-low,glm,qwen36,qwencoder,deepseek
 ```
 
 - **LCp at K=8 (F3).** 1 scenario × 6 configs × 8 = 48 trials. Passes when every control trial passes and no new tool-attributable finding appears. F3 is closed when no config's answer stops paging while `isLast` is false, or each that does is classified. DeepSeek LCp #4 (a deployment artefact in the first run) is run again with the rest.
-- **LCi on the smoke pair at K=3 (the guard).** 1 scenario × 2 configs × 3 = 6 trials; the same pass test as design/13's FAi re-run. The two re-runs may share one invocation (`K2VAL_SCENARIOS=FAi,LCi`).
+- **LCi at K=8 on the full panel (the guard).** 1 scenario × 6 configs × 8 = 48 trials; the same reading and pass test as design/13's FAi re-run. It may share one invocation with LCp and FAi (`K2VAL_SCENARIOS=LCp,LCi,FAi`).
 
 ## External review (2026-11-20)
 

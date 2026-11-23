@@ -253,7 +253,7 @@ Nothing here has run. The panel and K are the ones above (six configs, K=8, the 
 make valfed-up && make valfed-reset
 SSL_CERT_FILE=$VALFED_HOME/tls/ca-bundle.pem \
   make k2val K2VAL_CONFIG=benchmark/k2val/k2val.valfed.toml \
-    K2VAL_ARTEFACT_ROOT=/mnt/volume2/onedata-mcp-val/evidence/k2val \
+    K2VAL_ARTEFACT_ROOT=$VALFED_HOME/evidence/k2val \
     K2VAL_RID=sfr-f2-k8-sonnet-medium-glm \
     K2VAL_SCENARIOS=SR1,SR1i K2VAL_K=8 K2VAL_MODELS=sonnet-medium,glm
 # then the same two lines of options with
@@ -262,7 +262,7 @@ SSL_CERT_FILE=$VALFED_HOME/tls/ca-bundle.pem \
 ```
 
 - **SR1 and SR1i at K=8 (F2 and the mis-copied-id guard).** 2 scenarios × 6 configs × 8 = 96 trials. Passes when every control trial passes and no new tool-attributable finding appears. F2 is closed when no config's answer claims completion off the transfer's status, or each such answer is classified. For the guard, read each SR1i trial's calls for an id that was not the brief's: it must be refused with "not a complete file id", or reach Onedata and draw a hint that says the id may be mis-copied. The record then gets the new grids and the classifications.
-- Rescore the new runs offline with `make k2val-rejudge RID=<run id> K2VAL_ARTEFACT_ROOT=/mnt/volume2/onedata-mcp-val/evidence/k2val` if a reader changes before they are read.
+- Rescore the new runs offline with `make k2val-rejudge RID=<run id> K2VAL_ARTEFACT_ROOT=$VALFED_HOME/evidence/k2val` if a reader changes before they are read.
 
 ## Gate 5: record
 
