@@ -323,9 +323,12 @@ def is_right(sid: str, value: object) -> bool | None:
     if sid in ("RC", "RCp", "RE", "REp"):
         return isinstance(value, tuple) and value[0] == SAYS_READY
     if sid in ("RCn", "REn"):
+        # the other three are here at a right answer (RCn: built so; REn: made ready), so a
+        # claim that they are not is wrong too (the oracle checks it against the state)
         return (
             isinstance(value, tuple)
             and value[0] == "NOT_READY_WRITING"
             and not oracles.writing_claim_problems(frozenset(value[1]), WRITING_NAMES, 5)
+            and oracles.OTHERS_NOT_READY not in value[1]
         )
     return None

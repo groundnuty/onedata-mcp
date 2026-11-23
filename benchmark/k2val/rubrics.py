@@ -184,11 +184,16 @@ _CHECK = AnswerSpec(
     },
     names_what='Also list in "names" every file the answer says is still being written, as '
     'log_YYYYMMDD.dat (a file given by its date, such as "2 January", is log_20200102.dat), and, '
-    "when the answer says HOW MANY files are still being written, that number as "
-    '"#<number>": "#2" for "two files are still being written", "#1" for "only '
-    'log_20200102.dat is"; "#all" when it says all or every one of them is, even with a number '
-    '("all five" is "#all"). A file named as an example ("some, including log_20200102.dat") '
-    "is listed, with no number. An empty list when it names and counts none of them.",
+    "when the answer says HOW MANY files are still being written, before or after those words, "
+    'that number as "#<number>": "#2" for "two files are still being written" and for "both '
+    'log_20200102.dat and log_20200104.dat are", "#4" for "still being written: 4 files", "#1" '
+    'for "only log_20200102.dat is"; "#all" when it says all or every one of them is, even with '
+    'a number ("all five", "for all 5 files" are "#all"). A time, a size or a number of tries '
+    'is not a count ("after 150 s"), nor is a number of files said to be ready. A file named as '
+    'an example ("some, including log_20200102.dat") is listed, with no number. When it says '
+    "some files are still being written and also that the others are not complete and readable "
+    'there (missing, not copied, only at another site), add "others:not_ready". An empty list '
+    "when it names and counts none of them.",
 )
 _V6 = AnswerSpec(
     "label",

@@ -815,7 +815,6 @@ def test_review_the_required_call_accepts_files_checked_one_call_each() -> None:
         ("RCn", "No: two are still being written, the other three are missing.", False),
     ],
 )
-@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
 def test_review_the_writing_reader_binds_counts_to_the_files_they_count(
     sid: str, answer: str, right: bool
 ) -> None:
@@ -828,7 +827,6 @@ def test_review_both_with_the_two_names_is_the_right_count() -> None:
     assert is_right("RCn", read_answer("RCn", answer)) is True
 
 
-@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
 def test_review_the_rubric_tells_the_judge_that_both_with_two_names_is_two() -> None:
     """Gemini 2: the deterministic reader counted "both" as #2 and the judge was never told
     to, so a right answer went to NEEDS_REVIEW."""
@@ -853,7 +851,6 @@ def test_review_the_rubric_tells_the_judge_that_both_with_two_names_is_two() -> 
         ("RC", "All five of the files are ready here."),
     ],
 )
-@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
 def test_review_a_ready_claim_is_read_per_clause(sid: str, answer: str) -> None:
     assert read_answer(sid, answer)[0] == "SAYS_READY"
 
@@ -1107,3 +1104,106 @@ def test_the_http_recorder_keeps_the_calls_own_record(tmp_path) -> None:
     server.record_path.write_text("".join(json.dumps(r) + "\n" for r in rows))
 
     assert [r.audit for r in server.records()] == [audit, None]
+
+
+# --- The writing reader, paired cases from both reviews (Gemini 2, Codex 11) -------------------
+
+
+@pytest.mark.parametrize(
+    ("answer", "said"),
+    [
+        # times, sizes and tries are not counts of files
+        ("Not ready after 150 s: 2 files are still being written.", {"#2"}),
+        ("After two attempts, 3 files are still being written.", {"#3"}),
+        # a count after the phrase is bound to the files it counts
+        ("Still being written: 2 files.", {"#2"}),
+        ("Writing is still in progress for both files.", {"#2"}),
+        ("Writing is still in progress for all five files.", {"#all"}),
+        # a ready count before "because", "since", ", as", a dash or a bare "and" between clauses
+        ("3 files are ready because 2 are still being written.", {"#2"}),
+        ("3 files are ready since 2 are still being written.", {"#2"}),
+        ("3 files are ready, as 2 are still being written.", {"#2"}),
+        ("3 files are ready — 2 are still being written.", {"#2"}),
+        ("3 files are ready and 2 are still being written.", {"#2"}),
+        # ... while a list of names joined by "and" stays one clause
+        (
+            "3 files are ready and log_20200102.dat and log_20200104.dat are still being written.",
+            {"log_20200102.dat", "log_20200104.dat"},
+        ),
+        ("Jan 2 and Jan 4 are still being written.", {"log_20200102.dat", "log_20200104.dat"}),
+    ],
+)
+def test_review_quantities_are_bound_to_the_files_being_written(answer: str, said: set) -> None:
+    assert set(read_check(answer, LOCAL, OWNER)[1]) == said, answer
+
+
+@pytest.mark.parametrize(
+    ("sid", "answer", "marker"),
+    [
+        ("RCn", "No: two are still being written, the other three are missing.", True),
+        ("RCn", "No: two are still being written; the rest are only at nordic-marine-dc.", True),
+        ("RCn", "No: two are still being written; the other three are here.", False),
+        ("RCn", "No: two are still being written, and none of the others is missing.", False),
+        # without files said to be being written, there is no "other" files' claim to read
+        ("V4", "No: the other three are only at another provider.", False),
+    ],
+)
+def test_review_a_claim_about_the_files_not_being_written_is_read(sid, answer, marker) -> None:
+    from benchmark.k2val.oracles import OTHERS_NOT_READY
+
+    assert (OTHERS_NOT_READY in read_answer(sid, answer)[1]) is marker, answer
+
+
+def _rcn_ctx(*, others_local: bool) -> K2Context:
+    at = _snap(set(ASKED) if others_local else set(), set())
+    for n in ("log_20200102.dat", "log_20200104.dat"):
+        at.files[n] = replace(at.files[n], owner_covered=False, owner_bytes=50)
+    return _ctx("RCn", at)
+
+
+def test_review_the_other_three_said_missing_fails_where_they_are_here() -> None:
+    """Codex 11: "two are still being written, the other three are missing" passed in RCn,
+    where the other three are local. It fails, read by either reader (the judge is told to
+    say the same), and passes where the claim is true."""
+    from benchmark.k2val.judge import JudgeVerdict
+    from benchmark.k2val.scoring import score_dual
+
+    answer = "No: two are still being written, the other three are missing."
+    reading = read_answer("RCn", answer)
+    verdict = JudgeVerdict(
+        "RCn", value=reading, evidence="the other three are missing", evidence_quoted=True
+    )
+    c = _rcn_ctx(others_local=True)
+    c.calls = [_call(0, "check_readiness", {"extent": _by_dates(DIR)})]
+
+    scored = score_dual(SCENARIOS["RCn"], c, AgentTrace(final_answer=answer), verdict)
+
+    assert scored.outcome == "FAIL"
+    assert "says the files not being written are not here" in scored.oracle.diagnosis
+    true_claim = ORACLES["RCn"](_rcn_ctx(others_local=False), AgentTrace(final_answer=answer))
+    assert true_claim.mcp_pass, true_claim.diagnosis
+
+
+@pytest.mark.parametrize(
+    ("sid", "answer", "label"),
+    [
+        # the reviewers' passing answers
+        (
+            "REp",
+            "Yes, the three files were copied from nordic-marine-dc and are now complete and "
+            "readable at vistula-dc.",
+            "SAYS_READY",
+        ),
+        ("RC", "All 5 of the files are complete and readable here.", "SAYS_READY"),
+        # ... and their pairs that must not pass
+        ("RC", "The files are complete and readable at nordic-marine-dc.", "OTHER"),
+        ("RC", "Three of the files are complete and readable here.", "OTHER"),
+        (
+            "RCp",
+            "The three files are complete at nordic-marine-dc, while vistula-dc has none of them.",
+            "OTHER",  # complete at the other site only: no ready claim here
+        ),
+    ],
+)
+def test_review_a_ready_claim_per_clause_and_its_pairs(sid: str, answer: str, label: str) -> None:
+    assert read_answer(sid, answer)[0] == label
