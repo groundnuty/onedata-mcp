@@ -1516,7 +1516,7 @@ unchanged.
 
 **Decision:** Fixed (PR #48); smoke re-run `smoke-stable-2`: clean.
 The name refusal was shown twice (Qwen3-Coder ST1 #1, #2), and each
-next call passed the id. The refusal of a value that is neither an id
+next call of the tool passed the id. The refusal of a value that is neither an id
 nor a name was shown to no model: NOT VERIFIED, open (design/16).
 
 ---
