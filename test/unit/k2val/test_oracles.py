@@ -525,7 +525,9 @@ def test_settled() -> None:
 # --- the tools' own wording is not a claim of readiness --------------------------------------
 
 # The literal sentences of the readiness tools (onedata_mcp/api/readiness.py, `_phrase` and
-# `_advice`) and of their descriptions (onedata_mcp/modules/readiness.py).
+# `_advice`) and of their descriptions (onedata_mcp/modules/readiness.py). ENSURE_HINT is the
+# pointer the check's answer carried until design/17 (it names no tool now); answers of the
+# earlier runs still repeat it.
 AT_OTHER_SITE = "5 files are complete at another provider and not yet at yours."
 BEING_WRITTEN = "2 files are still being written at their owner, so their bytes are incomplete."
 ENSURE_HINT = "ensure_readiness can wait for them and place them at your provider."

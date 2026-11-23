@@ -593,3 +593,51 @@ def test_the_readers_read_the_stored_context_as_in_a_trial() -> None:
     answer = "Not ready: 2 files are still being written."
     assert READERS["REn"](answer, who) == read_check(answer, LOCAL, OWNER)
     assert json.dumps(sorted(read_check(answer, LOCAL, OWNER)[1])) == '["#2"]'
+
+
+@pytest.mark.parametrize(
+    ("sid", "answer", "label"),
+    [
+        # a full ready claim beside a remark about something else stays a ready claim
+        (
+            "V4",
+            "Yes, all five are complete and readable at your site. They were written at "
+            "nordic-marine-dc and have not been replicated anywhere else.",
+            "SAYS_READY",
+        ),
+        (
+            "RCp",
+            "Yes. The three files are complete and readable at your site. (The other two logs "
+            "there are only at another provider.)",
+            "SAYS_READY",
+        ),
+        (
+            "REp",
+            "Done: the three files are now complete and readable at vistula-dc; the other two "
+            "are only at nordic-marine-dc, as before.",
+            "SAYS_READY",
+        ),
+        # ... but a verdict of not ready, a claim about some files only, or files still being
+        # written undo it
+        (
+            "RCp",
+            "No: only three of the five files are complete and readable here.",
+            "NOT_READY_OTHER",
+        ),
+        (
+            "RC",
+            "Three of the files are complete and readable at your site; the other two are only "
+            "at another provider.",
+            "NOT_READY_ELSEWHERE",
+        ),
+        # how long a hold lasts is no hedge, and stops at a comma
+        (
+            "RE",
+            "Ready: all five are complete and readable here, held there until removed, but two "
+            "are not yet complete.",
+            "NOT_READY_OTHER",
+        ),
+    ],
+)
+def test_a_ready_claim_is_undone_only_by_what_says_not_ready(sid, answer, label) -> None:
+    assert read_answer(sid, answer)[0] == label

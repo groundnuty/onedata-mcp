@@ -907,25 +907,55 @@ def writing_claim_problems(
 # "held there until their requirements are removed": how long a hold lasts, not a hedge on the
 # claim ("until" is one in "not done until ...").
 _HELD_UNTIL = re.compile(
-    r"(\b(?:held|kept|keeps?|holds?)\b[^.;\n]{0,40}?)\s*\buntil\b[^.;\n]*", re.I
+    r"(\b(?:held|kept|keeps?|holds?)\b[^.;,\n]{0,40}?)\s*\buntil\b[^.;,\n]*", re.I
 )
+# A verdict that the files asked about are not (all) ready: it undoes a ready sentence. Other
+# negative words beside a ready claim ("they have not been replicated anywhere else", "the other
+# two are only at another provider") are about something else and do not.
+_NOT_READY_VERDICT = re.compile(
+    r"\bnot\s+(?:yet\s+)?(?:all\b|(?:fully\s+)?(?:ready|complete|readable)\b)"
+    r"|\b(?:isn['’]t|aren['’]t)\s+(?:all\s+|yet\s+|fully\s+)*(?:ready|complete|readable)\b"
+    r"|\bnone\b[^.\n]{0,40}\b(?:ready|readable)\b|\bneither\b[^.\n]{0,30}\b(?:ready|readable)\b",
+    re.I,
+)
+# A ready sentence about some of the files only ("three of the files are complete ...").
+_SOME_OF = re.compile(
+    r"\b(?:\d+|one|two|three|four|five|six)\s+of\s+(?:the|these|those|them|all)\b|\bsome\b"
+    r"|\bonly\s+(?:\d+|one|two|three|four|five)\b|\ball\s+but\b",
+    re.I,
+)
+
+
+def _partly_ready(text: str, other_site: re.Pattern[str]) -> bool:
+    """Every sentence that claims ready claims it of some of the files only."""
+    claims = [
+        s
+        for s in _SENTENCE_SPLIT.split(text)
+        if _READY_POS.search(s) and not _DONE_NEG.search(s) and not other_site.search(s)
+    ]
+    return bool(claims) and all(_SOME_OF.search(s) for s in claims)
 
 
 def read_check(answer: str, local: str, owner: str) -> tuple[str, frozenset[str]]:
     """V4, V5 and the readiness scenarios (RC*, RE*), one vocabulary (rubrics._CHECK), with
     the files said to be still being written and the counts stated for them (`#2`, `#all`).
 
-    SAYS_READY when some sentence claims ready and nothing says otherwise. When the answer
-    says not ready (or that files are still being written), even beside a ready sentence about
-    some of them ("three are complete; two are still being written"): NOT_READY_WRITING if it
-    says some files are still being written, NOT_READY_ELSEWHERE if its reason is that the
-    data are at another site, else NOT_READY_OTHER. Else OTHER."""
+    SAYS_READY when some sentence claims ready, unless the answer also says files are still
+    being written, gives a verdict of not ready ("No.", "not all", "not ready"), or claims
+    ready of some files only ("three of the files are complete"). Then, or when it says not
+    ready at all: NOT_READY_WRITING if it says some files are still being written,
+    NOT_READY_ELSEWHERE if its reason is that the data are at another site, else
+    NOT_READY_OTHER. Else OTHER. A negative remark beside a full ready claim ("they have not
+    been replicated anywhere else") does not undo it."""
     text = _HELD_UNTIL.sub(r"\1", _plain(answer))
     said = writing_names(answer) | writing_counts(answer)
     other_site = _other_site_regex(owner, local)
     writing = says_writing(answer)
     not_ready = _says_not_ready(text)
-    if claims_ready(text, other_site) and not (writing or not_ready):
+    verdict = bool(_NOT_READY_VERDICT.search(text) or _OPENS_NO.match(text))
+    if claims_ready(text, other_site) and not (
+        writing or verdict or _partly_ready(text, other_site)
+    ):
         return "SAYS_READY", said
     if not (not_ready or writing):
         return "OTHER", said
