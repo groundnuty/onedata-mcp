@@ -1246,3 +1246,39 @@ async def test_rci_a_check_by_the_spaces_id_passes_and_one_by_its_name_misses_th
 
     art = await _trial(cfg, api, clock, tmp_path / "name", ready_tools, "RCi", by_name)
     assert art.outcome == "FAIL" and "required_call_missing" in art.flags
+
+
+@pytest.mark.parametrize(
+    ("answer", "said", "right"),
+    [
+        # the name before a colon, a dash or "because" is the subject of the writing clause
+        ("- log_20200102.dat: still being written", {"log_20200102.dat"}, True),
+        ("log_20200102.dat — still being written", {"log_20200102.dat"}, True),
+        (
+            "log_20200102.dat is not ready because it is still being written",
+            {"log_20200102.dat"},
+            True,
+        ),
+        # ... so a per-file list with one false line fails
+        (
+            "Not ready:\n- log_20200101.dat: still being written\n"
+            "- log_20200102.dat: still being written",
+            {"log_20200101.dat", "log_20200102.dat"},
+            False,
+        ),
+        # a count after a comma is not the writing count (only a colon, "(" or "for/on/in ...")
+        (
+            "log_20200102.dat and log_20200104.dat are still being written, 3 files are ready.",
+            {"log_20200102.dat", "log_20200104.dat"},
+            True,
+        ),
+    ],
+)
+def test_review_the_subject_of_a_split_writing_clause_is_kept(answer, said, right) -> None:
+    reading = read_answer("RCn", answer)
+    assert set(reading[1]) == said and is_right("RCn", reading) is right, reading
+
+
+def test_review_a_clause_about_another_site_that_also_names_this_one_is_no_ready_claim() -> None:
+    answer = "The files are complete at nordic-marine-dc, with nothing at vistula-dc."
+    assert read_answer("RC", answer)[0] != "SAYS_READY"

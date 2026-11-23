@@ -457,7 +457,7 @@ def _extent_targets(ctx: K2Context, value: object) -> list[tuple[str, str]] | No
     has, which the tool would take only if no other file had it), and, when it selects the whole
     dataset or by date range, anywhere under its root (the root is the target, outside). An item
     of a space given by an id cannot be placed: its target is None. None: malformed."""
-    from onedata_mcp.api.readiness import _looks_like_id, _normalise_extent
+    from onedata_mcp.api.readiness import _looks_like_id, _normalise_extent, select_paths
 
     try:
         items = _normalise_extent(value)  # type: ignore[arg-type]
@@ -477,14 +477,15 @@ def _extent_targets(ctx: K2Context, value: object) -> list[tuple[str, str]] | No
             out.append((item.dataset, root))
         under = [p for p in known if _under(p, root)]
         for name in item.files:
-            if name.startswith("/"):
-                path = _norm_path(name)
-            elif "/" in name:
-                path = _norm_path(f"{root}/{name}")
+            # the tool's own rule, over the fixture's files under the root: a fixture file it
+            # would take is the target; any other name may reach a file outside the trial
+            taken, _ = select_paths(replace(item, root=root, files=[name], ranges=[]), under)
+            if taken:
+                out.extend((name, path) for path in taken)
+            elif name.startswith("/"):
+                out.append((name, _norm_path(name)))
             else:
-                same = [p for p in under if p.rsplit("/", 1)[-1] == name]
-                path = same[0] if len(same) == 1 else _norm_path(f"{root}/{name}")
-            out.append((name, path))
+                out.append((name, _norm_path(f"{root}/{name}")))
     return out
 
 

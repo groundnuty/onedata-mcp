@@ -754,9 +754,9 @@ _WRITING_NEG = re.compile(
 # "since", and "as" after a comma ("as" alone is too often inside a clause: "such as", "marked
 # as"). A bare "and" is split in `_split_and` only when it joins two clauses.
 _WRITING_CLAUSE = re.compile(
-    r";|\.\s|:\s|\s[—–-]\s|[—–]|,\s+(?:but|so|and|as)\s|\s(?:but|while|whereas|because|since)\s",
+    r"(;|\.\s|:\s|\s[—–-]\s|[—–]|,\s+(?:but|so|and|as)\s|\s(?:but|while|whereas|because|since)\s)",
     re.I,
-)
+)  # one group: `split` keeps each separator, so a continuation is joined back as written
 # A finite verb: the sign that a stretch of words is a clause and not a list of names.
 _VERB = re.compile(
     r"\b(?:is|are|was|were|has|have|had|remains?|stays?|looks?|seems?)\b|n['’]t\b", re.I
@@ -800,21 +800,45 @@ def _writing_match(clause: str) -> bool:
     )
 
 
-def _writing_clauses(line: str) -> list[str]:
+def _clause_pieces(line: str) -> list[tuple[str, str]]:
+    """(the separator before it, the clause) for each clause of a line."""
+    parts = _WRITING_CLAUSE.split(line)
+    pieces: list[tuple[str, str]] = []
+    for i in range(0, len(parts), 2):
+        sep = parts[i - 1] if i else ""
+        for k, piece in enumerate(_split_and(parts[i])):
+            pieces.append((sep if k == 0 else " and ", piece))
+    return [(sep, piece) for sep, piece in pieces if piece.strip()]
+
+
+# A clause that says what is being written by pointing back: "... because it is still being
+# written", "...: both are still being written".
+_POINTS_BACK = re.compile(r"^\W*(?:it|they|these|those|both|this|which)\b", re.I)
+
+
+def _writing_clauses(line: str, *, subjects: bool = False) -> list[str]:
     """The clauses of a line that say files are still being written, each with the clauses that
-    continue it on the line (a list of names after ': '), up to one about another site or a
-    finished file."""
-    clauses = [piece for c in _WRITING_CLAUSE.split(line) if c.strip() for piece in _split_and(c)]
-    clauses = [c for c in clauses if c.strip()]
+    continue it on the line (a list of names after ': '), joined by their own separators, up to
+    one about another site or a finished file.
+
+    `subjects` (for the names only, never the counts): a writing clause that names no file
+    takes the names of the clause before it when that one is only a subject ("- log_2...dat:
+    still being written", "log_2...dat — still being written") or the writing clause points back
+    to it ("log_2...dat is not ready because it is still being written")."""
+    pieces = _clause_pieces(line)
     out = []
-    for k, clause in enumerate(clauses):
+    for k, (_, clause) in enumerate(pieces):
         if not _writing_match(clause):
             continue
         text = clause
-        for more in clauses[k + 1 :]:
+        for sep, more in pieces[k + 1 :]:
             if _writing_match(more) or _NOT_WRITING_ANY_MORE.search(more):
                 break
-            text += " " + more
+            text += sep + more
+        if subjects and k and not _days_in(text):
+            before = pieces[k - 1][1]
+            if not _VERB.search(before) or _POINTS_BACK.match(clause):
+                text = f"{before} {text}"
         out.append(text)
     return out
 
@@ -835,7 +859,7 @@ def writing_names(answer: str) -> frozenset[str]:
     raw = answer.splitlines()
     days: set[str] = set()
     for i, line in enumerate(raw):
-        clauses = _writing_clauses(_plain(line))
+        clauses = _writing_clauses(_plain(line), subjects=True)
         if not clauses:
             continue
         for clause in clauses:
@@ -899,7 +923,7 @@ _NOT_FILES = re.compile(
 # A count after the phrase, bound to files: "still being written: 4 files", "in progress for all
 # 5 files", "incomplete writes on all five files", "(2 files)", "for both files".
 _COUNT_AFTER = re.compile(
-    r"^\W*(?:(?:for|on|in|of|at|with)\s+)?(?:the\s+)?(?:"
+    r"^\s*(?::\s*|\(\s*|(?:for|on|in|of|at|with)\s+)(?:the\s+)?(?:"
     r"(?P<all>all|every)\s+(?:of\s+)?(?:(?:the|these|those)\s+)?(?:" + _NUMBER + r"\s+)?"
     r"(?:files?|logs?|of them|them)\b"
     r"|(?P<both>both)\s+(?:of\s+)?(?:(?:the|these|those)\s+)?(?:files?|logs?|of them|them)\b"
@@ -996,19 +1020,30 @@ _SOME_OF = re.compile(
 _READY_CLAUSE_SPLIT = re.compile(r";|,?\s+(?:while|whereas|but|although|though)\b", re.I)
 
 
-def _ready_clauses(text: str, other_site: re.Pattern[str], local: str) -> list[str]:
+def _source_regex(owner: str) -> re.Pattern[str]:
+    """Another site named as where the data came FROM: "copied from <owner>", "from their
+    owner", "from another provider"."""
+    return re.compile(
+        r"\bfrom\s+(?:the\s+|their\s+|its\s+)?(?:" + re.escape(owner) + r"|owner"
+        r"|(?:another|the other|a remote|a different)\s+"
+        r"(?:site|provider|data ?cent(?:er|re)|dc))\b",
+        re.I,
+    )
+
+
+def _ready_clauses(text: str, other_site: re.Pattern[str], owner: str) -> list[str]:
     """The clauses that claim the files ready HERE: a ready word, no negation or hedge in the
-    clause, and not about another site. A clause that names another site claims readiness
-    there, unless it also names this one ("copied from <owner> and now complete and readable at
-    <local>": the source site said does not undo the claim)."""
-    here = re.compile(re.escape(local) + r"|\b(?:here|your (?:site|provider)|locally)\b", re.I)
+    clause, and not about another site. Another site named only as the source ("copied from
+    <owner> and now complete and readable at <local>") does not make the clause about it; any
+    other mention does ("complete at <owner>, with nothing at <local>")."""
+    source = _source_regex(owner)
     return [
         clause
         for sentence in _SENTENCE_SPLIT.split(text)
         for clause in _READY_CLAUSE_SPLIT.split(sentence)
         if _READY_POS.search(clause)
         and not _DONE_NEG.search(clause)
-        and not (other_site.search(clause) and not here.search(clause))
+        and not other_site.search(source.sub(" ", clause))
     ]
 
 
@@ -1066,7 +1101,7 @@ def read_check(answer: str, local: str, owner: str) -> tuple[str, frozenset[str]
         said = said | {OTHERS_NOT_READY}
     not_ready = _says_not_ready(text)
     verdict = bool(_NOT_READY_VERDICT.search(text) or _OPENS_NO.match(text))
-    claims = _ready_clauses(text, other_site, local)
+    claims = _ready_clauses(text, other_site, owner)
     if claims and not (writing or verdict or _partly_ready(claims)):
         return "SAYS_READY", said
     if not (not_ready or writing):

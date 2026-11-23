@@ -524,3 +524,25 @@ async def test_review_an_unknown_field_through_the_mcp_client_lists_the_valid_fi
     async with Client(readiness_mcp) as client:
         with pytest.raises(ToolError, match=r"its fields are dataset, files, date_ranges"):
             await client.call_tool("check_readiness", {"extent": [item]})
+
+
+@pytest.mark.asyncio
+async def test_the_http_recorder_keeps_what_the_tool_recorded_of_its_call(
+    readiness_mcp: FastMCP, httpx_mock: HTTPXMock, tmp_path
+) -> None:
+    """The CLI and Claude legs' server records each call with the tool's own record of it
+    (`readiness.CALL_RECORD`): the scorer places holds and checks the required call from it,
+    and an id-given dataset (RCi) cannot be placed without it."""
+    from benchmark.k2val.mcp_http import make_recording_middleware
+
+    _mock_one_ready_file(httpx_mock)
+    record = tmp_path / "calls.jsonl"
+    readiness_mcp.add_middleware(make_recording_middleware(record))
+
+    async with Client(readiness_mcp) as client:
+        await client.call_tool("check_readiness", {"extent": [{"dataset": "my-dataset"}]})
+
+    (row,) = [json.loads(line) for line in record.read_text().splitlines()]
+    assert row["audit"]["resolved"] == [
+        {"file_id": "f1", "path": "/my-dataset/data_20180801.nc", "state": "ready"}
+    ]
