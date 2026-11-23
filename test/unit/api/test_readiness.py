@@ -4071,7 +4071,6 @@ async def test_a_selection_stopped_by_the_deadline_is_reported_and_holds_nothing
 # --- The review's second verification round: reproduced first ---------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="verification round 2: reproduced here, fixed later")
 @pytest.mark.asyncio
 async def test_verify2_cached_items_after_a_late_listing_stop_at_the_deadline(
     monkeypatch: pytest.MonkeyPatch,
@@ -4107,7 +4106,6 @@ async def test_verify2_cached_items_after_a_late_listing_stop_at_the_deadline(
     assert any("not selected within the time budget" in u for u in unresolved)
 
 
-@pytest.mark.xfail(strict=True, reason="verification round 2: reproduced here, fixed later")
 def test_verify2_the_range_cap_hint_never_widens_a_selection() -> None:
     """New MAJOR: "fewer, wider ranges" could make ensure hold the files in the gaps."""
     with pytest.raises(ValueError) as caught:

@@ -601,8 +601,10 @@ def _normalise_extent(extent: Sequence[Mapping[str, Any]]) -> list[_Item]:
         ranged += len(raw_ranges)
         if ranged > MAX_DATE_RANGES:
             raise ValueError(
-                f"The extent gives more than {MAX_DATE_RANGES} date ranges in all. Merge them "
-                "into fewer, wider ranges (a range may span years), or name the files."
+                f"The extent gives more than {MAX_DATE_RANGES} date ranges in all. Merge only "
+                "ranges that overlap or touch (that selects the same files), or split the ranges "
+                f"across calls of at most {MAX_DATE_RANGES}: a range that also spans the gaps "
+                "between them would select the files in those gaps too."
             )
         ranges: list[tuple[date, date]] = []
         for r_index, rng in enumerate(raw_ranges):
@@ -1334,11 +1336,13 @@ def select_paths(
             )
         chosen.update(dict.fromkeys(matches))
 
-    for i, (start, end) in enumerate(_merged_ranges(item.ranges)):
-        tick(i)
+    for start, end in _merged_ranges(item.ranges, out_of_time):
         lo = bisect.bisect_left(index.days, start)
         hi = bisect.bisect_right(index.days, end)
-        chosen.update(dict.fromkeys(index.dated[lo:hi]))
+        for k in range(lo, hi, SELECT_CHECK_EVERY):  # one batch of files between two checks
+            if k > lo and out_of_time is not None and out_of_time():
+                raise TimeoutError("selection did not finish within the time budget")
+            chosen.update(dict.fromkeys(index.dated[k : min(k + SELECT_CHECK_EVERY, hi)]))
     for start, end in item.ranges:
         k = bisect.bisect_left(index.days, start)
         if k < len(index.days) and index.days[k] <= end:
@@ -1357,10 +1361,14 @@ def select_paths(
     return list(chosen), unresolved
 
 
-def _merged_ranges(ranges: Sequence[tuple[date, date]]) -> list[tuple[date, date]]:
+def _merged_ranges(
+    ranges: Sequence[tuple[date, date]], out_of_time: Callable[[], bool] | None = None
+) -> list[tuple[date, date]]:
     """The union of inclusive day ranges, as sorted, disjoint ranges."""
+    tick = _ticker(out_of_time)
     merged: list[tuple[date, date]] = []
-    for start, end in sorted(ranges):
+    for i, (start, end) in enumerate(sorted(ranges)):
+        tick(i)
         if merged and start <= merged[-1][1]:
             merged[-1] = (merged[-1][0], max(merged[-1][1], end))
         else:
@@ -1385,7 +1393,12 @@ def _select(
         item, list(by_path), complete=complete, out_of_time=out_of_time, index=index
     )
     unresolved.extend(problems)
-    return [by_path[path] for path in selected]
+    tick = _ticker(out_of_time)
+    out = []
+    for i, path in enumerate(selected):
+        tick(i)
+        out.append(by_path[path])
+    return out
 
 
 def _merge_file(into: FileInfo, other: FileInfo) -> None:
@@ -1408,13 +1421,21 @@ async def _resolve(run: _Run, items: list[_Item]) -> tuple[list[FileInfo], list[
     listings: dict[str, _Listing] = {}
     indexed: dict[str, tuple[ListingIndex, dict[str, FileInfo]]] = {}
     for index, item in enumerate(items):
-        if item.root not in listings:
+        cached = item.root in listings
+        if not cached:
             listings[item.root] = await _list_dataset(run, item)
             unresolved.extend(listings[item.root].problems)
         listing = listings[item.root]
         if not listing.files and listing.problems:
             continue  # nothing to pick from; the problems are reported above
         named = replace(item, root=listing.root) if listing.root else item
+        not_in_time = (
+            f"dataset '{item.dataset}': its files were not selected within the time budget. "
+            "Call again, or declare fewer files or date ranges."
+        )
+        if cached and run.out_of_time():  # a cached listing costs no request: check here
+            unresolved.append(not_in_time)
+            continue
         try:
             if item.root not in indexed:
                 by_path = {f.path: f for f in listing.files}
@@ -1430,10 +1451,7 @@ async def _resolve(run: _Run, items: list[_Item]) -> tuple[list[FileInfo], list[
                 by_path=by_path,
             )
         except TimeoutError:
-            unresolved.append(
-                f"dataset '{item.dataset}': its files were not selected within the time budget. "
-                "Call again, or declare fewer files or date ranges."
-            )
+            unresolved.append(not_in_time)
             continue
         for f in selected:
             f.items.add(index)
