@@ -1712,11 +1712,17 @@ pure work with no deadline. 20 items of 400 date ranges over a
 20,000-file listing ran for tens of seconds on a 1 s budget (78 s on
 the reviewer's machine). Each listing is now indexed once, a date range
 is a search of that index, the deadline is checked every 1024 files,
-and an extent may give at most 400 date ranges in all.
+and an extent may give at most 400 date ranges in all. The second
+verification round found items selecting from a listing already read
+(no request, so no check) running past a 1 s cap (1.46 s): the deadline
+is now checked before each such item and in batches inside each range.
+The cap's hint advised "fewer, wider ranges", which would select, and
+for ensure hold, the files in the gaps; it now advises merging only
+ranges that overlap or touch, or splitting them across calls.
 
 **Decision:** Fixed (this PR, the operator's decision 2 and the
-decisions after the external review and its verification; design/18,
-decisions 2 and 5; design/17, gate 1).
+decisions after the external review and its two verification rounds;
+design/18, decisions 2 and 5; design/17, gate 1).
 
 ---
 
@@ -1824,10 +1830,18 @@ a claim at this site stands beside a replica elsewhere; and
 `others:ready` is read, given to the judge, and checked against the
 state at the answer.
 
+The second verification round found four more, now fixed: "On attempt
+four ..." read as `#4`; "A total of four files are still being written"
+lost its count; two file names sharing one verb ("... that a and b are
+still being written") were split; and a readiness claim was not bound
+to its stated place ("ready at <owner> and at <local> as well" missed,
+"complete at <owner> and being transferred here" taken as ready here,
+"the other three are ready only at <owner>" taken as `others:ready`).
+
 **Decision:** Fixed (this PR, the operator's decision 5 and the
-decisions after the external review and its verification). V5's
-earlier results remain no evidence; the readiness tools' gate-4 run
-re-runs V5.
+decisions after the external review and its two verification rounds).
+V5's earlier results remain no evidence; the readiness tools' gate-4
+run re-runs V5.
 
 ---
 
@@ -2110,6 +2124,18 @@ before the removal began. A cancellation is recorded as an outcome not
 confirmed. RCi counts only files an id-addressed item resolved; RCp and
 REp check scope over every file selected. A baseline without rule ids
 is unusable.
+
+The second verification round found three more of the class, now
+fixed: a file the trial created elsewhere in the space was placed
+inside by its id (now: only when its known path is under the trial
+directory); a removal was placed by a call still running when it began,
+or by the first of conflicting records (now: a call that ended before
+it, and every record naming the same file); RCp's scope check skipped
+files of another space; and a call cancelled during the proxy's first
+await had no record (now made before that await). Answered in the
+record, no change: an RCi trace from before the per-item record would
+fail its required call on replay, but no RC trial has ever been run, so
+there is no such trace.
 
 **Decision:** Fixed (this PR). Stored artefacts made before the record
 rescore every readiness call as UNVERIFIED.
