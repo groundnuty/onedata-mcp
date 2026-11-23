@@ -78,7 +78,7 @@ The 25.0 error bodies are unverified, as in design/13; the live test prints them
 
 Promoting this tool fixes the first. The second is the frozen benchmark's own record and stays as it is. Rewording `create_file` (a stable tool) costs it a smoke re-run (design/10, "Staying stable") and is **not done here**, as asked. The CD scenarios offer both tools, so the pointer is valid in them.
 
-## Gate 3: live check (built in branch commits `daf6452` and `ab05369`, not run)
+## Gate 3: live check (done, 2026-11-21: 10 passed)
 
 [`test/live/test_files_live.py`](../test/live/test_files_live.py), section `create_directory`, in a fresh probe directory:
 
@@ -89,7 +89,13 @@ Promoting this tool fixes the first. The second is the frozen benchmark's own re
 
 Gated and guarded as design/13 describes; run with `make valfed-files-live` or `make test-files-live`. The probe directory is made exclusively and deleted by its id (review, 4). The expected failure contracts (a missing parent, a file on the path) are asserted and marked `TODO(first live run)`. `make valfed-check` now also builds CDn's fixture (a regular file named `archive`).
 
-**Results: TODO.** Record the error texts of the second creation, the file in the way, the missing parent and the file on the path. If 25.0 answers "exists" with something other than `eexist` or 409, or a missing parent with something other than a structured not-found (`enoent`, `notFound`), change the mapping and the unit tests' bodies before the run: the hints claim only what such evidence establishes.
+**Results (2026-11-21, `make valfed-files-live`, 10 passed against Onedata 25.0):**
+
+- a second creation: `'<path>/archive' already exists as a directory, so nothing was created.`;
+- a regular file in the way (CDn's state): `'<path>/occupied' already exists as a regular file, so no directory was created.`, and the file stays a file;
+- a missing parent with `create_parents` false: `The parent directory of '<path>/missing/child' does not exist, so nothing was created. Create it first, or call again with create_parents set to true.`;
+- a regular file on the path: 25.0 answers `400 posix eacces`, not `enotdir`. The first live run caught the tool reading that as a permission problem; it now reads the path's components and says `A component of the path, '<path>/seed.txt', is a regular file, so nothing can be created under it.` (findings log M-22);
+- a name with `?` and `#` (`a?b#c`) is created with those characters.
 
 ## Gate 4: validation run (scenarios built in branch commit `cfe684e`; run 2026-11-22, results below)
 
@@ -203,7 +209,7 @@ Two further external reviews (Codex and Gemini, round 2) of the whole promotion 
 
 ## Gate 5: record
 
-This file. To complete it: fill in the TODOs of gates 2 to 4; then, in the same PR, move `create_directory` from `EXPERIMENTAL` to `STABLE` in `onedata_mcp/tool_maturity.py`, change its tier in README's tool table, and update `test/unit/test_tool_maturity.py`, which lists it as experimental.
+**Done 2026-11-23:** all five gates passed (external reviews in every round, findings in the log as M-15, M-16 and M-22). Promoted in the PR that carries this line. The steps were: fill in the TODOs of gates 2 to 4; then, in the same PR, move `create_directory` from `EXPERIMENTAL` to `STABLE` in `onedata_mcp/tool_maturity.py`, change its tier in README's tool table, and update `test/unit/test_tool_maturity.py`, which lists it as experimental.
 
 ## Decisions for the operator
 

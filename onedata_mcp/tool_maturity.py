@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 STABLE: frozenset[str] = frozenset(
     {
         "add_file_qos_requirement",
+        "create_directory",  # promoted 2026-11-23, design/15
         "create_file",
         "delete_file",
         "download_file",
@@ -64,7 +65,6 @@ STABLE: frozenset[str] = frozenset(
 EXPERIMENTAL: frozenset[str] = frozenset(
     {
         # ours, not yet validated
-        "create_directory",
         "schedule_file_replication",
         # ours, the readiness tools (design/07-readiness-tools.md)
         "check_readiness",
