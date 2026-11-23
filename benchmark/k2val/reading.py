@@ -16,7 +16,14 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
-from benchmark.k2val import file_oracles, file_scenarios, oracles, sr_oracles, stable_oracles
+from benchmark.k2val import (
+    file_oracles,
+    file_scenarios,
+    oracles,
+    readiness_oracles,
+    sr_oracles,
+    stable_oracles,
+)
 from benchmark.k2val.rubrics import ANSWER_SPECS, Reading
 from benchmark.k2val.scenarios import SCENARIOS, V1_DAYS
 
@@ -86,6 +93,8 @@ READERS: dict[str, Reader] = {
     },
     # the stable tools' smoke scenarios (design/16)
     **stable_oracles.ST_READERS,
+    # the readiness tools' scenarios (design/17, design/18)
+    **readiness_oracles.READINESS_READERS,
 }
 
 
@@ -127,6 +136,7 @@ _RIGHT: dict[str, Reading] = {
     "SR1o": "SAYS_NOT_COPIED",
     # None for ST4: its right reading is the trial's own transfer id
     **stable_oracles.ST_RIGHT,
+    **readiness_oracles.READINESS_RIGHT,  # type: ignore[dict-item]
 }
 
 
@@ -159,6 +169,8 @@ def is_right(sid: str, value: Reading) -> bool | None:
         )
     if sid == "V4":
         return isinstance(value, tuple) and value[0] == "NOT_READY_ELSEWHERE"
+    if (right := readiness_oracles.is_right(sid, value)) is not None:
+        return right
     return same_reading(value, right_reading(sid))
 
 

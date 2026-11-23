@@ -323,6 +323,12 @@ from benchmark.k2val import stable_oracles  # noqa: E402
 
 REQUIRED.update(stable_oracles.ST_REQUIRED)
 
+# the readiness tools' scenarios (design/17, design/18); REo is SR1's task, with SR1's call
+from benchmark.k2val import readiness_oracles  # noqa: E402
+
+REQUIRED.update(readiness_oracles.READINESS_REQUIRED)
+REQUIRED["REo"] = _sr1
+
 
 # ---------------------------------------------------------------------------------------------
 # Restraint: nothing should change

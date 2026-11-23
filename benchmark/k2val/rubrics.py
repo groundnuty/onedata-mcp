@@ -299,6 +299,15 @@ ANSWER_SPECS: dict[str, AnswerSpec] = {
     "CDp": _cd("the directory asked for (and any missing parent)"),
     "CDo": _cd("the file asked for"),
 }
+# The readiness tools' scenarios (design/17, design/18): the shared vocabulary (RC and RCn have
+# V4's and V5's brief word for word), V1's (RCo has V1's brief) and SR1's (REo has SR1's).
+ANSWER_SPECS.update(
+    {
+        **dict.fromkeys(("RC", "RCn", "RCp", "RE", "REn", "REp"), _CHECK),
+        "RCo": ANSWER_SPECS["V1"],
+        "REo": _SR1,
+    }
+)
 
 # The stable tools' smoke scenarios (design/16; stable_scenarios.py), each with its own brief.
 ANSWER_SPECS.update(

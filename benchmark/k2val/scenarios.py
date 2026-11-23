@@ -306,6 +306,26 @@ SCENARIOS.update(
     }
 )
 
+# --- the readiness tools' scenarios (RC*, RE*; design/17, design/18) ---------------------------
+# In readiness_scenarios.py (a leaf module). RCo and REo take V1's and SR1's brief and fixture
+# word for word (`same_as`); the others are offered their own sets (RC_TOOLS, RE_TOOLS).
+from benchmark.k2val.readiness_scenarios import READINESS_SCENARIOS  # noqa: E402
+
+for _r in READINESS_SCENARIOS.values():
+    _base = SCENARIOS[_r.same_as] if _r.same_as else None
+    SCENARIOS[_r.id] = Scenario(
+        _r.id,
+        _r.title,
+        "K2",
+        _base.brief if _base else _r.brief,
+        _base.fixture if _base else _r.fixture,  # type: ignore[arg-type]
+        settle=_r.settle,
+        tools=_r.tools,
+        restraint=_r.restraint,
+        settle_s=_r.settle_s,
+        excluded_tools=_r.excluded_tools,
+    )
+
 # --- the stable tools' smoke scenarios (ST*; design/16) ---------------------------------------
 # PPAM's scenarios ported to the panel, in stable_scenarios.py (a leaf module: no import cycle).
 from benchmark.k2val.stable_scenarios import ST_SCENARIOS  # noqa: E402
@@ -340,6 +360,7 @@ TOOL_UNDER_TEST: dict[str, str] = {
     **dict.fromkeys(("CD", "CDn", "CDo", "CDp"), "create_directory"),
     **dict.fromkeys(("V4", "V5"), "check_readiness"),
     **dict.fromkeys(("V6", "V7"), "ensure_readiness"),
+    **{s.id: s.tool for s in READINESS_SCENARIOS.values()},
     **{s.id: s.tool for s in ST_SCENARIOS.values()},
 }
 

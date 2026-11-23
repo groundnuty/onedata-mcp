@@ -171,6 +171,15 @@ class FakeFed:
             "/api/v3/onezone/configuration",
         ):
             return httpx.Response(200, json={"name": "zone"})
+        # Onezone's details of a provider (the readiness tools ask whether it is online)
+        if (
+            host == ZONE_HOST
+            and request.method == "GET"
+            and (mm := re.fullmatch(r"/api/v3/onezone/providers/([^/]+)", request.url.path))
+            and mm[1] in self.PROVIDER_NAMES
+        ):
+            name = self.PROVIDER_NAMES[mm[1]]
+            return httpx.Response(200, json={"providerId": mm[1], "name": name, "online": True})
         if host == ZONE_HOST and self.list_spaces:
             return self._zone(request)
         provider = {OWNER_HOST: OWNER_ID, LOCAL_HOST: LOCAL_ID}.get(host)

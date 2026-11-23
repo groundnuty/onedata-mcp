@@ -904,6 +904,13 @@ def writing_claim_problems(
     return out
 
 
+# "held there until their requirements are removed": how long a hold lasts, not a hedge on the
+# claim ("until" is one in "not done until ...").
+_HELD_UNTIL = re.compile(
+    r"(\b(?:held|kept|keeps?|holds?)\b[^.;\n]{0,40}?)\s*\buntil\b[^.;\n]*", re.I
+)
+
+
 def read_check(answer: str, local: str, owner: str) -> tuple[str, frozenset[str]]:
     """V4, V5 and the readiness scenarios (RC*, RE*), one vocabulary (rubrics._CHECK), with
     the files said to be still being written and the counts stated for them (`#2`, `#all`).
@@ -913,7 +920,7 @@ def read_check(answer: str, local: str, owner: str) -> tuple[str, frozenset[str]
     some of them ("three are complete; two are still being written"): NOT_READY_WRITING if it
     says some files are still being written, NOT_READY_ELSEWHERE if its reason is that the
     data are at another site, else NOT_READY_OTHER. Else OTHER."""
-    text = _plain(answer)
+    text = _HELD_UNTIL.sub(r"\1", _plain(answer))
     said = writing_names(answer) | writing_counts(answer)
     other_site = _other_site_regex(owner, local)
     writing = says_writing(answer)
@@ -1081,3 +1088,8 @@ ORACLES.update(FILE_ORACLES)
 from benchmark.k2val.stable_oracles import ST_ORACLES  # noqa: E402
 
 ORACLES.update(ST_ORACLES)
+
+# --- the readiness tools' scenarios (RC*, RE*; design/17, design/18), in readiness_oracles.py ---
+from benchmark.k2val.readiness_oracles import READINESS_ORACLES  # noqa: E402
+
+ORACLES.update(READINESS_ORACLES)
