@@ -1,6 +1,6 @@
 # Promotion record: `remove_qos_requirement`
 
-Status: **in progress** (2026-11-20). Gate 1 is done, and was redone after two external reviews (see [External review](#external-review)). Gate 2 is done (`make conformance` passed on the integrated server, 2026-11-21). Gate 3's live test is built but has not been run. Gate 4's scenarios are built and unit-tested on the fake federation, but the run has not happened. The validation federation is on hold, so nothing here touched a live Onedata. The tool stays `experimental` until gates 2–4 are complete. It moves to `STABLE` in the PR that completes this record.
+Status: **promoted to stable** by PR #36 (`216d450`). All five gates are done. Gate 1 was redone after two external reviews (see [External review](#external-review)). Gate 2 is done (`make conformance` passed on the integrated server, 2026-11-21). Gate 3's live test passed against Onedata 25.0 on 2026-11-21 (4 passed). Gate 4's K=8 run on the six-config panel is done: 180 of 192 trials pass, the control 32 of 32, no tool-attributable finding. The tool is in `STABLE` in `onedata_mcp/tool_maturity.py`. Two items stayed open at promotion, and neither gates it: a live 403 case (no token without `space_manage_qos`), and the smoke re-run owed by the stable `get_qos_requirement` (see its section).
 
 The short commit ids below are **branch commits** on `feat/promote-remove-qos-requirement`; the fixes that answer the external review are on `fix/qos-review-findings`. A squash merge leaves them unreachable from `master`. **The anchor is the surface hash.**
 
@@ -30,7 +30,7 @@ The listing is `scripts/tools_manifest.py`'s output (`make -s tools-manifest`) w
   +    "description": "Remove a QoS requirement by id. Returns nothing on success.\nDoes not roll back already-replicated data. A requirement listed for a file\nmay be set on one of its parent directories: removing it removes it for every\nfile under that directory.",
   ```
 
-- **Earlier evidence is supporting only.** The triage of the experimental tools (2026-11-20) counted the earlier panel run (V1–V7) and reported 28 V3 trials, all passing, with the tool called and no error. Those were eight API configs at K=3 and two CLI agents. The figure is reported here, not recounted. That run used the old description; gate 4 needs a run at the surface above.
+- **Earlier evidence is supporting only.** The triage of the experimental tools (2026-11-20) counted the earlier panel run (V1–V7) and reported 28 V3 trials, all passing, with the tool called and no error. Those were eight API configs at K=3 and two CLI agents. The figure is reported here, not recounted. That run used the old description; gate 4 ran at the surface above.
 
 **Before the gate-4 run**, check that the surface has not moved:
 
@@ -62,7 +62,7 @@ A *structured* Onedata error is a JSON body whose `error.id` is `notFound` or wh
 | Permission: a 403, or a 400 or 404 carrying `forbidden`, `eacces` or `eperm` | Onedata's message only | Says the token may lack the privilege to manage QoS in the space this requirement belongs to (`space_manage_qos`), or be read-only; that a retry with this id will not help; and that a requirement in a space where the token has the privilege is not affected |
 | Success (204, as documented) | Empty answer | Empty answer; the description says so (gate 2). A 202 is an error ("accepted but removal not confirmed"), and so is any other 2xx. |
 
-- Which statuses and error ids a 25.0 provider really answers is **unverified**: the swagger lists 400, 403, 404 and 500 with the generic body only. The unit tests use plausible shapes. The live test asserts that an unknown id fails with a 400 or 404 and that the hint fits the body, and prints the real answers.
+- The swagger lists 400, 403, 404 and 500 with the generic body only. Gate 3's live run settled the unknown-id cases: a second removal, an id that never existed and a file id all answered **404** with a structured not-found (the live test accepts a 400 or a 404, and the hint must fit the body). The statuses and bodies of a 403, a 400 and a 5xx are **unverified** against a real provider: the unit tests use plausible shapes there, and the live test has no 403 case.
 - **Host-free, bounded errors** (the change is in `onedata_mcp/utils.py`, so it applies to every tool). With or without `ONEDATA_MCP_NODE_NAMES`, no error text a model reads names a host or carries a URL:
   - the Onezone and Oneprovider hosts this server is configured with are replaced by `onezone` and `oneprovider` (a node-list entry for the same host wins);
   - a URL is masked;
@@ -99,7 +99,7 @@ Every read of the summary must carry a `requirements` mapping; a missing field f
 
 **Cleanup** removes only the requirement ids the test created, which it tracks as soon as each add returns. It never takes ids from a summary: an effective summary also lists requirements inherited from ancestor directories, the space root included. Each cleanup step may fail without stopping the next.
 
-Like the readiness live test, it is skipped unless `ONEDATA_MCP_LIVE_QOS=1`. It then refuses a provider or zone host that is not `127.0.0.1`, `localhost` or `*.datahub.test`, **and** refuses unless every address the host resolves to is a loopback address (a `*.datahub.test` name mapped to another address is refused). Once it passes, name resolution for those hosts is pinned to the addresses that were checked, the URL keeps its host name for TLS, and proxy variables are ignored. The guard, the pin and the cleanup are unit-tested in `test/unit/api/test_qos.py`; the test itself was only collected, and skipped without the flag. **Not built:** a live 403 case. It needs a token without `space_manage_qos`, which the test is not given; the permission hint is covered by unit tests only.
+Like the readiness live test, it is skipped unless `ONEDATA_MCP_LIVE_QOS=1`. It then refuses a provider or zone host that is not `127.0.0.1`, `localhost` or `*.datahub.test`, **and** refuses unless every address the host resolves to is a loopback address (a `*.datahub.test` name mapped to another address is refused). Once it passes, name resolution for those hosts is pinned to the addresses that were checked, the URL keeps its host name for TLS, and proxy variables are ignored. The guard, the pin and the cleanup are unit-tested in `test/unit/api/test_qos.py`; the test itself ran once against the project's own federation (results below). **Not built:** a live 403 case. It needs a token without `space_manage_qos`, which the test is not given; the permission hint is covered by unit tests only.
 
 **To run:**
 
@@ -193,12 +193,12 @@ PASS per config and scenario, after classification (K=8):
 
 ## Gate 5: record
 
-This file. To complete it:
+This file. Done in PR #36:
 
 1. Gates 3 and 4: done (2026-11-21), above.
-2. Check that every row of [External review](#external-review) is closed, and that the items listed as open there are done.
+2. [External review](#external-review): the PR records external reviews in every round with the findings resolved. Two items stayed open in its tables and were not made conditions: the live 403 case (the permission hint is covered by unit tests only) and `get_qos_requirement`'s smoke re-run.
 3. `get_qos_requirement`'s smoke re-run (below) is that stable tool's own obligation, tracked separately; it does not gate this promotion.
-4. Then, in the same PR, move `remove_qos_requirement` from `EXPERIMENTAL` to `STABLE` in `onedata_mcp/tool_maturity.py`, and change its tier in README's tool table.
+4. In the same PR, `remove_qos_requirement` moved from `EXPERIMENTAL` to `STABLE` in `onedata_mcp/tool_maturity.py`, and its tier changed in README's tool table.
 
 ## `get_qos_requirement`: a stable tool changed on this branch
 
@@ -210,12 +210,12 @@ An earlier version of this record said `get_qos_requirement` was untouched. It w
 Its `tools/list` entry (name, description, input schema, annotations) is unchanged; the K1 hash above covers it. What changed is its **behaviour** in design/10's sense: the error a model reads for a wrong kind of id. `get_file_qos_summary` calls it for each requirement and swallows a failure (`onedata_mcp/modules/qos.py`), so a failing getter would not show through the summary. That is why the getter has its own live checks.
 
 - **Gate 1 (done):** the tests are `test_get_qos_requirement_*` in `test/unit/api/test_qos.py` (returns the full record; percent-encodes `?` and `#`; refuses each kind of wrong id, with its hint, before any request; strips surrounding whitespace and requests the stripped id) and `test_get_qos_requirement_refuses_the_same_ids_with_a_hint` in `test/unit/modules/test_qos_wrapper.py` (through the MCP client).
-- **Gate 3 (built, not run):** `test_qos_live.py` reads back a real requirement (success) and reads an id that never existed (not found, asserting a 400 or 404). The federation is on hold.
-- **Smoke re-run (owed, not run):** the amended protocol sends a change to the wording of a stable tool's error hints back to the K=3 smoke re-run. The new id-guard hints are such a change, so `get_qos_requirement` owes the re-run of its scenarios on the smoke pair (Qwen3-Coder and Haiku at effort low). It stays stable if no new tool-attributable failure appears. TODO: run it once the federation is off hold, and record the result here.
+- **Gate 3 (done, 2026-11-21):** `test_qos_live.py` read back a real requirement (success) and read an id that never existed (answered 404; the test accepts a 400 or a 404). See gate 3's results above.
+- **Smoke re-run (run in part, design/16):** the amended protocol sends a change to the wording of a stable tool's error hints back to the K=3 smoke re-run. The new id-guard hints are such a change, so `get_qos_requirement` owes the re-run of its scenarios on the smoke pair (Qwen3-Coder and Haiku at effort low). It stays stable if no new tool-attributable failure appears. The first smoke run (2026-11-23, design/16) ran its scenario ST2, 6 scored trials, all pass, and no tool-attributable finding. But no trial of that run (the control and the pair) was shown the id-guard hint (all 10 calls of the tool carried a real rule id), so the hint wording is **not verified** and design/10's "Transition" stays open for it.
 
 ## External review
 
-Two external frontier models reviewed the package before the validation run, each through a jailed wrapper (gate 5 of design/10). Codex gave 13 findings and Gemini 9, numbered as in their reports. Neither ran `make conformance`, the surface hashes or a live Onedata. The hashes were recomputed above; conformance has since passed (gate 2) and the live test is still open.
+Two external frontier models reviewed the package before the validation run, each through a jailed wrapper (gate 5 of design/10). Codex gave 13 findings and Gemini 9, numbered as in their reports. Neither ran `make conformance`, the surface hashes or a live Onedata. The hashes were recomputed above; conformance has since passed (gate 2) and the live test has since passed (gate 3).
 
 The status is one of: **fixed in this branch** (`fix/qos-review-findings`); **harness: resolved in the harness change** (the oracles, runner, fixtures, scenario coverage and protocol, which are not tool code); or **open**, with what is missing.
 
@@ -244,7 +244,7 @@ The status is one of: **fixed in this branch** (`fix/qos-review-findings`); **ha
 | 1 | BLOCKING | The V3 oracle ignores the federation's end state for `mcp_pass`, and `at_answer` | harness: resolved in the harness change |
 | 2 | BLOCKING | V3's `claims_removed` has false positives and false negatives | harness: resolved in the harness change |
 | 3 | BLOCKING | The V3n and V3o answer readers misclassify realistic answers | harness: resolved in the harness change |
-| 4 | BLOCKING | Gates 2 and 3 are unrun; V3n and V3o have no settle wait; local coverage is missing from the V3 variants' `mcp_pass` | settle wait and local coverage: harness: resolved in the harness change. `make conformance`: passed (gate 2, 2026-11-21). The live test is **open** (the federation is on hold) |
+| 4 | BLOCKING | Gates 2 and 3 are unrun; V3n and V3o have no settle wait; local coverage is missing from the V3 variants' `mcp_pass` | settle wait and local coverage: harness: resolved in the harness change. `make conformance`: passed (gate 2, 2026-11-21). The live test: passed (gate 3, 2026-11-21) |
 | 5 | MAJOR | Over-broad 404 and 400 hint mapping | fixed in this branch |
 | 6 | MAJOR | `get_qos_requirement` was changed without being recorded (6.1); the id is not stripped and is under-validated (6.2) | fixed in this branch (6.1: this record; 6.2: the id guard) |
 | 7 | MAJOR | The live cleanup can delete ancestor rules; no live check of a file id, of a 403, or of the status | fixed in this branch for the cleanup, the file id and the status. The live 403 case is **open**: it needs a token without `space_manage_qos`, and the permission hint is covered by unit tests only |
@@ -275,5 +275,5 @@ Branch commit `65df0b3` fixes a unit test that failed on master `4cd4c47`. Once 
 
 ## Stable tool fixed alongside: `get_file_qos_summary` (2026-11-21)
 
-The first live run showed that Onedata 25.0 names a requirement's replica count `replicasNum`. `get_file_qos_summary`'s description promises `replicas_num` per rule, but its enrichment copied only a key named `replicas_num`, so models never received the count. The enrichment now maps `replicasNum` to `replicas_num` (unit-tested). This changes a stable tool's result shape, so under design/10 it needs the K=3 smoke re-run, which `get_file_qos_summary` already owes for its reworded description.
+The first live run showed that Onedata 25.0 names a requirement's replica count `replicasNum`. `get_file_qos_summary`'s description promises `replicas_num` per rule, but its enrichment copied only a key named `replicas_num`, so models never received the count. The enrichment now maps `replicasNum` to `replicas_num` (unit-tested). This changes a stable tool's result shape, so under design/10 it needs the K=3 smoke re-run, which `get_file_qos_summary` already owed for its reworded description. The first smoke run (2026-11-23, design/16) applied a shape check to every summary of ST3 and ST5: applied in 12 trials (control 2), failed in 0.
 
