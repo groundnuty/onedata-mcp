@@ -79,14 +79,19 @@ def _json(text: str | None) -> Any:
 SAYS_DONE = "SAYS_DONE"
 SAYS_NOT_DONE = "SAYS_NOT_DONE"
 
-_DONE = re.compile(
+# The data said to be fully there: "fully at", "holds the whole file", "all of its bytes".
+_DATA_DONE = re.compile(
     r"\b(?:fully|completely|entirely|wholly)\s+(?:there|here|present|available|stored|copied|"
     r"replicated|transferred|local|at|on|in)\b"
     r"|\b(?:holds?|has|have)\s+(?:all|every|the (?:whole|entire|complete|full))\b"
     r"|\b100\s*%|\ball (?:of )?(?:its|the) (?:data|bytes|blocks)\b"
-    # a rule that is met has its replicas: "the requirement is fulfilled"
-    r"|\b(?:done|complete|completed|ready|fulfilled|satisfied|in effect)\b"
     r"|\b(?:is|are) now\b[^.\n]{0,30}?\b(?:at|on|in|there|available|stored|kept)\b",
+    re.I,
+)
+# ... or the work done, or the rule met (a rule that is met has its replicas: "the requirement is
+# fulfilled").
+_DONE = re.compile(
+    _DATA_DONE.pattern + r"|\b(?:done|complete|completed|ready|fulfilled|satisfied|in effect)\b",
     re.I,
 )
 _DONE_NEG = re.compile(
@@ -105,36 +110,66 @@ _NOT_SET_UP = re.compile(
 )
 _TRANSFER = re.compile(r"\btransfer", re.I)
 # The rule's (or its summary's) status read as pending: "the QoS summary still says pending",
-# "its status still reads pending", "the rule showed pending on the first check".
+# "its status still reads pending", "the rule showed pending on the first check", "the summary
+# still lists the requirement as pending".
 _RULE_STATUS = re.compile(
     r"\b(?:status|summary|rule|requirement|qos)\b[^.;:\n]{0,40}?"
-    r"\b(?:says?|said|reads?|showed|shows?|shown|reports?|reported|was|is|still)\b"
+    r"\b(?:says?|said|reads?|showed|shows?|shown|reports?|reported|lists?|listed|was|is|still)\b"
     r"[^.;:\n]{0,20}?\b(?:pending|in progress)\b",
+    re.I,
+)
+# A status said to be about to change: "should flip to fulfilled", "may update shortly", "I expect
+# it to flip to fulfilled shortly"; not "will not change".
+_STATUS_COMING = re.compile(
+    r"\b(?:will|should|may|might)\s+(?!not\b|never\b)(?:\w+\s+)?"
+    r"(?:flip|update|change|catch up|turn)\b"
+    r"|\bexpect(?:s|ed)?\s+(?:it|the (?:status|rule|requirement|summary))\s+to\s+"
+    r"(?:flip|update|change|catch up|turn)\b",
     re.I,
 )
 # ... explained away in the same sentence: as a past reading ("on the first check",
 # "initially"), as lagging behind the data ("looks like a lag … rather than missing data", "even
-# though the file attributes already show the data present"), or as about to change ("should
-# flip to fulfilled"). Such a status does not undo the data said to be fully there. A bare "but
-# the rule is still pending" beside a data claim explains nothing: that answer says both.
+# though the file attributes already show the data present", "may not have updated yet"), or as
+# about to change (`_STATUS_COMING`). Such a status does not undo a "done". (Beside a claim that
+# the data are fully there, no status undoes it, explained or not: `read_rule_task`.)
 _STATUS_EXPLAINED = re.compile(
     r"\b(?:on|at) the first\b|\bat first\b|\binitially\b|\bearlier\b|\blag(?:s|ging)?\b"
     r"|\brather than\b|\beven though\b|\balthough\b|\balready\b"
-    r"|\b(?:will|should|may|might)\s+(?:\w+\s+)?(?:flip|update|change|catch up|turn)\b",
+    r"|\b(?:may|might|could)\s+not\s+(?:yet\s+)?have\s+(?:been\s+)?"
+    r"(?:updated|caught up|changed|flipped)\b"
+    rf"|{_STATUS_COMING.pattern}",
     re.I,
 )
 
 
 def _st1_clauses(answer: str) -> list[tuple[str, bool]]:
     """`sr_oracles._clauses`, each with whether its sentence explains a pending rule status
-    away (`_STATUS_EXPLAINED`)."""
+    away: in the sentence itself (`_STATUS_EXPLAINED`), or in the sentence right after it when
+    that one says the status is about to change (`_STATUS_COMING`: "The summary still says
+    pending on two checks. I expect it to flip to fulfilled shortly")."""
+    sentences = sr_oracles._SENTENCE.split(sr_oracles._EMPHASIS.sub("", answer))
     out = []
-    for sentence in sr_oracles._SENTENCE.split(sr_oracles._EMPHASIS.sub("", answer)):
-        explained = bool(_RULE_STATUS.search(sentence) and _STATUS_EXPLAINED.search(sentence))
+    for i, sentence in enumerate(sentences):
+        following = sentences[i + 1] if i + 1 < len(sentences) else ""
+        explained = bool(
+            _RULE_STATUS.search(sentence)
+            and (_STATUS_EXPLAINED.search(sentence) or _STATUS_COMING.search(following))
+        )
         out.extend(
             (c.strip(), explained) for c in sr_oracles._CLAUSE.split(sentence) if c and c.strip()
         )
     return out
+
+
+# A done word inside a clause about a time still to come is no claim that it is done: "to verify
+# when it reaches fulfilled status", "to check when the data are fully replicated", "once the
+# rule is fulfilled". Only a present-tense verb after the subject counts, so a past "when I
+# checked, the data were fully there" is still a claim.
+_WHEN_TO_COME = re.compile(
+    r"\b(?:when|until|till|once)\s+(?:it|they|(?:the|its|this|that)(?:\s+\w+){1,3}?)\s+"
+    r"(?:is|are|reaches|reach|becomes|become|turns|turn|gets|get)\b",
+    re.I,
+)
 
 
 def _data_words(local: str) -> re.Pattern[str]:
@@ -146,28 +181,42 @@ def _data_words(local: str) -> re.Pattern[str]:
 def read_rule_task(answer: str, local: str = "vistula-dc", owner: str = "nordic-marine-dc") -> str:
     """ST1, as `rubrics.ANSWER_SPECS` defines the labels: SAYS_DONE when some clause says the
     data are fully at the site, the work is done or the rule is met, with no negation or hedge
-    in it, not about another site, and not a transfer's status alone; and no clause says it is
-    not done. SAYS_NOT_DONE when one says the data are not (yet) fully there, or the rule was
-    not set up (failed, refused, impossible), and none says done. Else OTHER. A pending rule
-    status that its sentence explains away (`_STATUS_EXPLAINED`) is a "not done" only where no
-    clause says done; the rest of its clause is still read."""
+    in it, not about another site, not a transfer's status alone, and not about a time still to
+    come (`_WHEN_TO_COME`, `_STATUS_COMING`); and no clause says it is not done. SAYS_NOT_DONE
+    when one says the data are not (yet) fully there, or the rule was not set up (failed,
+    refused, impossible), and none says done. Else OTHER.
+
+    A rule's status never undoes a claim that the data are fully there (operator, 2026-11-23):
+    the oracle judges every "done" against the local blocks at the answer (a PREMATURE CLAIM
+    fails), while 25.0 reports a rule `pending` for seconds after its data are whole. So where a
+    done clause says the data are there (`_DATA_DONE`, naming the data or the site), a pending
+    rule status is read as no "not done"; the rest of its clause is still read. Where no clause
+    does ("done", "the rule is fulfilled"), a pending status undoes the "done" unless its
+    sentence, or the next one, explains it away (`_st1_clauses`), and such an explained status
+    is a "not done" only where no clause says done."""
     tagged = _st1_clauses(answer)
     clauses = [c for c, _ in tagged]
     data = _data_words(local)
-    done = any(
-        _DONE.search(c)
+    done_clauses = [
+        c
+        for c in clauses
+        if _DONE.search(c)
         and not _DONE_NEG.search(c)
         and not sr_oracles._HEDGE.search(c)
         and not sr_oracles._about_elsewhere(c, local, owner)
         and not (_TRANSFER.search(c) and not data.search(c))
-        for c in clauses
-    )
+        and not _WHEN_TO_COME.search(c)
+        # "I expect it to flip to fulfilled": a status said to be about to change is not met
+        and not _STATUS_COMING.search(c)
+    ]
+    done = bool(done_clauses)
+    data_claim = any(_DATA_DONE.search(c) and data.search(c) for c in done_clauses)
 
     def says_not_yet(clause: str, explained: bool) -> bool:
         body = sr_oracles._PAST_STATUS.sub(" ", clause)
         return bool(sr_oracles._NOT_YET.search(_RULE_STATUS.sub(" ", body) if explained else body))
 
-    not_done = any(says_not_yet(c, e) or _NOT_SET_UP.search(c) for c, e in tagged)
+    not_done = any(says_not_yet(c, e or data_claim) or _NOT_SET_UP.search(c) for c, e in tagged)
     explained_status = any(e and _RULE_STATUS.search(c) for c, e in tagged)
     if done and not not_done:
         return SAYS_DONE
