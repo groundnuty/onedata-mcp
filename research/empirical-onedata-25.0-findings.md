@@ -412,6 +412,171 @@ The fixture runner picks the OTHER bound provider as the eviction
 source — works on a 2-provider space; 3+ providers would need an
 explicit choice from the test fixture.
 
+## 20. Creating a directory under a regular file answers `400 posix eacces`, not `enotdir`
+
+Entries 20-26 come from the first live runs against the project's own
+validation federation (a local Compose federation of two Oneproviders,
+Onedata 25.0, 2026-11-21), not from `data.spice-platform.eu`. The MCP-side
+consequences are M-22 to M-25 in `research/empirical-mcp-server-findings.md`.
+
+`create_directory` for `<dir>/seed.txt/sub`, where `seed.txt` is a
+regular file, got `400` with the `posix` error and errno `eacces`. The
+POSIX answer for "a path component is not a directory" is `enotdir`; the
+tool had a branch for it (design/15, gate 1), and 25.0 did not take it
+here. The swagger lists 400, 403, 404 and 500 for the endpoint with the
+generic `Error` body and does not say which errno a creation under a file
+gets. The probe left `create_parents` at its default (true), and the same
+token had just created the probe directory and `seed.txt`.
+
+Evidence: design/15, gate 1 (row "A regular file on the path") and gate 3
+results; findings log M-22.
+
+**For a client:** `eacces` on a creation is not proof of a permission
+problem. Before reporting one, or saying that a retry will not help, read
+the types of the path's components from the space down: a regular file
+among them is the cause. `create_directory` does this on `eacces` only and
+keeps the permission hint for the case where no component is a regular
+file. It still maps `enotdir`, should another provider send it.
+
+## 21. Listing a regular file's children returns the file itself
+
+`GET /data/{id}/children` on a regular file does not fail. It returns a
+normal listing whose only entry is the file itself. The swagger lists 400,
+403, 404 and 500 for the endpoint, so a client written from it may expect
+an error here; the tool's branch for `enotdir` on the listing is not
+reached for a file.
+
+Evidence: design/14, gate 1 (row "The parent is a regular file"); the live
+test `test_listing_errors_and_an_empty_directory_as_the_model_reads_them`
+in `test/live/test_files_live.py`; findings log M-23.
+
+**For a client:** an error-free listing does not show that the target is a
+directory, and a client that reads the answer as it comes reports "the
+directory contains `<file>`". Check the target's type first, or compare the
+single entry with the target: a directory is never its own child, so an
+entry that is the target itself means a regular file. `list_children` does
+this on the first page and answers "'…' is a regular file, not a
+directory; it has no children."
+
+## 22. A made-up page token answers `500 internalServerError`
+
+`GET /data/{id}/children` with a made-up `token` (`not-a-token`), on a
+directory that lists fine without one, answers `500` with the error id
+`internalServerError`. The design had assumed a 400: the swagger lists 400
+for the endpoint but does not say which failures get it. The status and id
+are those of any server failure, so the response alone does not show that
+the token is the cause. The live test shows it by a control: the same
+directory lists, unchanged, without a token right before and right after.
+The tool's code comment says a stale token behaves the same; the live test
+pins only a made-up one.
+
+Evidence: findings log M-24; commit `5e05990`; `test/live/test_files_live.py`
+(`BAD_TOKEN_STATUS`, `BAD_TOKEN_ERROR_ID`). design/14 (gate 1, row "A bad
+token"; gate 3; Round 2) records it now; it said 400 before the change that
+added this entry.
+
+**For a client:** a 5xx on a page read that carried a token may be the
+token, not an outage. A token is good only as returned in the previous
+page's `nextPageToken`, and there is no point retrying one that was not;
+start the listing again without a token. `list_children` says this when it
+gets a 5xx with a token.
+
+## 23. A QoS requirement's record names its fields `expression` and `replicasNum`
+
+`GET /qos_requirements/{qid}` returns `qosRequirementId`, `fileId`,
+`expression` and `replicasNum`; the live test asserts all four and that
+`qosExpression` is absent. Two other names circulated in the code and the
+docs. The swagger's cURL example for the endpoint shows `qosExpression`
+(entry #15), although its schema definition says `expression`, as the live
+record does. And `replicas_num`, the key the MCP tools use, is not an
+Onedata name: the count is `replicasNum` (also in the swagger). The
+summary endpoint itself returns only ids and statuses (M-7), so the
+expression and the count come from one `GET` per requirement. M-7's
+enrichment copied a key named `replicas_num`, so on 25.0 a file's QoS
+summary never carried the count its description promises; the first live
+run of the QoS test found it.
+
+Evidence: design/11, gate 3 results and "Stable tool fixed alongside";
+findings log M-25.
+
+**For a client:** read `expression` and `replicasNum` from the record. A
+client written from the swagger's example reads `qosExpression` and finds
+nothing, and one that reads `replicas_num` finds nothing either; neither
+is an error, only an absent field. Check a live record before trusting an
+example body.
+
+## 24. A new QoS requirement shows in the file's summary almost at once
+
+After `add_file_qos_requirement` (`anyStorage`, one replica) on a probe
+file, the file's QoS summary listed the new requirement on its first read,
+0.3 s after the add. After `remove_qos_requirement` it stopped listing it
+on its first read, 0.1 s after the removal. The live test polls every 1 s
+and both times are under one interval, so no wait was needed; each time
+includes the read's own latency. One probe file, one provider; the load
+on the federation was not recorded.
+
+Evidence: design/11, gate 3 (item 1 and results); `test/live/test_qos_live.py`.
+
+**For a client:** a requirement can be read back right after it is added,
+and a removal shows at once, so a short poll is enough and the 60 s settle
+window of the validation scenarios is ample. This is about the listing
+only. Whether the requirement is `fulfilled` is a separate matter (entry
+#16: a rule stayed `pending` after the data were there), and what another
+provider sees depends on dbsync convergence (entry #12).
+
+## 25. A 128 MiB replication between two local providers is whole about 2 s after scheduling
+
+`schedule_file_replication` of a 128 MiB file, written through the
+federation's other provider, to the local provider: the local provider's
+block map covered the whole file 2.06 s after the schedule, about 62 MiB/s
+counting the scheduling. Polled every 0.5 s, the file was seen partly copied
+on two polls (from 0.82 s to 1.49 s, 30803309 bytes both times). The
+transfer's status read `enqueued`, then `completed`. The first poll that
+read `completed` was the one at which the blocks were whole (2.06 s), and
+no poll read `completed` while the blocks, read right after it on the same
+poll, left part of the file out. A 256 KiB file was whole 0.12 s after the
+schedule and was never seen partly copied. One run, an unloaded
+federation; timing under the panel's parallel load was not measured.
+
+Evidence: design/12, gate 3 (results, and the decision to keep 128 MiB);
+`test/live/test_transfer_live.py`.
+
+**For a client:** the stretch in which the copy is partly done is about a
+second at this size, so a check after scheduling finds the copy either
+already whole or partway, and a model rarely sees "in transfer". The
+tool's description warns that a transfer's status can read completed
+before the copied blocks show at the target. That was not observed here,
+but it is one unloaded run, so the test of "the data are there" stays the
+target provider's block map covering the file, not the status (M-26: eight
+trials answered from the status alone; each claim was true when made, but
+unread). The idle figure is a lower bound for a loaded federation
+(design/12), so do not derive a timeout from it.
+
+## 26. A second removal, an unknown id and a file id all answer 404 with a structured not-found
+
+`DELETE /qos_requirements/{qid}` was tried with three ids that name no
+requirement: one just removed, one that never existed (32 random hex
+digits) and a real file id. Each answered `404` with a structured
+not-found body (`notFound` or `enoent`; the record does not say which).
+`GET /qos_requirements/{qid}` for an unknown id also answers 404. The
+swagger lists 400, 403, 404 and 500 for the delete with the generic body,
+and the live test accepted a 400 or a 404; the 400 did not occur.
+
+Evidence: design/11, gate 3 (the list of cases and results) and gate 1
+(rows "Unknown id" and "A 404 that does not say the requirement is
+missing"); `test/live/test_qos_live.py`.
+
+**For a client:** the status and body do not tell the three cases apart,
+and a file id is not rejected as a malformed id (400); it reads as
+not-found. So a 404 on a removal means only that no requirement has this
+id: it may have been removed already, or the value is not a requirement
+id. The current ids are the keys of `requirements` in the file's QoS
+summary. Only a 404 whose body is a structured not-found says the
+requirement is missing; a bare or HTML 404 does not, and
+`remove_qos_requirement` words it more carefully. A 403 was not exercised
+(it needs a token without `space_manage_qos`), so what 25.0 answers there
+is unverified.
+
 ## Maintenance
 
 This file accretes as we discover more empirical behaviour. New entries
