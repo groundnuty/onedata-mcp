@@ -24,7 +24,7 @@ The server registers 23 tools by default. **Access** `W` marks the 9 tools that 
 | `get_file_attributes` | Read a file's attributes (size, type, replication state, …) | R | experimental |
 | `download_file` | Read a file's content | R | stable |
 | `create_file` | Create a file with given content | W | stable |
-| `create_directory` | Create a directory | W | experimental |
+| `create_directory` | Create a directory | W | stable |
 | `move_file` | Move or rename a file or directory within a space | W | stable |
 | `delete_file` | Delete a file, or a directory recursively | W | stable |
 | **Metadata** | | | |
