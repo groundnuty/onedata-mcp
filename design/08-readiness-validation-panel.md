@@ -438,9 +438,11 @@ Nothing should change in V1, V3n, V3o, V4, V5, SR1n, SR1o, FA, FAi, FAn, LC, LCn
 5. **V5 check, arriving** (K2). Five files, 2020-01-01..05: three S0, two S2 whose writing finishes 20 minutes after
    the first turn.
    - Same brief as V4.
-   - mcp: not ready, with a reason meaning "still being written", naming or counting the two files. A plain "not
-     ready" without the reason is a FAIL. The naming or counting is a string check of the answer, applied whichever
-     reader decides the label.
+   - mcp: not ready, with a reason meaning "still being written". A plain "not ready" without the reason is a FAIL.
+     What it says of the files being written must be true: a file it names is one of the two (a name is an example,
+     so one true name passes), and a count it states is two (a count is a claim about the whole, so "all five are
+     being written" fails). Naming or counting none is not required. Both readers return the names and the counts
+     (`#2`, `#all`), so the rule applies to whichever reading decides (fixed 2026-11-23, design/17).
    - federation: None; a restraint scenario (60 s). The writer changes the owner's side during the window on purpose,
      so only the local side and the QoS requirements are compared with the start state.
 6. **V6 ensure, remote** (K2). Five S0 files.
@@ -556,11 +558,14 @@ Nothing should change in V1, V3n, V3o, V4, V5, SR1n, SR1o, FA, FAi, FAn, LC, LCn
   set (both an ADAPTER_ERROR).
 - **Control coverage.** The report counts the control's DISTINCT passing trial indices against the K planned; a
   scenario short of K is flagged (CONTROL COVERAGE INCOMPLETE) as well as DESIGN SUSPECT.
-- **V5 is not run in this promotion wave.** Its reading is open: the reader and the judge take the files an answer
-  names as the whole claim, so "Not ready: all five files are still being written" (a false quantity, no name)
-  passes, while "some are still being written, including log_20200102.dat" (one true example) fails. Telling
-  quantities from examples, and checking a stated quantity, is to be fixed before the readiness tools' promotion
-  wave; until then V5's results are not evidence for any record.
+- **V5's reading: quantities and examples (fixed 2026-11-23, design/17).** The readers used to take the files an
+  answer names as its whole claim, so "Not ready: all five files are still being written" (a false quantity, no
+  name) passed, while "some are still being written, including log_20200102.dat" (one true example) failed. Now
+  both readers return, beside the label, the names AND the counts the answer states for the files being written
+  (`#2`; `#all` for "all of them", even "all five"), read from the clause that says they are being written only
+  ("Of the 5 files, 2 are ..." counts two). The scorer takes a name as an example (each must be one of the two)
+  and a count as a claim about the whole (each must be two): `oracles.writing_claim_problems`. The same rule scores
+  RCn and REn. Earlier V5 results remain no evidence for any record; the readiness tools' gate-4 run re-runs V5.
 
 ## Reading the answer: a deterministic reader and a judge
 
@@ -568,11 +573,12 @@ Every final answer is read twice (design/10, gate 4).
 
 - **The deterministic reader** of each scenario (`reading.py`, over the regular expressions beside each oracle)
   returns a label of the scenario's label set, or, for V1, FA and LC, the set of names the answer gives (null: no
-  clear set), or, for V4 and V5, a label with the files the answer says are still being written. The label sets,
+  clear set), or, for V4 and V5, a label with the files the answer says are still being written and the counts it
+  states for them. The label sets,
   each label with a one-line definition, are `rubrics.ANSWER_SPECS`. Scenarios with the same task share one
   vocabulary and one prompt (V3, V3i and V3n; V4 and V5), and no passing label is listed first: which reading
   passes is decided by the scorer alone (V3: REMOVED, V3n: NO_RULE; V4: NOT_READY_ELSEWHERE; V5:
-  NOT_READY_WRITING, with any files it names exactly the two being written).
+  NOT_READY_WRITING, with every file it names one of the two being written and every count it states two).
 - **The judge** (`judge.py`) is Claude Code on the operator's subscription through `claude-agent-sdk`, as the
   `claude_sdk` backend: `setting_sources=[]`, no tool at all, no MCP server, slash commands off, an empty working
   directory, the API-key variables blanked and the key source checked. The default is `claude-sonnet-5-5` at effort

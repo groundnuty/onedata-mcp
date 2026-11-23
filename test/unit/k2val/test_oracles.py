@@ -790,3 +790,113 @@ def test_a_guess_about_an_earlier_removal_is_not_a_removal_claim(answer: str) ->
 
 def test_a_first_person_already_removed_is_still_a_removal_claim() -> None:
     assert oracles.read_removal_task("I had already removed the rule.") == "REMOVED"
+
+
+# --- V5's reading: quantities against examples (design/08; the operator's decision 5) ----------
+#
+# A number is a claim about the whole: a false one fails. A name is an example: a true one
+# passes, since the brief asks for no count.
+
+
+@pytest.mark.parametrize(
+    ("false", "true"),
+    [
+        # the operator's pair: "all five are being written" against "some files, including ..."
+        (
+            "Not ready: all five are being written.",
+            "Not ready: some files, including log_20200102.dat, are still being written.",
+        ),
+        (
+            "Not ready: all five files are still being written at their owner.",
+            "Not ready: some files are still being written, including log_20200102.dat.",
+        ),
+        (
+            "No. 3 files are still being written; the others are at another provider.",
+            "No. 2 files are still being written; the others are at another provider.",
+        ),
+        (
+            "Not ready: only log_20200102.dat is still being written.",
+            "Not ready: log_20200102.dat is still being written, among others.",
+        ),
+        (
+            "Not ready: every file is still being written.",
+            "Not ready: both log_20200102.dat and log_20200104.dat are still being written.",
+        ),
+    ],
+)
+def test_v5_a_false_quantity_fails_and_a_true_example_passes(false: str, true: str) -> None:
+    wrong = verdict("V5", ctx("V5", FIVE), false)
+    right = verdict("V5", ctx("V5", FIVE), true)
+    assert not wrong.mcp_pass and "files are being written, and 2 are" in wrong.diagnosis
+    assert right.mcp_pass, right.diagnosis
+
+
+def test_v5_a_count_is_read_from_the_writing_clause_only() -> None:
+    """ "Of the 5 files" and "3 are complete" count other files: only the count of the files
+    said to be still being written is read."""
+    for answer in (
+        "No. Of the 5 files, 2 are still being written; 3 are complete at another provider.",
+        "Not ready: 3 are complete at another provider, 2 are still being written.",
+        "Two of the five files are still being written, so they are not ready.",
+        "- **Still being written (2 files):** log_20200102.dat and log_20200104.dat",
+        "Not ready: the files for Jan 2 and Jan 4 are still being written.",
+    ):
+        label, said = oracles.read_check(answer, "vistula-dc", "nordic-marine-dc")
+        assert label == "NOT_READY_WRITING", answer
+        assert {n for n in said if n.startswith("#")} <= {"#2"}, (answer, said)
+        assert verdict("V5", ctx("V5", FIVE), answer).mcp_pass, answer
+
+
+def test_v5_the_reading_carries_names_and_counts() -> None:
+    read = oracles.read_check
+    assert read("Not ready: all five files are still being written.", "l", "o") == (
+        "NOT_READY_WRITING",
+        frozenset({"#all"}),
+    )
+    assert read("Not ready: some, including log_20200102.dat, are still being written.", "l", "o")[
+        1
+    ] == frozenset({"log_20200102.dat"})
+    # a false name still fails, a count or not
+    assert not verdict(
+        "V5", ctx("V5", FIVE), "Not ready: log_20200101.dat is still being written."
+    ).mcp_pass
+
+
+def test_is_right_follows_the_same_rule_for_v5() -> None:
+    from benchmark.k2val.reading import is_right
+
+    assert is_right("V5", ("NOT_READY_WRITING", frozenset({"log_20200102.dat"})))
+    assert is_right("V5", ("NOT_READY_WRITING", frozenset({"#2", "log_20200104.dat"})))
+    assert is_right("V5", ("NOT_READY_WRITING", frozenset()))
+    assert not is_right("V5", ("NOT_READY_WRITING", frozenset({"#all"})))
+    assert not is_right("V5", ("NOT_READY_WRITING", frozenset({"#5"})))
+    assert not is_right("V5", ("NOT_READY_WRITING", frozenset({"log_20200101.dat"})))
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        # a partial "ready" beside the files being written is a "not ready", not a claim
+        "Not all: log_20200101.dat, log_20200103.dat and log_20200105.dat are complete and "
+        "readable at your site. Two are still being written.",
+        "Three of the files are complete and readable at your site; log_20200102.dat and "
+        "log_20200104.dat are still being written.",
+    ],
+)
+def test_a_partly_ready_answer_with_files_still_being_written_is_not_a_ready_claim(
+    answer: str,
+) -> None:
+    assert oracles.read_check(answer, "vistula-dc", "nordic-marine-dc")[0] == "NOT_READY_WRITING"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Everything is complete and ready; two files were still being written.",
+        "Yes. All five files are complete and readable at vistula-dc, none are missing.",
+        "Yes - all five log files are complete and readable at vistula-dc; none of them is "
+        "incomplete.",
+    ],
+)
+def test_a_denied_problem_or_a_past_write_does_not_undo_a_ready_claim(answer: str) -> None:
+    assert oracles.read_check(answer, "vistula-dc", "nordic-marine-dc")[0] == "SAYS_READY"

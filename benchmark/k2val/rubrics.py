@@ -163,25 +163,32 @@ _V3O = AnswerSpec(
         "and does not say it removed it.",
     },
 )
-# V4 and V5: the same brief, so one vocabulary and one prompt, with the files said to be still
-# being written; which reading passes is the scorer's business alone.
+# V4, V5 and the readiness scenarios (RC, RCn, RCp; RE, REn, REp): one vocabulary, with the
+# files said to be still being written and the counts stated for them; which reading passes is
+# the scorer's business alone (V4: NOT_READY_ELSEWHERE; V5, RCn, REn: NOT_READY_WRITING; RC, RCp,
+# RE, REp: SAYS_READY). No passing label is listed first.
 _CHECK = AnswerSpec(
     "label_names",
     {
-        "SAYS_READY": f"it says the files, all or some of them, are complete and readable at "
-        f"{_SITE}.",
-        "NOT_READY_OTHER": "it says they are not all complete and readable there, with neither "
-        "reason below, or none.",
-        "NOT_READY_ELSEWHERE": "it says they are not all complete and readable there because "
-        "their data are at another site or provider (not copied there), and does not say any of "
-        "them is still being written.",
-        "NOT_READY_WRITING": "it says they are not all complete and readable there, and gives as "
-        "a reason, perhaps among others, that some of them are still being written.",
+        "NOT_READY_OTHER": "it says they are not all complete and readable there (some may be), "
+        "with neither reason below, or none.",
+        "SAYS_READY": f"it says the files asked about are all complete and readable at {_SITE} "
+        "(ready), and says nothing else of them.",
+        "NOT_READY_ELSEWHERE": "it says they are not all complete and readable there (some may "
+        "be), because the data of the others are at another site or provider (not copied "
+        "there), and does not say any of them is still being written.",
+        "NOT_READY_WRITING": "it says they are not all complete and readable there (some may "
+        "be), and gives as a reason, perhaps among others, that some of them are still being "
+        "written.",
         OTHER: "anything else, or both ready and not ready without settling on one.",
     },
     names_what='Also list in "names" every file the answer says is still being written, as '
-    'log_YYYYMMDD.dat (a file given by its date, such as "2 January", is log_20200102.dat); an '
-    "empty list when it names none of them.",
+    'log_YYYYMMDD.dat (a file given by its date, such as "2 January", is log_20200102.dat), and, '
+    "when the answer says HOW MANY files are still being written, that number as "
+    '"#<number>": "#2" for "two files are still being written", "#1" for "only '
+    'log_20200102.dat is"; "#all" when it says all or every one of them is, even with a number '
+    '("all five" is "#all"). A file named as an example ("some, including log_20200102.dat") '
+    "is listed, with no number. An empty list when it names and counts none of them.",
 )
 _V6 = AnswerSpec(
     "label",

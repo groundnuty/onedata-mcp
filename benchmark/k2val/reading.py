@@ -142,9 +142,11 @@ def right_reading(sid: str) -> Reading:
 
 def is_right(sid: str, value: Reading) -> bool | None:
     """Whether a reading is a right answer's, as far as the label goes (the oracle may ask
-    more: the state when it was given). V5: the right label, with the two files being written
-    named exactly, or none named (the brief asks for neither). None where the right reading
-    depends on the trial (ST4: its own transfer id), so it cannot be told from the label."""
+    more: the state when it was given). V5: the right label, and whatever it says of the files
+    being written true: each file it names is one of the two, each count it states is two
+    (`oracles.writing_claim_problems`); naming or counting none is right (the brief asks for
+    neither). None where the right reading depends on the trial (ST4: its own transfer id), so
+    it cannot be told from the label."""
     from benchmark.k2val.rubrics import same_reading
 
     if sid in _RIGHT and _RIGHT[sid] is None:
@@ -153,7 +155,7 @@ def is_right(sid: str, value: Reading) -> bool | None:
         return (
             isinstance(value, tuple)
             and value[0] == "NOT_READY_WRITING"
-            and set(value[1]) in (set(), {"log_20200102.dat", "log_20200104.dat"})
+            and not oracles.writing_claim_problems(frozenset(value[1]), oracles.S2_NAMES, 5)
         )
     if sid == "V4":
         return isinstance(value, tuple) and value[0] == "NOT_READY_ELSEWHERE"

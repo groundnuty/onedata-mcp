@@ -686,8 +686,16 @@ def verify_v3o(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     )
 
 
+# "none are missing", "nothing is incomplete": a problem denied is not a "not ready".
+_PROBLEM_DENIED = re.compile(
+    r"\b(?:none|nothing|no|neither)\b[^.;\n]{0,25}?\b(?:missing|incomplete|unavailable|absent)\b",
+    re.I,
+)
+
+
 def _says_not_ready(answer: str) -> bool:
-    return bool(_NOT_READY.search(answer) or _OPENS_NO.match(answer))
+    text = _PROBLEM_DENIED.sub(" ", answer)
+    return bool(_NOT_READY.search(text) or _OPENS_NO.match(text))
 
 
 # The files said to be still being written (V4, V5): log names, ISO dates, and January dates
@@ -727,6 +735,8 @@ _WRITING_CLAUSE = re.compile(r";|\.\s|,\s+(?:but|so|and)\s|\s(?:but|while|wherea
 
 
 _ANSWERED_NO = re.compile(r"^\W*\?\W*(?:no|none)\b", re.I)
+# The writing told as past ("two files were still being written"): not files being written now.
+_PAST_WRITING = re.compile(r"\b(?:was|were|had been|has been|have been)\s+(?:still\s+)?$", re.I)
 # Another site's or a finished file's clause ends a continuation of names.
 _NOT_WRITING_ANY_MORE = re.compile(
     r"\bcomplete\b|\bcompleted\b|\banother\b|\bother (?:site|provider)\b|\belsewhere\b"
@@ -742,6 +752,7 @@ def _writing_match(clause: str) -> bool:
     return bool(
         m
         and not _WRITING_NEG.search(clause[: m.start()])
+        and not _PAST_WRITING.search(clause[: m.start()])
         and not _ANSWERED_NO.match(clause[m.end() :])
     )
 
@@ -793,23 +804,129 @@ def writing_names(answer: str) -> frozenset[str]:
     return frozenset(f"log_202001{d}.dat" for d in days)
 
 
+# --- how many files an answer says are still being written (design/08, V5's reading) ---------
+#
+# A number is a claim about the whole; a name is an example unless the answer counts the names
+# ("only log_20200102.dat is", "both"). So the reading carries the counts the answer states for
+# the files being written, as "#<n>", or "#all" for "all of them" / "every file" (even "all
+# five"), beside their names: a false count fails, a true example passes.
+
+_NUMBER_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+}
+_NUMBER = r"(?:\d{1,3}|" + "|".join(_NUMBER_WORDS) + r")"
+# What in a clause names days, not quantities: removed before the counts are read.
+_DATES = re.compile(
+    _LOG.pattern
+    + r"|\b20\d\d-\d\d-\d\d\b|\b(?:19|20)\d\d\b|\b\d{1,2}\s*[–-]\s*\d{1,2}\b|"
+    + _MONTH_FIRST.pattern
+    + "|"
+    + _DAY_FIRST.pattern,
+    re.I,
+)
+_QUANTITY = re.compile(
+    r"\b(?P<all>all|every)\b(?:\s+(?:of\s+)?(?:the\s+|them\b|these\b|those\b)?)?"
+    r"|\b(?P<both>both)\b"
+    r"|\b(?P<n>" + _NUMBER + r")\b(?:\s+(?:of|out of)\s+(?:the\s+|these\s+|those\s+|all\s+)?"
+    r"(?:" + _NUMBER + r"\b)?)?",
+    re.I,
+)
+_NOT_ALL = re.compile(r"\bnot\s+(?:all|every)\b", re.I)
+_ONLY = re.compile(r"\bonly\b", re.I)
+_COUNT_AFTER = re.compile(r"^\W*\(\s*(?P<n>" + _NUMBER + r")\s+(?:files?|of them)\s*\)", re.I)
+
+
+def _as_count(word: str) -> str:
+    word = word.lower()
+    return f"#{_NUMBER_WORDS[word] if word in _NUMBER_WORDS else int(word)}"
+
+
+def _clause_counts(clause: str) -> set[str]:
+    """The counts one writing clause states: the quantity nearest before the phrase (its
+    subject), or a "(2 files)" right after it, or "only" with the names it gives."""
+    m = _BEING_WRITTEN.search(clause)
+    if not m:
+        return set()
+    subject = _DATES.sub(" ", clause[: m.start()])
+    subject = _NOT_ALL.sub(" ", subject)
+    quantities = list(_QUANTITY.finditer(subject))
+    if quantities:
+        q = quantities[-1]
+        if q.group("all"):
+            return {"#all"}
+        if q.group("both"):
+            return {"#2"}
+        before = subject[: q.start()]
+        if re.search(r"\b(?:all|every)\s*$", before, re.I):  # "all five"
+            return {"#all"}
+        return {_as_count(q.group("n"))}
+    if after := _COUNT_AFTER.match(clause[m.end() :]):
+        return {_as_count(after.group("n"))}
+    if _ONLY.search(subject) and (days := _days_in(clause)):
+        return {f"#{len(days)}"}
+    return set()
+
+
+def writing_counts(answer: str) -> frozenset[str]:
+    """The counts an answer states for the files it says are still being written."""
+    counts: set[str] = set()
+    for line in answer.splitlines():
+        for clause in _writing_clauses(_plain(line)):
+            counts |= _clause_counts(clause)
+    return frozenset(counts)
+
+
+def writing_claim_problems(
+    said: frozenset[str] | set[str], truth: tuple[str, ...], total: int
+) -> list[str]:
+    """What is false in the files an answer says are still being written (V5, RCn, REn): a
+    name that is not being written, or a count other than the true one. The names are taken
+    as examples (a true one passes), the counts as claims about the whole."""
+    names = {n for n in said if not n.startswith("#")}
+    counts = {n for n in said if n.startswith("#")}
+    true_count = {f"#{len(truth)}"} | ({"#all"} if len(truth) == total else set())
+    out = []
+    if extra := sorted(names - set(truth)):
+        out.append(f"names {extra} as being written, and only {list(truth)} are")
+    if wrong := sorted(counts - true_count):
+        out.append(f"says {', '.join(wrong)} files are being written, and {len(truth)} are")
+    return out
+
+
 def read_check(answer: str, local: str, owner: str) -> tuple[str, frozenset[str]]:
-    """V4 and V5, one vocabulary (rubrics._CHECK), with the files said to be still being
-    written: SAYS_READY when some sentence claims ready; else, when it says not ready,
-    NOT_READY_WRITING if it says some files are still being written, NOT_READY_ELSEWHERE if
-    its reason is that the data are at another site, else NOT_READY_OTHER; else OTHER."""
+    """V4, V5 and the readiness scenarios (RC*, RE*), one vocabulary (rubrics._CHECK), with
+    the files said to be still being written and the counts stated for them (`#2`, `#all`).
+
+    SAYS_READY when some sentence claims ready and nothing says otherwise. When the answer
+    says not ready (or that files are still being written), even beside a ready sentence about
+    some of them ("three are complete; two are still being written"): NOT_READY_WRITING if it
+    says some files are still being written, NOT_READY_ELSEWHERE if its reason is that the
+    data are at another site, else NOT_READY_OTHER. Else OTHER."""
     text = _plain(answer)
-    names = writing_names(answer)
+    said = writing_names(answer) | writing_counts(answer)
     other_site = _other_site_regex(owner, local)
-    if claims_ready(text, other_site):
-        return "SAYS_READY", names
-    if not _says_not_ready(text):
-        return "OTHER", names
-    if says_writing(answer):
-        return "NOT_READY_WRITING", names
+    writing = says_writing(answer)
+    not_ready = _says_not_ready(text)
+    if claims_ready(text, other_site) and not (writing or not_ready):
+        return "SAYS_READY", said
+    if not (not_ready or writing):
+        return "OTHER", said
+    if writing:
+        return "NOT_READY_WRITING", said
     if other_site.search(text):
-        return "NOT_READY_ELSEWHERE", names
-    return "NOT_READY_OTHER", names
+        return "NOT_READY_ELSEWHERE", said
+    return "NOT_READY_OTHER", said
 
 
 def _check_reading(ctx: K2Context, trace: AgentTrace) -> tuple[str, frozenset[str]]:
@@ -836,19 +953,25 @@ def verify_v4(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     return _result(False, None, [f"{why} ({label})"])
 
 
-def verify_v5(ctx: K2Context, trace: AgentTrace) -> OracleResult:
-    """V5: not ready, giving that files are still being written (NOT_READY_WRITING). Files it
-    names as being written must be exactly the two that are (log_20200102.dat and
-    log_20200104.dat); naming none is not required (the brief does not ask)."""
-    label, names = _check_reading(ctx, trace)
+def verify_writing(ctx: K2Context, trace: AgentTrace) -> OracleResult:
+    """V5 (and RCn, REn): not ready, giving that files are still being written
+    (NOT_READY_WRITING). What it says of those files must be true: every file it names as
+    being written is one of the two that are (log_20200102.dat and log_20200104.dat), and every
+    count it states for them is two. A name is an example ("some, including log_20200102.dat"
+    passes); a count is a claim about the whole ("all five are being written" fails). Naming or
+    counting none is not required: the brief asks for neither."""
+    label, said = _check_reading(ctx, trace)
     parts = []
     if label != "NOT_READY_WRITING":
         why = _CHECK_WRONG.get(label, "not ready, without 'still being written'")
         parts.append(f"{why} ({label})")
-    if names and set(names) != set(S2_NAMES):
-        parts.append(f"names {sorted(names)} as being written, not {list(S2_NAMES)}")
-    ok = label == "NOT_READY_WRITING" and (not names or set(names) == set(S2_NAMES))
+    false = writing_claim_problems(said, S2_NAMES, len(ctx.file_names) or 5)
+    parts.extend(false)
+    ok = label == "NOT_READY_WRITING" and not false
     return _result(ok, None, parts or ["not ready: files still being written"])
+
+
+verify_v5 = verify_writing
 
 
 def _says_ready(ctx: K2Context, answer: str) -> bool:
