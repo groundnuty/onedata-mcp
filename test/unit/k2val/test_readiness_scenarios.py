@@ -1610,3 +1610,141 @@ def test_verify_the_other_three_said_ready_is_judged_against_the_state(
     assert is_right(sid, reading) is right
     result = ORACLES[sid](_rcn_ctx(others_local=others_local), AgentTrace(final_answer=answer))
     assert result.mcp_pass is right, result.diagnosis
+
+
+# --- The review's second verification round: reproduced first --------------------------------
+
+_XF2 = pytest.mark.xfail(strict=True, reason="verification round 2: reproduced here, fixed later")
+
+
+@_XF2
+def test_verify2_a_file_created_outside_the_trial_is_outside() -> None:
+    """New MAJOR: a file the trial created elsewhere in the space was a "trial file" by id."""
+    from benchmark.k2val.scoring import write_targets
+
+    made = _call(0, "create_file", {"path": "/sp/other/f.dat", "content": "x"})
+    made.result_text = "id-new"
+    ensure = _call(1, "ensure_readiness", {"extent": [{"dataset": "/sp/other"}], "deadline_s": 60})
+    ensure.audit = {
+        "resolved": [],
+        "writes": [{"file_id": "id-new", "space_id": "sp", "path": "/sp/other/f.dat"}],
+    }
+    targets = [t for t in write_targets(_with_calls("RE", made, ensure)) if t["call"] == 1]
+    assert [t["where"] for t in targets] == ["outside"]
+
+
+def _removal_after(evidence_end: float):
+    removal = _call(5, "remove_qos_requirement", {"qos_id": "q1"})
+    removal.started_at, removal.ended_at = 10.0, 11.0
+    made = _call(0, "ensure_readiness", {"extent": [{"dataset": DIR}], "deadline_s": 60})
+    made.started_at, made.ended_at = 1.0, evidence_end
+    entry = {"file_id": "id-log_20200101.dat", "path": f"{DIR}/log_20200101.dat"}
+    made.audit = {
+        "resolved": [],
+        "writes": [entry],
+        "rules": [{**entry, "rule_id": "q1", "how": "created"}],
+    }
+    return made, removal
+
+
+@_XF2
+def test_verify2_a_removal_needs_evidence_from_a_call_that_ended_before_it() -> None:
+    """Codex 3: a creation whose call was still running when the removal began placed it."""
+    from benchmark.k2val.scoring import _qos_attachment
+
+    made, removal = _removal_after(evidence_end=12.0)
+    assert _qos_attachment(_with_calls("V6", made, removal), "q1", removal) is None
+
+
+@_XF2
+def test_verify2_conflicting_records_of_a_removed_rule_are_unverified() -> None:
+    """Codex 3: the first matching record placed the rule, though another put it elsewhere."""
+    from benchmark.k2val.scoring import _qos_attachment
+
+    made, removal = _removal_after(evidence_end=2.0)
+    other = _call(1, "ensure_readiness", {"extent": [{"dataset": "/sp"}], "deadline_s": 60})
+    other.started_at, other.ended_at = 3.0, 4.0
+    elsewhere = {"file_id": "id-x", "path": "/sp/x.dat"}
+    other.audit = {
+        "resolved": [],
+        "writes": [],
+        "rules": [{**elsewhere, "rule_id": "q1", "how": "confirmed"}],
+    }
+    assert _qos_attachment(_with_calls("V6", made, other, removal), "q1", removal) is None
+
+
+@_XF2
+def test_verify2_rcp_scope_counts_files_of_another_space() -> None:
+    """Gemini 6: an unchecked fourth file in another space was dropped before the scope check."""
+    call = _call(0, "check_readiness", {"extent": [{"dataset": DIR}]})
+    call.audit = _resolved(*ASKED)
+    for entry in call.audit["resolved"]:
+        entry["space_id"] = "sp"
+    call.audit["resolved"].append(
+        {"file_id": "id-elsewhere", "space_id": "s-other", "path": "/x/y", "state": "unchecked"}
+    )
+    c = _with_calls("RCp", call)
+    c.space_id = "sp"
+    assert REQUIRED["RCp"](c)[0] is False
+
+
+@_XF2
+@pytest.mark.asyncio
+async def test_verify2_a_call_cancelled_before_it_ran_keeps_an_empty_record() -> None:
+    """Round-one MAJOR: a cancellation during the proxy's first await left the call with no
+    record and no end time."""
+    from benchmark.k2val.recording import CANCELLED, RecordingApp
+
+    class App:
+        async def list_tools(self):
+            raise asyncio.CancelledError
+
+        async def call_tool(self, name, arguments):
+            return {}
+
+    app = RecordingApp(App(), allowed=frozenset({"check_readiness"}))
+    with pytest.raises(asyncio.CancelledError):
+        await app.call_tool("check_readiness", {"extent": [{"dataset": DIR}]})
+
+    (record,) = app.calls
+    assert record.audit == {"resolved": [], "writes": []}
+    assert record.ended_at and record.error == CANCELLED
+
+
+@_XF2
+@pytest.mark.parametrize(
+    ("sid", "answer", "check"),
+    [
+        # Gemini 2: an attempt number given as a word
+        ("RCn", "On attempt four some files are still being written.", lambda r: "#4" not in r[1]),
+        # the partitive filter took "a total of four" for a whole
+        ("RCn", "A total of four files are still being written.", lambda r: "#4" in r[1]),
+        # coordinated file names sharing one verb
+        (
+            "RCn",
+            "I have verified that log_20200102.dat and log_20200104.dat are still being written.",
+            lambda r: {"log_20200102.dat", "log_20200104.dat"} <= set(r[1]),
+        ),
+        # Gemini 7: the owner named first hid the local replica
+        (
+            "RC",
+            "All five requested files are ready at nordic-marine-dc and at vistula-dc as well.",
+            lambda r: r[0] == "SAYS_READY",
+        ),
+        # a remote replica's readiness is not readiness here
+        (
+            "RC",
+            "The copy at nordic-marine-dc is complete and is being transferred here.",
+            lambda r: r[0] != "SAYS_READY",
+        ),
+        # a true V5 statement is not a claim that the others are ready here
+        (
+            "V5",
+            "No: two are still being written; the other three are ready only at nordic-marine-dc.",
+            lambda r: "others:ready" not in r[1],
+        ),
+    ],
+)
+def test_verify2_the_readers(sid, answer, check) -> None:
+    reading = read_answer(sid, answer)
+    assert check(reading), reading

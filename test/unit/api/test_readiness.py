@@ -4066,3 +4066,52 @@ async def test_a_selection_stopped_by_the_deadline_is_reported_and_holds_nothing
         f"dataset '/{SPACE}/d': its files were not selected within the time budget. Call "
         "again, or declare fewer files or date ranges."
     ]
+
+
+# --- The review's second verification round: reproduced first ---------------------------------
+
+
+@pytest.mark.xfail(strict=True, reason="verification round 2: reproduced here, fixed later")
+@pytest.mark.asyncio
+async def test_verify2_cached_items_after_a_late_listing_stop_at_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex 8, Gemini 8: a second listing returning just before the 1 s deadline, then 18 items
+    selecting from the cached 20,000-file listing: no check between them, and the last was
+    credited after the deadline."""
+    import time
+
+    big = _listing_of(19_990)  # with the second listing's file, under the 20,000-file cap
+    small = readiness._Listing(files=[readiness.FileInfo("x", f"/{SPACE}/e/x.nc", "s1")])
+    run = readiness._Run(LOCAL, time.monotonic() + 1.0)
+
+    async def listed(run_, item):
+        if item.root.endswith("/e"):
+            await asyncio.sleep(max(run.deadline - time.monotonic() - 0.02, 0))
+            return small
+        return big
+
+    monkeypatch.setattr(readiness, "_list_dataset", listed)
+    every_day = [{"start": "2000-01-01", "end": "2030-12-31"}]
+    extent = [
+        {"dataset": f"/{SPACE}/d", "date_ranges": every_day},
+        {"dataset": f"/{SPACE}/e"},
+        *[{"dataset": f"/{SPACE}/d", "date_ranges": every_day}] * 18,
+    ]
+    items = readiness._normalise_extent(extent)
+
+    started = time.monotonic()
+    files, unresolved = await readiness._resolve(run, items)
+
+    assert time.monotonic() - started < 1.13  # the call's whole allowance at a 1 s cap
+    assert any("not selected within the time budget" in u for u in unresolved)
+
+
+@pytest.mark.xfail(strict=True, reason="verification round 2: reproduced here, fixed later")
+def test_verify2_the_range_cap_hint_never_widens_a_selection() -> None:
+    """New MAJOR: "fewer, wider ranges" could make ensure hold the files in the gaps."""
+    with pytest.raises(ValueError) as caught:
+        readiness._normalise_extent(_ranged(2, 201))
+    text = str(caught.value)
+    assert "wider" not in text
+    assert "overlap" in text and "split" in text
