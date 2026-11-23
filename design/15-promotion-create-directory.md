@@ -1,6 +1,6 @@
 # Promotion record: `create_directory`
 
-Status: **in progress** (2026-11-20; external review addressed, see below). Gate 1 is done. Gate 2 is done (`make conformance` passed on the integrated server, 2026-11-21). Gate 3's live test is built but has not been run. Gate 4's scenarios are built and unit-tested on the fake federation, but the run has not happened. The validation federation is on hold, so nothing here touched a live Onedata. The tool stays `experimental` until gates 2–4 are complete. It moves to `STABLE` in the PR that completes this record.
+Status: **promoted to stable** by PR #47 (2026-11-23), after all five gates (below).
 
 The short commit ids below are **branch commits** on `feat/promote-file-tools`. A squash merge leaves them unreachable from `master`. **The anchor is the surface hash.**
 

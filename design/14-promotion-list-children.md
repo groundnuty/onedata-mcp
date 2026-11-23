@@ -1,6 +1,6 @@
 # Promotion record: `list_children`
 
-Status: **in progress** (2026-11-20; external review addressed, see below). Gate 1 is done. Gate 2 is done (`make conformance` passed on the integrated server, 2026-11-21). Gate 3's live test is built but has not been run. Gate 4's scenarios are built and unit-tested on the fake federation, but the run has not happened. The validation federation is on hold, so nothing here touched a live Onedata. The tool stays `experimental` until gates 2–4 are complete. It moves to `STABLE` in the PR that completes this record.
+Status: **in progress** (updated 2026-11-23). Gates 1 to 3 are done: the live test passed against Onedata 25.0 (2026-11-21, 10 passed). Gate 4 ran 2026-11-22 (results below); by the operator's decision F3 is fixed (PR #46), and LCp and LCi are being re-run at K=8 before promotion.
 
 The short commit ids below are **branch commits** on `feat/promote-file-tools`. A squash merge leaves them unreachable from `master`. **The anchor is the surface hash.**
 
@@ -60,7 +60,7 @@ The tests are in `test/unit/api/test_list_children.py`, through the API and thro
 | `spaceNotSupportedBy` | **Misleading:** `Space "…" does not exist.` (the shared resolver) | `This provider does not support the space of …, so it cannot list it here; the space may still exist.` and the spaces the token sees (review, 5). An `OnedataApiError` now. The stable tools keep the shared resolver. |
 | A relative path with no MCP session (the panel's API legs) | `RuntimeError: session is not available …` | `Paths must start with '/' …` (review, 7) |
 | `attributes` as JSON text longer than 64 names of 128 characters, or nested too deeply to decode | Decoded unbounded; a `RecursionError` passed the hint | Refused with the same hint (review, 12) |
-| A bad token | Onedata's 400 | Unchanged: passed on, with no id hint |
+| A bad token (a made-up one) | **Seen live (25.0, 2026-11-21):** Onedata answers `500 internalServerError`, not a 400, so a model read a server error with nothing to fix | With a token and a 5xx: `The provider failed on this page token. A token is valid only as returned in the previous page's nextPageToken; to start over, list again without a token.`, then Onedata's message. No id hint. A 5xx with no token is handled as before (Round 2). Commit `5e05990` |
 | Empty result (an empty directory) | `{"children": [], "isLast": true}` | Unchanged; the description now says what `isLast` means |
 | *Rows added after gate 4 (2026-11-23), for the operator's decisions below. The description is unchanged, so the surface hashes are; these are behaviour, not surface.* | | |
 | A page that is not the last (`isLast` is false) (F3) | The page as Onedata gave it | The page, plus `"more": "More entries follow: call again with token set to nextPageToken."` (without a `nextPageToken`: `"More entries follow."`). Nothing is added to a last page (`isLast` true) or to an answer that does not say. The note says what the description says (`call again with` `token` `set to` `nextPageToken`) and names no tool. |
@@ -81,20 +81,25 @@ The 25.0 error bodies are unverified, as in design/13.
 - **`make conformance`: passed** on the integrated server (the integration branch `feat/promotion-harness` at `501c867`, which carries all five packages), run 2026-11-21 (`conformance-results/20261121T010707Z`) with `@modelcontextprotocol/conformance@0.1.16`, the version `make conformance` now pins: 12 passed, 20 failed, every failure expected (`conformance-baseline.yaml`: scenarios that need prompts, resources, completion, sampling, elicitation or the suite's own test tools, none of which this server has), and the baseline check passed. Conformance tests the protocol, not one tool, so this one run serves design/11–15.
 - **Reported, not changed:** the curation note `design/03-tool-allowlist-curation.md` says `list_files_recursively` with `max_depth=1` reproduces this tool; that tool has no such parameter (triage). Stable `list_files_recursively`'s `attributes` field still points to `get_file_attributes` (design/13).
 
-## Gate 3: live check (built in branch commits `d94e5c9` and `ab05369`, not run)
+## Gate 3: live check (built in branch commits `d94e5c9` and `ab05369`; first live run 2026-11-21, recorded in part)
 
 [`test/live/test_files_live.py`](../test/live/test_files_live.py), section `list_children`:
 
 1. **LCp's shape:** 11 files and 3 subdirectories (two empty) in one directory. The first page with the default limit holds 10 entries and `isLast` false; every entry is then read page by page with the token, which settles that a token page is accepted. It prints the order of the entries (LCp assumes name order puts the two empty directories on the second page), the recursive file listing of the same directory (it must show no empty directory: that is why LC requires this tool), and a page read with `offset: 10`.
 2. The errors and the empty case as the model reads them, printed: listing a regular file, a missing path, a made-up token; an empty directory (asserted: `children` empty, `isLast` true).
 
-Gated and guarded as design/13 describes; run with `make valfed-files-live` or `make test-files-live`. Since the external review (findings 4 and 11): the probe directory is made exclusively and deleted by its id; the page read with `offset: 10` must equal the token walk's second page; the three subdirectories must carry `type` `DIR`; listing a regular file, a made-up token and a missing path are asserted against the expected contracts and marked `TODO(first live run)`. `make valfed-check` now also builds LCp's fixture (15 entries, waited for at the local provider).
+Gated and guarded as design/13 describes; run with `make valfed-files-live` or `make test-files-live`. Since the external review (findings 4 and 11): the probe directory is made exclusively and deleted by its id; the page read with `offset: 10` must equal the token walk's second page; the three subdirectories must carry `type` `DIR`; listing a regular file, a made-up token and a missing path are asserted against the expected contracts and marked `TODO(first live run)` (the first two are settled by the first live run, below). `make valfed-check` now also builds LCp's fixture (15 entries, waited for at the local provider).
 
-**Results: TODO.** Record:
+**Results: recorded in part.** The first live run (2026-11-21, Onedata 25.0) settled these:
 
-- whether the token page was accepted (if not, the old code's `offset` was not the cause; find what is);
-- the order of the entries. If 25.0 does not list in name order, LCp may hold all three subdirectories on its first page: change LCp's names so the two empty ones sort last, before the run;
-- the error texts of a regular file, a missing path and a made-up token.
+- **A regular file as the parent:** 25.0 does not fail. It lists the file as its own only entry (gate 1's row); the tool refuses it with `'<path>' is a regular file, not a directory; it has no children.`, and the live test asserts that text.
+- **A made-up token** (`not-a-token`) on a directory that lists without one: **`500 internalServerError`**, not the 400 this record first assumed. The live test pins `BAD_TOKEN_STATUS = 500` and `BAD_TOKEN_ERROR_ID = "internalServerError"`, and lists the directory without a token right before and right after, since a 500 is also the answer to any server failure. The model reads the page-token hint of gate 1 (`5e05990`). Findings log M-24; Onedata-side entry 22 of `research/empirical-onedata-25.0-findings.md`.
+- **Token paging:** the live file's 10 tests passed on the same day (`make valfed-files-live`, design/15's gate 3), and one of them is LCp's token walk. It asserts that the first page (default limit) holds 10 entries with `isLast` false, that each next page, requested with the token and no offset, returns a new token until `isLast`, that the walk covers all 14 entries and starts with the first page, and that a page read with `offset: 10` equals the walk's second page. So a token page is accepted without an offset. This is read from the test's assertions and the pass count, not from a recorded printout.
+
+Still to record:
+
+- the order of the entries, printed by that test but not recorded here. If 25.0 does not list in name order, LCp may hold all three subdirectories on its first page: change LCp's names so the two empty ones sort last, before the run;
+- the error text of a missing path.
 
 ## Gate 4: validation run (scenarios built in branch commit `9694c3d`; run 2026-11-22, results below)
 
@@ -248,7 +253,7 @@ Two further external reviews (Codex and Gemini, round 2) of the whole promotion 
 | Codex 13; Gemini 8.1 | The heuristic masked dotted real text in error messages | fixed, `c32a67f` (design/11, Round 2) |
 | Gemini 8.3 | A 3xx was a success | fixed, `c32a67f` |
 | Codex 14 | The live listing test passed any `*.datahub.test` name | fixed, `673a2c6`: the shared loopback guard and proxy isolation |
-| Codex, earlier file #11 | A made-up pagination token passed on any error, a server error included | fixed, `673a2c6`: it must answer the swagger's 400 as a structured Onedata error (not a 5xx, not a gateway page). The error id is **not recorded** by the swagger: `BAD_TOKEN_ERROR_ID` is a named constant, `TODO(first live run)`, to be set from what the first run prints |
+| Codex, earlier file #11 | A made-up pagination token passed on any error, a server error included | fixed, `673a2c6`: it must answer the swagger's 400 as a structured Onedata error (not a 5xx, not a gateway page). The error id is **not recorded** by the swagger: `BAD_TOKEN_ERROR_ID` is a named constant, `TODO(first live run)`, to be set from what the first run prints. **Superseded by the first live run (2026-11-21):** 25.0 answers a made-up token with `500 internalServerError`, not a 400. The test now pins `BAD_TOKEN_STATUS = 500` and `BAD_TOKEN_ERROR_ID = "internalServerError"`, still requires a structured Onedata error (not a gateway page), and checks that the same directory lists, unchanged, without a token right before and right after, because a 500 does not by itself point at the token (`5e05990`) |
 | Codex 1–11, 15; Gemini 1–6, 9, 10 | Harness (the repeated-token listing hang in `children()` included) | not changed here |
 
 ## Gate 5: record
