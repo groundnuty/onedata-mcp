@@ -1,6 +1,6 @@
 # Promotion record: `schedule_file_replication`
 
-Status: **in progress** (2026-11-20). Gate 1 is done. Gate 2 is done (`make conformance` passed on the integrated server, 2026-11-21). Gate 3's live test is built but has not been run. Gate 4's scenarios are built and unit-tested on the fake federation, but the run has not happened. The validation federation is on hold, so nothing here touched a live Onedata. The tool stays `experimental` until gates 2–4 are complete. It moves to `STABLE` in the PR that completes this record.
+Status: **in progress** (updated 2026-11-23). Gates 1 to 3 are done: the live test passed against Onedata 25.0 (2026-11-21, 5 passed). Gate 4 ran 2026-11-22 (results below); by the operator's decision F2 is fixed (PR #46), and SR1 and SR1i are being re-run at K=8 before promotion.
 
 The short commit ids below are **branch commits** on `feat/promote-schedule-file-replication`. A squash merge leaves them unreachable from `master`. **The anchor is the surface hash.**
 
