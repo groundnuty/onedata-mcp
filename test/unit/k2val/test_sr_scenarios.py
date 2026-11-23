@@ -36,6 +36,7 @@ from benchmark.k2val.scenarios import (
 from test.unit.k2val.conftest import TOKEN_LOCAL
 from test.unit.k2val.fakefed import LOCAL_HOST, LOCAL_ID, OWNER_ID, ZONE_HOST
 from test.unit.k2val.test_runner import make_deps
+from test.unit.k2val.whole_ids import whole_id_of
 
 DIR = "/k2val-x/logs-0123456789ab"
 SR = ("SR1", "SR1n", "SR1o")
@@ -419,7 +420,7 @@ async def test_sr1i_a_copy_by_the_given_id_passes_and_one_by_path_misses_the_req
     cfg, api, fed, clock, tmp_path, sr_app
 ):
     real_new_id = fed.new_id
-    fed.new_id = lambda prefix: real_new_id(prefix) + "0" * 14  # 20+ characters, as on 25.0
+    fed.new_id = lambda prefix: whole_id_of(real_new_id(prefix))  # whole ids, as on 25.0
 
     async def by_id(app, given):
         await _copy(app, given)

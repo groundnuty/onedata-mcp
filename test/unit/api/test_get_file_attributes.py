@@ -22,7 +22,21 @@ from onedata_mcp.tool_maturity import ALL_KNOWN, FLAG_GATED
 from onedata_mcp.utils import OnedataApiError
 
 API = "https://provider.example/api/v3/oneprovider"
-FID = "0000000000AbCdEf0123456789"
+FID = "0000000000AbCdEf0123456789"  # opaque: the API function takes an id as given
+SEEN_SPACE = "s0"  # the one space the token sees (the fixture below)
+OTHER_SPACE = "9JO5__9nL1b01YEvwnft1r20gwgwlkIp19ND_n8hgxs"
+
+
+def whole_id(
+    space_id: str = SEEN_SPACE, uuid: str = "0cb444f249735948f20eaf93a2dfe54bch3e33"
+) -> str:
+    """A file id of the 25.0 shape: an 8-byte header whose sixth byte is the payload's length,
+    then `guid#<uuid>#<space id>`, all in hex. What the tool takes from a model."""
+    payload = f"guid#{uuid}#{space_id}".encode()
+    return (bytes([0, 0, 0, 0, 0, len(payload), 0x52, 0x73]) + payload).hex().upper()
+
+
+WHOLE = whole_id()
 
 
 @pytest.fixture(autouse=True)
@@ -398,9 +412,9 @@ async def test_a_list_sent_as_json_text_is_read_as_that_list(
     mcp: FastMCP, httpx_mock: HTTPXMock
 ) -> None:
     """Qwen3-Coder sent `attributes` as '["size","mtime"]' and got pydantic's list_type error."""
-    httpx_mock.add_response(method="GET", url=f"{API}/data/{FID}", json={"size": 3, "mtime": 1})
+    httpx_mock.add_response(method="GET", url=f"{API}/data/{WHOLE}", json={"size": 3, "mtime": 1})
 
-    is_error, text = await call(mcp, {"file_id_or_path": FID, "attributes": '["size","mtime"]'})
+    is_error, text = await call(mcp, {"file_id_or_path": WHOLE, "attributes": '["size","mtime"]'})
 
     assert is_error is False, text
     (sent,) = attrs_requests(httpx_mock)
@@ -412,10 +426,10 @@ async def test_the_panels_direct_call_path_reads_json_text_too(
     mcp: FastMCP, httpx_mock: HTTPXMock
 ) -> None:
     """The panel calls `app.call_tool` directly (benchmark/k2val/recording.py), not via a client."""
-    httpx_mock.add_response(method="GET", url=f"{API}/data/{FID}", json={"size": 3})
+    httpx_mock.add_response(method="GET", url=f"{API}/data/{WHOLE}", json={"size": 3})
 
     result = await mcp.call_tool(
-        "get_file_attributes", {"file_id_or_path": FID, "attributes": '["size"]'}
+        "get_file_attributes", {"file_id_or_path": WHOLE, "attributes": '["size"]'}
     )
 
     assert result.structured_content == {"size": 3}
@@ -486,13 +500,165 @@ async def test_more_than_64_names_are_refused(mcp: FastMCP, httpx_mock: HTTPXMoc
 async def test_the_error_reaches_the_model_with_the_hint(
     mcp: FastMCP, httpx_mock: HTTPXMock
 ) -> None:
-    httpx_mock.add_response(method="GET", url=f"{API}/data/{FID}", **onedata_error(404, "notFound"))
+    httpx_mock.add_response(
+        method="GET", url=f"{API}/data/{WHOLE}", **onedata_error(404, "notFound")
+    )
 
-    is_error, text = await call(mcp, {"file_id_or_path": FID})
+    is_error, text = await call(mcp, {"file_id_or_path": WHOLE})
 
     assert is_error is True
-    assert f"This provider reports nothing at file id '{FID}'" in text
+    assert f"This provider reports nothing at file id {files._shown(WHOLE)}" in text
     assert "provider.example" not in text  # host-free
+
+
+# --- an id the model copied: refused when it cannot be whole, a refusal may be a bad copy -----
+
+
+def mis_copies() -> dict[str, str]:
+    """What a model does to a copied id (gate 4): drops, changes and doubles characters."""
+    return {
+        "truncated, a digit short": WHOLE[:-1],
+        "truncated, a byte short": WHOLE[:-2],
+        "a digit dropped in the middle": WHOLE[:90] + WHOLE[91:],
+        "a byte dropped in the middle": WHOLE[:90] + WHOLE[92:],
+        "a character changed to a non-hex one": WHOLE[:60] + "g" + WHOLE[61:],
+        "the marker changed": WHOLE[:16] + "7" + WHOLE[17:],
+        "doubled": WHOLE + WHOLE,
+        "a digit added": WHOLE[:90] + "a" + WHOLE[90:],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", list(mis_copies()))
+async def test_an_id_that_cannot_be_whole_is_refused_before_any_request(
+    mcp: FastMCP, httpx_mock: HTTPXMock, name: str
+) -> None:
+    copied = mis_copies()[name]
+
+    is_error, text = await call(mcp, {"file_id_or_path": copied})
+    with pytest.raises(ValueError) as caught:
+        await files.get_file_attributes(copied, copied_id=True)
+
+    for shown in (text, str(caught.value)):
+        assert files._shown(copied) in shown
+        assert "is not a complete file id; copy it exactly from the earlier answer" in shown
+        assert "or give the path" in shown
+    assert is_error is True
+    assert provider_requests(httpx_mock) == []  # no lookup, no read
+
+
+@pytest.mark.asyncio
+async def test_a_whole_id_and_a_path_are_read_as_before(
+    mcp: FastMCP, httpx_mock: HTTPXMock
+) -> None:
+    httpx_mock.add_response(method="POST", url=lookup_url("/Alpha/a.dat"), json={"fileId": WHOLE})
+    httpx_mock.add_response(method="GET", url=f"{API}/data/{WHOLE}", json={"name": "a"})
+    httpx_mock.add_response(method="GET", url=f"{API}/data/{WHOLE}", json={"name": "a"})
+
+    by_path, _ = await call(mcp, {"file_id_or_path": "/Alpha/a.dat", "attributes": ["name"]})
+    by_id, _ = await call(mcp, {"file_id_or_path": WHOLE, "attributes": ["name"]})
+
+    assert (by_path, by_id) == (False, False)
+
+
+@pytest.mark.asyncio
+async def test_the_callers_that_pass_ids_from_onedata_keep_their_handling(
+    httpx_mock: HTTPXMock,
+) -> None:
+    """Readiness and the stable download tool call the API function with an id Onedata gave
+    them, and not `copied_id`: nothing is refused for its shape, and a refusal keeps its hint."""
+    httpx_mock.add_response(
+        method="GET", url=f"{API}/data/{FID}", **onedata_error(403, "forbidden")
+    )
+
+    with pytest.raises(OnedataApiError) as caught:
+        await files.get_file_attributes(FID)  # `FID` is not even a whole id
+
+    assert str(caught.value).startswith(
+        f"Not allowed to read the attributes of file id '{FID}': the token has no access to it. "
+        "Calling again will not help."
+    )
+    assert "mis-copied" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [onedata_error(403, "forbidden"), onedata_error(400, "posix", "eacces")],
+    ids=["403", "eacces"],
+)
+async def test_a_permission_refusal_of_a_copied_id_says_it_may_be_mis_copied(
+    mcp: FastMCP, httpx_mock: HTTPXMock, error: dict
+) -> None:
+    httpx_mock.add_response(method="GET", url=f"{API}/data/{WHOLE}", **error)
+
+    is_error, text = await call(mcp, {"file_id_or_path": WHOLE})
+
+    assert is_error is True
+    assert (
+        f"Could not read the attributes of file id {files._shown(WHOLE)}: the id may be "
+        "mis-copied (an id with a missing or changed character is refused like this), or the "
+        "token may have no access to the file. Copy the id exactly from the earlier answer, "
+        "or give the path, /<space_name>/<path>."
+    ) in text
+    assert "will not help" not in text and "Not allowed" not in text
+    assert "not one this token sees" not in text  # its space is the one the token sees
+    assert "(Onedata's own text)" in text
+
+
+@pytest.mark.asyncio
+async def test_a_copied_id_whose_space_the_token_does_not_see_says_so(
+    mcp: FastMCP, httpx_mock: HTTPXMock
+) -> None:
+    unseen = whole_id(OTHER_SPACE)
+    httpx_mock.add_response(
+        method="GET", url=f"{API}/data/{unseen}", **onedata_error(403, "forbidden")
+    )
+
+    is_error, text = await call(mcp, {"file_id_or_path": unseen})
+
+    assert "the id may be mis-copied" in text
+    assert "The space in the id is not one this token sees at this provider." in text
+
+
+@pytest.mark.asyncio
+async def test_an_unsupported_space_of_a_copied_id_says_it_may_be_mis_copied(
+    mcp: FastMCP, httpx_mock: HTTPXMock
+) -> None:
+    unseen = whole_id(OTHER_SPACE)
+    httpx_mock.add_response(
+        method="GET", url=f"{API}/data/{unseen}", **onedata_error(400, "spaceNotSupportedBy")
+    )
+
+    is_error, text = await call(mcp, {"file_id_or_path": unseen})
+
+    assert (
+        f"Could not read the attributes of file id {files._shown(unseen)}: this provider "
+        "reports that it does not support the space in the id. The id may be mis-copied"
+    ) in text
+    assert "copy it exactly from the earlier answer, or give the path" in text
+    assert "The space in the id is not one this token sees at this provider." in text
+    assert 'Spaces this token sees at this provider: "Alpha".' in text
+    assert "so it cannot read" not in text  # the old claim about the provider
+
+
+@pytest.mark.asyncio
+async def test_the_refusals_of_a_path_keep_their_hints_through_the_tool_too(
+    mcp: FastMCP, httpx_mock: HTTPXMock
+) -> None:
+    """A path that resolved is not a bad copy; the tool's id handling does not touch it."""
+    httpx_mock.add_response(method="POST", url=lookup_url("/Alpha/a.dat"), json={"fileId": FID})
+    httpx_mock.add_response(
+        method="GET", url=f"{API}/data/{FID}", **onedata_error(403, "forbidden")
+    )
+
+    is_error, text = await call(mcp, {"file_id_or_path": "/Alpha/a.dat"})
+
+    assert (
+        "Not allowed to read the attributes of path '/Alpha/a.dat': the token has no access to "
+        "it. Calling again will not help."
+    ) in text
+    assert "mis-copied" not in text
 
 
 # --- the surface (gate 2) ----------------------------------------------------------------------

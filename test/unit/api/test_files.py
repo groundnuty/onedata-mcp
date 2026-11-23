@@ -20,6 +20,13 @@ def _lookup_url(path: str) -> str:
     return f"https://provider.example/api/v3/oneprovider/lookup-file-id/{quote(path, safe='')}"
 
 
+def _whole_id(space_id: str = "s0") -> str:
+    """A file id of the 25.0 shape (an 8-byte header whose sixth byte is the payload's length,
+    then `guid#<uuid>#<space id>`, in hex): what `list_children` accepts as an id."""
+    payload = f"guid#0cb444f249735948f20eaf93a2dfe54bch3e33#{space_id}".encode()
+    return (bytes([0, 0, 0, 0, 0, len(payload), 0x52, 0x73]) + payload).hex().upper()
+
+
 def _mock_available_spaces(httpx_mock: HTTPXMock, names: list[str]) -> None:
     space_ids = [f"s{i}" for i in range(len(names))]
     httpx_mock.add_response(
@@ -275,9 +282,10 @@ async def test_list_children_formats_invalid_space_error_with_hints(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
     _set_env(monkeypatch)
+    directory = _whole_id()
     httpx_mock.add_response(
         method="GET",
-        url="https://provider.example/api/v3/oneprovider/data/dsadas/children",
+        url=f"https://provider.example/api/v3/oneprovider/data/{directory}/children",
         status_code=400,
         json={
             "error": {
@@ -287,11 +295,12 @@ async def test_list_children_formats_invalid_space_error_with_hints(
         },
     )
 
-    # design/14: list_children says what this provider established, not that the space is gone
+    # design/14: list_children says what this provider established, not that the space is gone;
+    # for an id the model copied, that the id may be mis-copied
     with pytest.raises(
-        OnedataApiError, match="does not support the space of file id 'dsadas'"
+        OnedataApiError, match="does not support the space in the id. The id may be mis-copied"
     ) as exc:
-        await files.list_children("dsadas", limit=10, offset=0)
+        await files.list_children(directory, limit=10, offset=0)
 
     assert 'Spaces this token sees at this provider: "Alpha".' in str(exc.value)
 

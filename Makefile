@@ -81,6 +81,7 @@ help:
 	@echo "      make k2val                                  all configs, V1..V7, K=3"
 	@echo "      make k2val K2VAL_MODELS=sonnet-medium,haiku-low K2VAL_SCENARIOS=V2,V5 K2VAL_K=1"
 	@echo "                         (K2VAL_CONFIG=... K2VAL_RID=<run id>; an id that has artefacts is refused)"
+	@echo "                         K2VAL_ARTEFACT_ROOT=<dir> keeps the run's artefacts there, not in artefacts/k2val"
 	@echo "      make k2val K2VAL_RID=<run id> K2VAL_RESUME=1   continue that run: a trial with a valid"
 	@echo "                       record is skipped, one that ended in RESET_FAIL, HARNESS_ERROR,"
 	@echo "                       ORACLE_ERROR or ADAPTER_ERROR runs again (records are appended)"
@@ -416,9 +417,11 @@ K2VAL_SCENARIOS ?= V1..V7
 K2VAL_K ?= 3
 K2VAL_RID ?=
 K2VAL_RESUME ?=
+# Where a run's artefacts go (`--artefact-root`); empty: the config's [run] artefact_root.
+K2VAL_ARTEFACT_ROOT ?=
 
 RID ?=
-K2VAL_RUN_DIRS ?= $(if $(RID),artefacts/k2val/$(RID))
+K2VAL_RUN_DIRS ?= $(if $(RID),$(or $(K2VAL_ARTEFACT_ROOT),artefacts/k2val)/$(RID))
 
 k2val-rejudge:
 	@test -n "$(K2VAL_RUN_DIRS)" || { echo "set RID=<run id> or K2VAL_RUN_DIRS=..."; exit 2; }
@@ -431,6 +434,7 @@ k2val:
 	  $(if $(K2VAL_MODELS),--models $(K2VAL_MODELS)) \
 	  --scenarios $(K2VAL_SCENARIOS) --k $(K2VAL_K) \
 	  $(if $(K2VAL_RID),--run-id $(K2VAL_RID)) \
+	  $(if $(K2VAL_ARTEFACT_ROOT),--artefact-root $(K2VAL_ARTEFACT_ROOT)) \
 	  $(if $(K2VAL_RESUME),--resume)
 
 # The smoke re-run that design/10 ("Staying stable") asks of a stable tool whose description,

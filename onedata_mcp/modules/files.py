@@ -217,7 +217,7 @@ def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
         file_id_or_path = await _resolve_or_hint(
             file_id_or_path, ctx, "/<space_name>/<path_to_file>"
         )
-        return await get_file_attributes(file_id_or_path, attributes=attributes)
+        return await get_file_attributes(file_id_or_path, attributes=attributes, copied_id=True)
 
     @mcp.tool(
         name="list_children",

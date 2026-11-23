@@ -12,6 +12,7 @@ import pytest
 from fastmcp import Client, FastMCP
 from pytest_httpx import HTTPXMock
 
+from onedata_mcp.api.transfers import SCHEDULED_NOTE
 from onedata_mcp.modules import transfers as transfers_module
 from onedata_mcp.token_policy import WRITE_TOOL_NAMES
 from onedata_mcp.tool_maturity import ALL_KNOWN, FLAG_GATED
@@ -19,8 +20,30 @@ from onedata_mcp.tool_maturity import ALL_KNOWN, FLAG_GATED
 HOST = "provider.example"
 BASE = f"https://{HOST}/api/v3/oneprovider"
 TOOL = "schedule_file_replication"
-FILE_ID = "0000000000521f5567756964236600a3ch3f2e"
+SPACE_ID = "9JO5__9nL1b01YEvwnft1r20gwgwlkIp19ND_n8hgxs"
+_PAYLOAD = f"guid#t_w-ghd1c7eDoMvTmo-gW_3aszvpHkGzy6Xw4#{SPACE_ID}".encode()
+# a file id of the 25.0 shape: an 8-byte header whose sixth byte is the payload's length, then
+# the payload, in hex
+FILE_ID = (bytes([0, 0, 0, 0, 0, len(_PAYLOAD), 0x5C, 0xF4]) + _PAYLOAD).hex().upper()
 TARGET = "pLocal0123456789abcdef"
+
+
+def _the_spaces_are_read_if_asked(httpx_mock: HTTPXMock) -> None:
+    """The error path of a file given as an id reads the token's spaces and the id's space."""
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{BASE}/spaces",
+        json=[{"name": "k2val-x", "spaceId": SPACE_ID}],
+        is_reusable=True,
+        is_optional=True,
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{BASE}/spaces/{SPACE_ID}",
+        json={"spaceId": SPACE_ID, "providers": [{"providerId": TARGET, "providerName": "site-a"}]},
+        is_reusable=True,
+        is_optional=True,
+    )
 
 
 @pytest.fixture
@@ -88,7 +111,31 @@ async def test_a_schedule_answers_the_transfer_id(
     result, text = await _call(transfers_mcp, FILE_ID)
 
     assert result.is_error is False
-    assert result.structured_content == {"transferId": "t1"}
+    assert result.structured_content == {"transferId": "t1", "note": SCHEDULED_NOTE}
+
+
+@pytest.mark.asyncio
+async def test_the_schedule_answer_says_scheduled_is_not_copied_and_names_no_tool(
+    transfers_mcp: FastMCP, httpx_mock: HTTPXMock
+) -> None:
+    """F2 (design/12): a model that read only the transfer's status answered "done". The result
+    repeats what the description says, where the model reads it at the moment it acts, and
+    names no tool, as the description does not: the one that reads the blocks may not be offered."""
+    httpx_mock.add_response(method="POST", url=f"{BASE}/transfers", json={"transferId": "t1"})
+
+    result, text = await _call(transfers_mcp, FILE_ID)
+    note = result.structured_content["note"]
+
+    assert note.startswith("Scheduled, not yet copied")
+    assert "target provider's blocks of the file" in note and "not by the transfer's status" in note
+    assert "note" in text and "Scheduled, not yet copied" in text  # in the text a client shows too
+    assert [name for name in (ALL_KNOWN | FLAG_GATED) if name in note] == []
+    # consistent with the description: the same test of completion, in the same words
+    async with Client(transfers_mcp) as client:
+        tool = next(t for t in await client.list_tools() if t.name == TOOL)
+    description = " ".join(tool.description.split())
+    assert "judge the copy by those blocks, not by the transfer's status" in description
+    assert "not by the transfer's status" in note
 
 
 @pytest.mark.asyncio
@@ -116,14 +163,15 @@ async def test_a_relative_path_is_refused_without_a_request(
             {"error": {"id": "badValueIdentifier", "details": {"key": "fileId"}}},
             "No file is known",
         ),
-        (403, {"error": {"id": "forbidden", "description": "no"}}, "will not help"),
-        (400, {"error": {"id": "spaceNotSupportedBy"}}, "no provider with that id supports"),
+        (403, {"error": {"id": "forbidden", "description": "no"}}, "may be mis-copied"),
+        (400, {"error": {"id": "spaceNotSupportedBy"}}, "the file id may be mis-copied"),
         (500, {"error": {"id": "internalServerError"}}, "status=500"),
     ],
 )
 async def test_an_error_reaches_the_model_with_its_hint_and_no_host(
     transfers_mcp: FastMCP, httpx_mock: HTTPXMock, status: int, body: dict, needle: str
 ) -> None:
+    _the_spaces_are_read_if_asked(httpx_mock)
     httpx_mock.add_response(method="POST", url=f"{BASE}/transfers", status_code=status, json=body)
 
     result, text = await _call(transfers_mcp, FILE_ID)

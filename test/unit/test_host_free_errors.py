@@ -99,6 +99,13 @@ def _no_ambient_node_names(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ONEDATA_MCP_NODE_NAMES", raising=False)
 
 
+def _whole_id(space_id: str = "s0") -> str:
+    """A file id of the 25.0 shape (an 8-byte header whose sixth byte is the payload's length,
+    then `guid#<uuid>#<space id>`, in hex): what `list_children` accepts as an id."""
+    payload = f"guid#0cb444f249735948f20eaf93a2dfe54bch3e33#{space_id}".encode()
+    return (bytes([0, 0, 0, 0, 0, len(payload), 0x52, 0x73]) + payload).hex().upper()
+
+
 def _assert_host_free(text: str) -> None:
     for leak in LEAKS:
         assert leak not in text, f"{leak!r} leaked into {text!r}"
@@ -950,7 +957,7 @@ async def test_list_children_says_the_space_is_unsupported_without_echoing_the_s
     )
     httpx_mock.add_response(
         method="GET",
-        url="https://provider.example/api/v3/oneprovider/data/dsadas/children",
+        url=f"https://provider.example/api/v3/oneprovider/data/{_whole_id()}/children",
         status_code=400,
         json={
             "error": {
@@ -961,11 +968,12 @@ async def test_list_children_says_the_space_is_unsupported_without_echoing_the_s
     )
 
     with pytest.raises(OnedataApiError) as excinfo:
-        await files.list_children("dsadas", limit=10, offset=0)
+        await files.list_children(_whole_id(), limit=10, offset=0)
 
     _assert_host_free(str(excinfo.value))
     assert str(excinfo.value).startswith(
-        "This provider does not support the space of file id 'dsadas'"
+        f"Could not list file id {files._shown(_whole_id())}: this provider reports that it "
+        "does not support the space in the id."
     )
 
 
@@ -1518,7 +1526,7 @@ async def test_a_peer_providers_domain_does_not_reach_the_invalid_space_error(
     )
     httpx_mock.add_response(
         method="GET",
-        url="https://provider.example/api/v3/oneprovider/data/dsadas/children",
+        url=f"https://provider.example/api/v3/oneprovider/data/{_whole_id()}/children",
         status_code=400,
         json={
             "error": {
@@ -1529,12 +1537,13 @@ async def test_a_peer_providers_domain_does_not_reach_the_invalid_space_error(
         },
     )
 
-    # list_children reads spaceNotSupportedBy as "this provider does not support the space"
-    # (the file tools' review: the space may still exist), not as a missing space
+    # list_children reads spaceNotSupportedBy for an id as "this provider does not support the
+    # space in the id, which may be mis-copied" (the file tools' review: the space may still
+    # exist), not as a missing space
     with pytest.raises(OnedataApiError) as excinfo:
-        await files.list_children("dsadas", limit=10, offset=0)
+        await files.list_children(_whole_id(), limit=10, offset=0)
 
-    assert str(excinfo.value).startswith("This provider does not support the space of file id")
+    assert "does not support the space in the id" in str(excinfo.value)
     assert PEER_SITE not in str(excinfo.value) and PEER_DOMAIN not in str(excinfo.value)
 
 
