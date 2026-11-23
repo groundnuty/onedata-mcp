@@ -663,6 +663,7 @@ async def test_check_ready(fed: Fed) -> None:
     assert result == {
         "ready": True,
         "files": 2,
+        "ready_files": 2,
         "bytes": 150,
         "advice": "Ready: all declared files are complete and readable at your provider now.",
     }
@@ -1839,6 +1840,7 @@ async def test_check_an_empty_file_is_ready(fed: Fed, logical: int | None) -> No
     assert result == {
         "ready": True,
         "files": 1,
+        "ready_files": 1,
         "bytes": 0,
         "advice": "Ready: all declared files are complete and readable at your provider now.",
     }
@@ -1904,6 +1906,7 @@ async def test_check_a_dataset_without_its_leading_slash_resolves_when_its_first
     assert result == {
         "ready": True,
         "files": 1,
+        "ready_files": 1,
         "bytes": 100,
         "advice": "Ready: all declared files are complete and readable at your provider now.",
     }
@@ -2352,9 +2355,17 @@ async def test_ensure_the_wait_budget_counts_from_the_start_of_the_call(
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
-    [("1000", 240), ("240.5", 240), ("240", 240), ("30", 30), ("0.5", 0.5)],
+    [
+        ("1000", 150),
+        ("240", 150),
+        ("150.5", 150),
+        ("150", 150),
+        ("149", 149),
+        ("30", 30),
+        ("0.5", 0.5),
+    ],
 )
-def test_the_wait_cap_never_exceeds_240_s_whatever_the_environment_says(
+def test_the_wait_cap_never_exceeds_150_s_whatever_the_environment_says(
     monkeypatch: pytest.MonkeyPatch, raw: str, expected: float
 ) -> None:
     monkeypatch.setenv(readiness.MAX_WAIT_ENV, raw)
@@ -2372,8 +2383,8 @@ async def test_ensure_with_a_huge_wait_cap_in_the_environment_still_ends_within_
 
     result = await ensure(deadline_s=86_400)
 
-    assert result["waited_s"] == 240
-    assert clock.elapsed <= 270
+    assert result["waited_s"] == 150  # the env may lower the wait, never raise it
+    assert clock.elapsed <= 170
 
 
 # --- 9. caps ----------------------------------------------------------------------------------
@@ -2972,6 +2983,7 @@ async def test_check_a_hanging_provider_configuration_read_answers_not_ready(
     assert result == {
         "ready": False,
         "files": 0,
+        "ready_files": 0,
         "bytes": 0,
         "bytes_local": 0,
         "unresolved": [],
@@ -3318,6 +3330,11 @@ async def test_the_ids_shown_are_capped_and_the_rest_counted(
     assert result["held"]["files"] == 5
     assert len(result["held"]["qos_requirement_ids"]) == 2
     assert result["held"]["qos_requirement_ids_not_shown"] == 3
+    # where the others are found, naming no tool
+    assert result["held"]["note"] == (
+        "Not every id is listed here: each file's QoS summary lists its requirement ids."
+    )
+    assert not re.search(r"\b[a-z]+_[a-z_]+\b", result["held"]["note"])
 
 
 @pytest.mark.asyncio
@@ -3394,3 +3411,92 @@ async def test_a_rule_id_that_cannot_be_a_segment_is_not_confirmed_and_not_reque
         await readiness._rule_confirmed(run, readiness.FileInfo(f.fid, f.path, SPACE_ID)) is False
     )
     assert not any("/qos_requirements/" in p for p in _raw_paths(httpx_mock))
+
+
+# ---------------------------------------------------------------------------
+# The operator's decisions of 2026-11-23, second round (design/17, design/18): how many files are
+# ready, and the pointer to ensure_readiness only where it is offered.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_check_says_how_many_files_are_ready_and_keeps_the_examples(fed: Fed) -> None:
+    for i in range(3):
+        fed.add(f"ok{i}.nc", 100, local="full", owner="full")
+    for i in range(4):
+        fed.add(f"far{i}.nc", 100, owner="full")
+
+    result = await check()
+
+    assert result["ready"] is False and result["files"] == 7
+    assert result["ready_files"] == 3
+    assert result["not_ready"]["at_other_site"]["files"] == 4
+    assert len(result["not_ready"]["at_other_site"]["examples"]) == 3  # still capped at three
+
+
+@pytest.mark.asyncio
+async def test_a_ready_check_counts_every_file_and_ensure_answers_without_the_count(
+    fed: Fed,
+) -> None:
+    fed.add("a.nc", 100, local="full", owner="full")
+    fed.add("b.nc", 100, local="full", owner="full")
+
+    assert (await check())["ready_files"] == 2
+    assert "ready_files" not in await ensure()
+
+
+@pytest.mark.parametrize(
+    ("offered", "rel", "blocks", "pointer"),
+    [
+        (True, "a.nc", {"owner": "full"}, True),  # at another site: it can place it here
+        (True, "b.nc", {"owner": "half"}, True),  # being written: it can wait for it
+        (False, "a.nc", {"owner": "full"}, False),  # not offered: never named
+    ],
+)
+@pytest.mark.asyncio
+async def test_check_names_ensure_readiness_only_where_it_is_offered(
+    fed: Fed, offered: bool, rel: str, blocks: dict, pointer: bool
+) -> None:
+    fed.add(rel, 100, **blocks)
+
+    result = await readiness.check_readiness(extent(), ensure_offered=offered)
+
+    sentence = "ensure_readiness can wait for it and place it at your provider."
+    assert (sentence in result["advice"]) is pointer
+    assert ("ensure_readiness" in result["advice"]) is pointer
+
+
+@pytest.mark.asyncio
+async def test_no_pointer_where_ensure_readiness_cannot_help(fed: Fed) -> None:
+    """Unreachable data: placing a rule would not bring them; a ready answer needs none."""
+    fed.add("a.nc", 100, owner="full")
+    fed.online[OWNER] = False
+    down = await readiness.check_readiness(extent(), ensure_offered=True)
+    assert "unreachable" in down["not_ready"]
+    assert "ensure_readiness" not in down["advice"]
+
+    fed.files.clear()
+    fed.add("b.nc", 100, local="full", owner="full")
+    readiness.reset_state()
+    ready = await readiness.check_readiness(extent(), ensure_offered=True)
+    assert ready["ready"] is True and "ensure_readiness" not in ready["advice"]
+
+
+def test_only_the_offered_tool_is_ever_named() -> None:
+    texts = [
+        readiness._advice(
+            ready=False,
+            counts={reason: 2},
+            unresolved=1,
+            unchecked=1,
+            waited_s=waited,
+            hold_failed=1,
+            ensure_offered=True,
+        )
+        for waited in (None, 0, 150)
+        for reason in readiness.REASONS
+    ]
+    named = {m for text in texts for m in re.findall(r"\b\w+_readiness\b", text)}
+    assert named == {"ensure_readiness"}
+    # ensure's own answer never points to itself
+    assert all("ensure_readiness" not in t for t in texts[len(readiness.REASONS) :])

@@ -434,6 +434,9 @@ async def test_rcn_the_writes_read_from_the_tool_pass_and_a_false_count_fails(
 
         reasons = seen["answer"]["not_ready"]
         assert reasons["being_written"]["files"] == 2, reasons
+        assert seen["answer"]["ready_files"] == 3
+        # RC_TOOLS does not offer ensure_readiness, so the answer does not name it
+        assert "ensure_readiness" not in seen["answer"]["advice"]
         assert art.outcome == outcome, (answer, art.oracle_diagnosis)
 
 
@@ -470,6 +473,9 @@ async def test_rco_three_examples_are_not_the_whole_set(
         answer = await result_of(app, "check_readiness", {"extent": [{"dataset": directory}]})
         examples = answer["not_ready"]["at_other_site"]["examples"]
         assert answer["not_ready"]["at_other_site"]["files"] == 4 and len(examples) == 3
+        assert answer["ready_files"] == 2
+        # the K2 set offers ensure_readiness, so the answer may point to it
+        assert "ensure_readiness can wait for them" in answer["advice"]
         shown = {e.rsplit("/", 1)[-1] for e in examples}
         stored = sorted({f"log_2020010{d}.dat" for d in range(1, 7)} - shown)
         return "Fully stored at vistula-dc: " + ", ".join(stored) + "."

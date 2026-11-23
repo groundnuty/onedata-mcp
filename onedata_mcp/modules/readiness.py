@@ -14,6 +14,7 @@ from onedata_mcp.api.readiness import (
 )
 from onedata_mcp.api.readiness import check_readiness as api_check_readiness
 from onedata_mcp.api.readiness import ensure_readiness as api_ensure_readiness
+from onedata_mcp.tool_maturity import is_offered
 
 # How both tools take the data. Each description says it in full: either tool may be offered
 # without the other, so neither names the other (design/10, gate 2).
@@ -120,7 +121,10 @@ def register_module(mcp: FastMCP) -> None:
             max_length=MAX_EXTENT_ITEMS,
         ),
     ) -> dict[str, Any]:
-        return await api_check_readiness(_as_dicts(extent))
+        # The answer points to ensure_readiness only where it is offered: a read-only token or a
+        # selection may remove it (design/10, gate 2).
+        offered = await is_offered(mcp, "ensure_readiness")
+        return await api_check_readiness(_as_dicts(extent), ensure_offered=offered)
 
     @mcp.tool(
         name="ensure_readiness",

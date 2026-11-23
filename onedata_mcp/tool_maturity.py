@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import os
+from contextvars import ContextVar
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +131,24 @@ VALID_TIERS: frozenset[str] = frozenset({"stable", "experimental"})
 
 MATURITY_ENV = "ONEDATA_MCP_MATURITY"
 TOOLS_ENV = "ONEDATA_MCP_TOOLS"
+
+# The tools the client was offered, set by a host that offers fewer than the server registers:
+# the validation panel's in-process host filters the listing per scenario
+# (`benchmark/k2val/recording.py`). Unset, the server's own tool list is what the client is
+# offered (main.py removes the rest at launch). A tool's text names another tool only when it
+# is offered (design/10, gate 2): see `is_offered`.
+OFFERED_TOOLS: ContextVar[frozenset[str] | None] = ContextVar(
+    "onedata_mcp_offered_tools", default=None
+)
+
+
+async def is_offered(server: object, name: str) -> bool:
+    """Whether `name` is offered to the client calling now: in OFFERED_TOOLS when a host set
+    it, else in the server's own tool list."""
+    offered = OFFERED_TOOLS.get()
+    if offered is not None:
+        return name in offered
+    return name in {tool.name for tool in await server.list_tools()}  # type: ignore[attr-defined]
 
 
 def maturity_of(tool: str) -> str:

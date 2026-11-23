@@ -17,6 +17,7 @@ from typing import Any
 from fastmcp.exceptions import ToolError
 
 from benchmark.llm_adapters.openai_compat import _result_to_text
+from onedata_mcp.tool_maturity import OFFERED_TOOLS
 
 
 @dataclass
@@ -59,6 +60,9 @@ class RecordingApp:
             index=len(self.calls), tool=name, arguments=dict(arguments), started_at=self._clock()
         )
         self.calls.append(record)
+        # The tools see what the model was offered, not every tool the app registers: a tool's
+        # text names another tool only when it is offered (`tool_maturity.OFFERED_TOOLS`).
+        offered = OFFERED_TOOLS.set(frozenset(self.allowed))
         try:
             if name not in self.allowed:
                 raise ToolError(f"tool {name!r} is not offered in this scenario")
@@ -76,4 +80,5 @@ class RecordingApp:
             record.result_text = record.result_text or None
             raise
         finally:
+            OFFERED_TOOLS.reset(offered)
             record.ended_at = self._clock()

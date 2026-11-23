@@ -64,10 +64,11 @@ logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_S = 5.0
 CHECK_BUDGET_S = 60.0  # check_readiness ends within this
-# One ensure_readiness call waits at most this (env below). With the grace, the whole call
-# ends within 170 s, under the ~180 s a common MCP client allows a call (design/18).
+# One ensure_readiness call waits at most this. With the grace, the whole call ends within
+# 170 s, under the ~180 s a common MCP client allows a call (design/18). The env below may
+# lower the wait, never raise it: the description says "at most about 2.5 minutes".
 MAX_WAIT_DEFAULT_S = 150
-MAX_WAIT_CAP_S = 240  # never more, whatever the env says: the harness bounds a call at 300 s
+MAX_WAIT_CAP_S = 150
 MAX_WAIT_ENV = "ONEDATA_MCP_ENSURE_MAX_WAIT_S"
 ENSURE_GRACE_S = 20.0  # the whole ensure call ends within max wait + this
 CLASSIFY_RESERVE_S = 20.0  # tail of an ensure call kept for the final classification
@@ -83,6 +84,12 @@ MAX_TRANSFERS = 50
 MAX_EXAMPLES = 3
 MAX_UNRESOLVED_SHOWN = 10
 MAX_HOLD_IDS_SHOWN = 100  # ids of the holds an answer lists; the rest are counted
+# Where the ids not listed are found (names no tool: design/10, gate 2).
+HOLD_IDS_ELSEWHERE = (
+    "Not every id is listed here: each file's QoS summary lists its requirement ids."
+)
+# The pointer to the other tool, given only where that tool is offered (decision 4, design/17).
+ENSURE_POINTER = "ensure_readiness can wait for {them} and place {them} at your provider."
 
 # The fixed expression form is the tag that marks this tool's placement rules.
 HOLD_EXPRESSION = "providerId={provider_id} & anyStorage"
@@ -128,7 +135,7 @@ def reset_state() -> None:
 
 
 def max_wait_s() -> float:
-    """How long one ensure call waits at most: the env value, else 150 s, never above 240 s."""
+    """How long one ensure call waits at most: the env value, else 150 s, never above 150 s."""
     raw = os.environ.get(MAX_WAIT_ENV, "").strip()
     if raw:
         try:
@@ -1194,9 +1201,11 @@ def _advice(
     waited_s: int | None,
     hold_failed: int,
     hold_forbidden: bool = False,
+    ensure_offered: bool = False,
 ) -> str:
-    """One or two plain sentences: what the answer means. It names no tool (the other tool may
-    not be offered alongside: design/10, gate 2).
+    """One or two plain sentences: what the answer means. It names a tool only where that tool
+    is offered (design/10, gate 2): check's answer points to ensure_readiness when the caller
+    says it is offered (`ensure_offered`), for a reason ensure_readiness can act on.
 
     Never advice on what the agent does with the data.
     """
@@ -1222,6 +1231,9 @@ def _advice(
         sentences.append(_hold_failed_sentence(hold_failed, hold_forbidden))
     if ensure and dominant in ("being_written", "in_transfer", "at_other_site"):
         sentences.append("Call again to keep waiting.")
+    elif ensure_offered and dominant in ("being_written", "in_transfer", "at_other_site"):
+        them = "it" if counts[dominant] == 1 else "them"
+        sentences.append(ENSURE_POINTER.format(them=them))
     lead = f"Not ready after {waited_s} s:" if ensure else "Not ready:"
     return f"{lead} {' '.join(sentences)}"
 
@@ -1256,6 +1268,7 @@ def _answer(
     *,
     hold: _Hold | None = None,
     waited_s: int | None = None,
+    ensure_offered: bool = False,
 ) -> dict[str, Any]:
     ready = bool(files) and not unresolved and all(f.state == "ready" for f in files)
     by_reason: dict[str, list[FileInfo]] = {}
@@ -1271,6 +1284,10 @@ def _answer(
         "files": len(files),
         "bytes": sum(f.size for f in files),
     }
+    if hold is None:
+        # How many of the files are ready (check_readiness): the examples per reason are at most
+        # three, so the count says how many the answer is about (design/17, decision 5).
+        answer["ready_files"] = sum(f.state == "ready" for f in files)
     if not ready:
         answer["bytes_local"] = sum(min(f.local_bytes, f.size) for f in files)
         if by_reason:
@@ -1293,6 +1310,7 @@ def _answer(
         waited_s=waited_s,
         hold_failed=len(hold.failed) if hold else 0,
         hold_forbidden=bool(hold and hold.forbidden),
+        ensure_offered=ensure_offered and hold is None,
     )
     if hold is not None:
         answer["waited_s"] = waited_s
@@ -1306,6 +1324,7 @@ def _answer(
         }
         if len(ids) > MAX_HOLD_IDS_SHOWN:
             answer["held"]["qos_requirement_ids_not_shown"] = len(ids) - MAX_HOLD_IDS_SHOWN
+            answer["held"]["note"] = HOLD_IDS_ELSEWHERE
         if hold.failed:
             answer["hold_failed"] = {"files": len(hold.failed), "examples": _examples(hold.failed)}
     return answer
@@ -1326,6 +1345,7 @@ def _config_unavailable(waited_s: int | None = None) -> dict[str, Any]:
         "unresolved": [],
     }
     if waited_s is None:
+        answer["ready_files"] = 0
         answer["advice"] = (
             "Not ready: provider configuration unavailable, so nothing could be checked. "
             "Call again."
@@ -1344,8 +1364,13 @@ def _config_unavailable(waited_s: int | None = None) -> dict[str, Any]:
     return answer
 
 
-async def check_readiness(extent: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Whether the declared data are ready at the local provider, or why not. Read-only."""
+async def check_readiness(
+    extent: Sequence[Mapping[str, Any]], *, ensure_offered: bool = False
+) -> dict[str, Any]:
+    """Whether the declared data are ready at the local provider, or why not. Read-only.
+
+    `ensure_offered`: ensure_readiness is offered beside this tool, so the answer may point to
+    it (the MCP wrapper says, from the server's own tool list)."""
     items = _normalise_extent(extent)
     deadline = _monotonic() + CHECK_BUDGET_S
     try:
@@ -1355,7 +1380,7 @@ async def check_readiness(extent: Sequence[Mapping[str, Any]]) -> dict[str, Any]
     run = _Run(local_id, deadline)
     files, unresolved = await _resolve(run, items)
     await _assess(run, files)
-    return _answer(files, unresolved)
+    return _answer(files, unresolved, ensure_offered=ensure_offered)
 
 
 # ---------------------------------------------------------------------------

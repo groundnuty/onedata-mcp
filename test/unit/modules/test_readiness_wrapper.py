@@ -311,6 +311,7 @@ async def test_check_readiness_through_the_mcp_client(
     assert result.data == {
         "ready": True,
         "files": 1,
+        "ready_files": 1,
         "bytes": 10,
         "advice": "Ready: all declared files are complete and readable at your provider now.",
     }
@@ -366,3 +367,121 @@ async def test_ensure_readiness_through_the_mcp_client(
     }
     posted = [r for r in httpx_mock.get_requests() if r.url.path.endswith("/qos_requirements")]
     assert len(posted) == 1
+
+
+def _mock_one_remote_file(httpx_mock: HTTPXMock) -> None:
+    """A space with one file, complete at its owner only: not ready, at another site."""
+    httpx_mock.add_response(
+        method="GET", url=f"{PROVIDER}/configuration", json={"providerId": "pLocal"}
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{PROVIDER}/spaces",
+        json=[{"name": "my-dataset", "spaceId": "s1", "fileId": "root1"}],
+    )
+    httpx_mock.add_response(
+        method="POST", url=f"{PROVIDER}/lookup-file-id/%2Fmy-dataset", json={"fileId": "root1"}
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{PROVIDER}/data/root1/files",
+        json={
+            "files": [
+                {
+                    "fileId": "f1",
+                    "path": "data_20180801.nc",
+                    "name": "data_20180801.nc",
+                    "type": "REG",
+                    "size": 10,
+                    "isFullyReplicatedLocally": False,
+                    "localReplicationRate": 0.0,
+                    "originProviderId": "pOwner",
+                }
+            ],
+            "isLast": True,
+            "nextPageToken": None,
+        },
+    )
+    storage = {"s": {"success": True, "blocks": [[0, 10]]}}
+    empty = {"s": {"success": True, "blocks": []}}
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{PROVIDER}/data/f1/distribution",
+        json={
+            "type": "REG",
+            "distributionPerProvider": {
+                "pOwner": {
+                    "success": True,
+                    "logicalSize": 10,
+                    "distributionPerStorageBackend": storage,
+                },
+                "pLocal": {
+                    "success": True,
+                    "logicalSize": 10,
+                    "distributionPerStorageBackend": empty,
+                },
+            },
+        },
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url="https://onezone.example/api/v3/onezone/providers/pOwner",
+        json={"providerId": "pOwner", "online": True},
+        is_optional=True,
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=re.compile(rf"{re.escape(PROVIDER)}/spaces/s1/transfers.*"),
+        json={"transfers": [], "nextPageToken": None},
+        is_optional=True,
+    )
+
+
+POINTER = "ensure_readiness can wait for it and place it at your provider."
+EXTENT = {"extent": [{"dataset": "my-dataset"}]}
+
+
+@pytest.mark.asyncio
+async def test_the_answer_names_ensure_readiness_when_the_server_offers_it(
+    readiness_mcp: FastMCP, httpx_mock: HTTPXMock
+) -> None:
+    _mock_one_remote_file(httpx_mock)
+
+    async with Client(readiness_mcp) as client:
+        result = (await client.call_tool("check_readiness", EXTENT)).data
+
+    assert result["ready"] is False and result["ready_files"] == 0
+    assert result["advice"].endswith(POINTER)
+
+
+@pytest.mark.asyncio
+async def test_the_answer_names_no_tool_when_the_server_removed_ensure_readiness(
+    readiness_mcp: FastMCP, httpx_mock: HTTPXMock
+) -> None:
+    """A read-only token or a selection removes it at launch (main.py)."""
+    _mock_one_remote_file(httpx_mock)
+    readiness_mcp.local_provider.remove_tool("ensure_readiness")
+
+    async with Client(readiness_mcp) as client:
+        result = (await client.call_tool("check_readiness", EXTENT)).data
+
+    assert result["ready"] is False
+    assert "ensure_readiness" not in result["advice"]
+
+
+@pytest.mark.asyncio
+async def test_a_host_that_offers_fewer_tools_than_registered_is_believed(
+    readiness_mcp: FastMCP, httpx_mock: HTTPXMock
+) -> None:
+    """The panel's in-process host offers a scenario's set of a server that registers all."""
+    from onedata_mcp.tool_maturity import OFFERED_TOOLS
+
+    _mock_one_remote_file(httpx_mock)
+    token = OFFERED_TOOLS.set(frozenset({"check_readiness"}))
+    try:
+        async with Client(readiness_mcp) as client:
+            result = (await client.call_tool("check_readiness", EXTENT)).data
+    finally:
+        OFFERED_TOOLS.reset(token)
+
+    assert "ensure_readiness" not in result["advice"]
