@@ -102,7 +102,7 @@ Like the other live tests, it is skipped unless `ONEDATA_MCP_LIVE_FILES=1`, and 
 - the unit of the times;
 - the error texts and statuses of the missing path, the made-up id and the unknown name. If the made-up id's status is not 400 or 404, or its error id is not `badValueIdentifier`, adjust the hint mapping and the unit tests' bodies before the run.
 
-## Gate 4: validation run (scenarios built in branch commit `c69fb6b`, not run)
+## Gate 4: validation run (scenarios built in branch commit `c69fb6b`; run 2026-11-22, results below)
 
 **Gate 4 runs on one integrated commit.** The packages of `remove_qos_requirement`, `schedule_file_replication`, `get_file_attributes`, `list_children` and `create_directory` are validated together, on one commit of the integration branch `feat/promotion-harness` that carries all five and the harness they share (design/08's "Scoring" and "Reading the answer"). The tool surfaces there are those of merge `d946358`, the last commit that changes any of them. Each record therefore cites the same offered-set hashes, not its own package's K1 hash. Computed as above on that tree:
 
@@ -154,24 +154,59 @@ SSL_CERT_FILE=$VALFED_HOME/tls/ca-bundle.pem \
 
 The report lands in `research/k2val-<run id>.md`.
 
-### Results: TODO
+### Results
+
+Run 2026-11-22 on master (begun at `216d450`, resumed at `c99883e` and `8863c3e`; the resumes changed only the orchestration, and the FA and V1 scoring is the same at all three), together with design/14's and design/15's scenarios. Run ids `files-k8-sonnet-medium-glm`, `files-k8-haiku-low-qwen36` and `files-k8-qwencoder-deepseek`, in the durable evidence store (outside any worktree). The run holds 1278 records for its 624 planned trials: 654 are superseded infrastructure records (634 RESET_FAIL, 20 ORACLE_ERROR), each followed by a valid record of the same trial. The resumed trials ran on a re-created federation (new provider and space ids, the same layout); each trial's record names its own. The offered surface every counted FA, FAi, FAn and V1 trial saw is K1, `9192d3f502ebbd04a4d17ef787c27f7193df0fb89bac5eafa1ea618ae1324df3`, as above. Answers were read by the deterministic reader and the judge (Claude Sonnet 5.5, effort medium).
+
+This tool's 192 trials, as stored: 152 PASS, 14 FAIL, 26 NEEDS_REVIEW. Re-scored offline with the reader fixes below and the stored verdicts (`rejudge --cached-only`): 175 PASS, 14 FAIL, 3 NEEDS_REVIEW. All three fail under either reading.
+
+PASS per config and scenario, after classification (K=8):
 
 | Config | FA | FAi | FAn | V1 |
 |---|---|---|---|---|
-| sonnet-medium (control) | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
-| haiku-low | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
-| glm | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
-| qwen36 | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
-| qwencoder | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
-| deepseek | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
+| sonnet-medium (control) | 8/8 | 8/8 | 8/8 | 8/8 |
+| haiku-low | 8/8 | 8/8 | 8/8 | 8/8 |
+| glm | 8/8 | 6/8 | 8/8 | 8/8 |
+| qwen36 | 8/8 | 4/8 | 8/8 | 8/8 |
+| qwencoder | 6/8 | 2/8 | 8/8 | 5/8 |
+| deepseek | 8/8 | 8/8 | 8/8 | 8/8 |
 
-Run id, commit and surface hash: TODO.
+175 of 192 pass. Pass rates are reported; they do not gate. The control passes all 32.
 
-Classify every non-pass before anything counts: harness or oracle bug (fix and rescore), deployment artefact, tool-attributable, or model capability. An answer the reader misread is an oracle bug.
+- **Classifications:**
+  - **Harness (oracle) bug, fixed and re-scored: the FA reader (23 NEEDS_REVIEW, now PASS; no stored PASS changed).** The judge read all 23 rightly. Three answer shapes:
+    - the odd file named first, then the others listed in a closing clause: "**log_20200103.dat** — it has permissions `600`, while the other three files (log_20200101.dat, log_20200102.dat, log_20200104.dat) all have `644`." (GLM FA #0–#4, #6; FAi #0–#3);
+    - "The file with different permissions is **log_20200102.dat**, which has mode 600. The other three (…) all have mode 644." (Haiku FAi #0, #1; DeepSeek FAi #2–#5; Qwen3.6 FAi #2);
+    - "None of them differ. All four files (…) have POSIX permissions 644." (Haiku FAn #1–#4, #6, #7).
 
-- **Classifications:** TODO. Check first whether Qwen3-Coder still sends `attributes` as JSON text: it should now succeed.
-- **Tool-attributable findings, each fixed and re-run (or accepted only with the operator's sign-off):** TODO.
+    The reader now takes "with different permissions" as naming the odd file, and "the other(s) … all have <mode>" as a contrast when that mode differs from the named file's. It no longer lets the "differ" of "none of them differ" cancel the none. Paired cases in `test/unit/k2val/test_gate4_readers.py`.
+  - **Model capability (L3b), logged, not acted on:**
+    - **FAi, Qwen3-Coder #1, #3, #4, #5, #7: no name.** It read each id's `posixPermissions` (the JSON-text `attributes` now accepted) but never asked for `name`, then answered "the second file" (#4, #7) or that it had "no way to retrieve the filename from the ID" (#1). The description says the default answer includes `name`, and the field lists it. In #2 the same model asked for `name` by id. Nothing in the surface invites it. #3, #4 and #7 are NEEDS_REVIEW (the readers disagree on how to read an answer with no name); they FAIL under either reading.
+    - **FAi, Qwen3-Coder #2:** names by id, then modes by path. The answer is right, but no mode came back from a call by the ids given, which FAi requires (design/13, "Required call"). This is the id form of `file_id_or_path` not used for the modes, not a failure of it. It stays FAIL.
+    - **FAi, a mis-copied id (Qwen3.6 #0, #5, #6, #7; GLM #6, #7).** Each passed one or more ids with characters dropped or changed, and never re-copied it. Qwen3.6 #0 and #7 lost all four ids and answered "none". #5 and #6 lost one and guessed it. GLM read the lost file by path instead (#6), or passed another file's id in its place (#7), so a mode by the id given is missing. See "Open: the hints on a mis-copied id", below.
+    - **FA, Qwen3-Coder #3, #5:** read three files' modes and answered without the fourth (`required_call_missing`), rightly as it happens.
+    - **V1 (offered, not needed), Qwen3-Coder #4, #5, #7.** #4 never called `get_file_distribution` yet answered with "physicalSize: 0 at local provider" for each file: a fabrication. #5 and #7 read `get_file_qos_summary`'s `"status": "fulfilled"` (with no requirements) as "fully stored at the local site". That is a misreading of a stable tool, logged for its smoke re-run (design/16). None misused this tool.
+- **Tool-attributable findings: none.**
+- **The watch item.** Qwen3-Coder sent `attributes` as JSON text in 125 calls. None was refused for it; the 13 that failed passed `<dir>/<file id>` as a path.
+- **Open: the hints on a mis-copied id (a gate-1 defect, not L3a).** 35 calls in the two runs passed an id that was not the brief's (Qwen3.6, GLM and Haiku). Onedata 25.0 answers such an id with `403 forbidden`, `400 spaceNotSupportedBy`, `400 badValueIdentifier` or a `400` posix error, and two of these become hints that name a cause the response does not establish:
+  - "Not allowed to read the attributes of file id '…': the token has no access to it. Calling again will not help." (Qwen3.6 FAi #7, four calls; GLM FAi #7);
+  - "This provider does not support the space of file id '…' …; the space may still exist." (Qwen3.6 FAi #0, five calls; Haiku FAi #1).
+
+  For a mis-copied id, "Calling again will not help" is false, and gate 2 asks errors to tell the caller how to fix the call. The failures are consistent with the misleading hints, but the trials do not show the hints caused them:
+  - Qwen3.6 fails just the same after the accurate hint ("This provider reports nothing at file id '…': … or the value is not a file id", FAi #5, #6). It never re-copies an id, and its "none" in #0 and #7 follows both kinds of hint alike;
+  - Haiku re-copied the id after the misleading hint and passed (FAi #1);
+  - GLM re-copied after the accurate hint and passed (FAi #4). After the misleading one (FAi #7) it retried the same wrong id once, then read by path.
+
+  It is therefore recorded as a gate-1 defect, not L3a. **Operator's call:** under the bar's third clause (one model with a traced mechanism), Qwen3.6's trace (id sent → `403` or `spaceNotSupportedBy` → the hint → its answer) could be read as L3a instead. That reading would block this promotion until the fix below is made and FAi re-run.
+
+  The fix:
+  - refuse an id that is not well formed before any request: here, 177 and 179 hex digits, which do not even decode; or one that does not decode to `guid#<uuid>#<space id>`;
+  - for a well-formed id whose space is not one the token sees, say the id may be mis-copied, instead of claiming no access or an unsupported space.
+
+  `schedule_file_replication` (design/12) and `list_children` (design/14) share the defect. A well-formedness check does not catch everything: GLM FAi #7 spliced one brief id's 8-byte header onto another file's `guid#…` payload, and Onedata returned that other file, so the header is not checked. The fix changes errors only, not the surface; FAi should be re-run on the smoke pair at K=3 after it.
 - **The run passes when** (design/10, gate 4): every control trial passes, with control trials lost to a harness bug or deployment artefact re-run after the fix, so each scenario ends with K passing control trials; and no tool-attributable finding is open (fixed and re-run, or accepted only with its cause outside the tool and the operator's sign-off).
+
+**Verdict: PASSES gate 4,** unless the operator reads the hints on a mis-copied id as L3a (above). The control passes all 32 trials and no tool-attributable finding is open. Before the promotion PR, fix the hint on a mis-copied id (gate 1) and re-run FAi on the smoke pair at K=3.
 
 ## External review (2026-11-20)
 
