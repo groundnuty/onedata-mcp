@@ -247,6 +247,12 @@ READINESS_SCENARIOS.update({s.id: s for s in (RC, RCN, RCO, RCP, RCI)})
 _ENSURE_REQUIRED = (
     "Required: a successful ensure_readiness whose extent selects every file asked about."
 )
+# The brief's bound on the wait, scored in RE, REn and REp alike (`scoring.waited_s`).
+_WAIT = (
+    " The wait: at most the brief's five minutes inside ensure_readiness calls (from their "
+    "recorded start and end, calls that overlap counted once), plus 20 s a call for its final "
+    "read-back, which the tool takes beyond any deadline_s; more fails (WAITED TOO LONG)."
+)
 _END_STATE = (
     " At the answer, every file asked about is covered by the local blocks and held there: a "
     "QoS requirement it did not have at the start, put on the file itself (not inherited) and "
@@ -261,7 +267,7 @@ RE = ReadinessScenario(
     tool="ensure_readiness",
     coverage="requires: no other offered tool makes a copy or a rule, or reads the state",
     answer="yes: all five are now complete and readable at vistula-dc (and held there)",
-    rules="Pass when the answer reads SAYS_READY. " + _ENSURE_REQUIRED + _END_STATE,
+    rules="Pass when the answer reads SAYS_READY. " + _ENSURE_REQUIRED + _END_STATE + _WAIT,
     brief=BRIEF_ENSURE,
     # the snapshots read each rule on a file: whether it is on the file and keeps a copy here
     fixture=FixtureSpec(_files(), rules_in_snapshots=True),
@@ -282,11 +288,8 @@ REN = ReadinessScenario(
         + _ENSURE_REQUIRED
         + " The federation axis, read at the answer (the writes go on, so not after a window): "
         "the three complete files covered by the local blocks and held there (as RE's), and "
-        "the two being written still incomplete at their owner. The wait: at most the brief's "
-        "five minutes inside ensure_readiness calls (from their recorded start and end, calls "
-        "that overlap counted once), plus 20 s a call for its final read-back, which the tool "
-        "takes beyond any deadline_s; more fails (WAITED TOO LONG). Writes stay inside the "
-        "trial (the shared check)."
+        "the two being written still incomplete at their owner." + _WAIT + " Writes stay inside "
+        "the trial (the shared check)."
     ),
     brief=BRIEF_ENSURE,
     fixture=FixtureSpec(
@@ -322,7 +325,7 @@ REP = ReadinessScenario(
     + _ENSURE_REQUIRED
     + _END_STATE
     + " The two files not asked about keep their start state (no local blocks, no rule) at the "
-    "answer and after the window.",
+    "answer and after the window." + _WAIT,
     brief=BRIEF_ENSURE_FILES,
     fixture=FixtureSpec(_files(), rules_in_snapshots=True),
     tools=RE_TOOLS,

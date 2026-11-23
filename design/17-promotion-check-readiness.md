@@ -158,7 +158,7 @@ The package (both tools' code and tests, `benchmark/k2val/readiness_*.py`, the V
 | Gemini 3: the advice named only the reason with the most files | BLOCKING | yes | Fixed (`bc6bd77`): every reason, in a fixed order |
 | Codex 8, Gemini 8: a short `deadline_s` did not bound placement or the final reads; `waited_s` was taken before them | MAJOR | not required (MAJOR); tests added | Fixed (`3b920aa`; design/18). Gemini's sub-claim that a cap below 20 s starved resolution was not reproducible: the grace and the reserve were both 20 s, so the work ended at start + cap; the grace now scales with the cap anyway |
 | Codex 9, Gemini 11: RE/REp counted an inherited or elsewhere-placed rule; no hold check after the window; RE's window could end at once | MAJOR | the window half not reproducible: the runner already waits the whole window for any scenario in `REQUIRED`, which RE is | Fixed (`70f9e09`; design/18): direct, locally placed holds at both snapshots, a valid baseline, RE `quiet` |
-| Codex 10: REn's five minutes unscored | MAJOR | — | Fixed (`70f9e09`; design/18) |
+| Codex 10: REn's five minutes unscored | MAJOR | — | Fixed (`70f9e09`; design/18); RE and REp held to it too (the operator's decision) |
 | Codex 12, Gemini 12: `OFFERED_TOOLS` set to the allow-list; a client filtering downstream is unseen | MAJOR (Gemini: MINOR) | — | Fixed (`bc6bd77`): the offered intersection; the production residual recorded (gate 2); the CLI legs checked |
 | Codex 13: partial evidence read as categorical (unread files "not found", a count that looked complete, every hold failure called a refusal) | MAJOR | — | Fixed (`bc6bd77`): unknown, `resolved_files`, `examples_not_shown`, hold failures by cause |
 | Codex 14: the id variant waived; no live ensure failure | MAJOR | — | Fixed (`06d851e`): RCi; a live ensure failure test, TODO(first live run) |
@@ -177,7 +177,4 @@ To complete it: fill in gates 3 and 4; then, in the same PR, move `check_readine
 
 ## Decisions for the operator
 
-Decided 2026-11-23 and applied (branch commit `29592f0`): the not-ready answer names `ensure_readiness` only where it is offered; the answer says `ready_files: N`. Decided after the external review and applied (above): empty selectors refused, a shared file name refused, the union kept and said, an ambiguous space refused and the chosen one bound to its id, every reason in the advice, partial evidence labelled, the offered intersection in the harness, RCi. Open:
-
-- Whether a file name seen once on a listing that stopped early should be taken (now it is not: another may be on the unread pages).
-- Whether the review's new defects should have their own findings entries (now folded into M-39, M-42 to M-44).
+Decided 2026-11-23 and applied (branch commit `29592f0`): the not-ready answer names `ensure_readiness` only where it is offered; the answer says `ready_files: N`. Decided after the external review and applied (above): empty selectors refused, a shared file name refused, the union kept and said, an ambiguous space refused and the chosen one bound to its id, every reason in the advice, partial evidence labelled, the offered intersection in the harness, RCi. Accepted as built (the operator, after the external review): a file name seen once on a listing that stopped early is not taken; the review's new defects are folded into M-39, M-42 to M-44. None is open.

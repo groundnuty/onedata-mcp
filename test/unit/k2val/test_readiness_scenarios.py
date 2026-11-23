@@ -1282,3 +1282,43 @@ def test_review_the_subject_of_a_split_writing_clause_is_kept(answer, said, righ
 def test_review_a_clause_about_another_site_that_also_names_this_one_is_no_ready_claim() -> None:
     answer = "The files are complete at nordic-marine-dc, with nothing at vistula-dc."
     assert read_answer("RC", answer)[0] != "SAYS_READY"
+
+
+# --- RE and REp: the brief's five minutes, scored as REn's (the operator's decision) ----------
+
+
+def _re_scored(spans: list[tuple[float, float]]):
+    from benchmark.k2val.scoring import score
+
+    c = _ctx("RE", _snap(set(FIVE), set(FIVE)))
+    calls = [_ensure_call(i, a, b) for i, (a, b) in enumerate(spans)]
+    for call in calls:  # each call established every file (its own record)
+        call.audit = {"resolved": [{"path": f"{DIR}/{n}", "state": "ready"} for n in FIVE]}
+    c.calls = calls
+    return score(SCENARIOS["RE"], c, AgentTrace(final_answer=READY))
+
+
+@pytest.mark.parametrize(
+    ("spans", "outcome"),
+    [
+        ([(0, 170), (180, 350)], "PASS"),  # two calls at the cap: 340 s, within 300 + 2 x 20
+        ([(0, 170), (180, 350), (360, 530)], "FAIL"),  # a third: 510 s, over 360
+        ([(0, 320)], "PASS"),  # one call: 320 s is exactly 300 + 20
+        ([(0, 321)], "FAIL"),  # ... and a second more is over
+    ],
+)
+def test_re_is_held_to_the_briefs_five_minutes_too(spans, outcome) -> None:
+    scored = _re_scored(spans)
+
+    assert scored.outcome == outcome, scored.diagnosis
+    wait = next(c for c in scored.checks if c.name == "waited_within_brief")
+    assert wait.passed is (outcome == "PASS")
+    assert outcome == "PASS" or "WAITED TOO LONG" in scored.diagnosis
+
+
+def test_the_five_minutes_are_scored_in_re_ren_and_rep_alike() -> None:
+    from benchmark.k2val.scoring import EXTRA_CHECKS
+
+    assert EXTRA_CHECKS["RE"] is EXTRA_CHECKS["REn"] is EXTRA_CHECKS["REp"]
+    for sid in ("RE", "REn", "REp"):
+        assert "WAITED TOO LONG" in READINESS_SCENARIOS[sid].rules, sid
