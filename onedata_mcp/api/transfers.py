@@ -30,7 +30,7 @@ from onedata_mcp.api.files import (
 )
 from onedata_mcp.api.spaces import resolve_space_id_or_name
 from onedata_mcp.config import get_oneprovider_config
-from onedata_mcp.utils import OnedataApiError, bound_message, redact_endpoints, request
+from onedata_mcp.utils import OnedataApiError, bound_message, id_segment, redact_endpoints, request
 
 TransferState = Literal["waiting", "ongoing", "ended"]
 
@@ -61,13 +61,14 @@ async def list_space_transfers(
         raise ValueError("limit must be between 1 and 1000")
 
     config = get_oneprovider_config()
+    space_segment = id_segment(space_id, "space id")
     params: dict[str, Any] = {"state": state, "limit": limit}
     if page_token:
         params["page_token"] = page_token
     response = await request(
         config,
         "GET",
-        f"/spaces/{space_id}/transfers",
+        f"/spaces/{space_segment}/transfers",
         params=params,
     )
     return response["body"]
@@ -104,7 +105,7 @@ async def get_transfer(transfer_id: str) -> dict[str, Any]:
         }
     """
     config = get_oneprovider_config()
-    response = await request(config, "GET", f"/transfers/{transfer_id}")
+    response = await request(config, "GET", f"/transfers/{id_segment(transfer_id, 'transfer id')}")
     return response["body"]
 
 
@@ -309,7 +310,7 @@ async def _providers_of_space(space_id: str) -> list[tuple[str | None, str]] | N
     only checks or explains a value goes on as it would without the listing."""
     config = get_oneprovider_config()
     try:
-        response = await request(config, "GET", f"/spaces/{quote(space_id, safe='')}")
+        response = await request(config, "GET", f"/spaces/{id_segment(space_id, 'space id')}")
     except Exception:  # noqa: BLE001 - best-effort: the caller goes on without the listing
         return None
     body = response["body"]
