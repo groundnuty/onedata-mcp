@@ -1,12 +1,14 @@
 # Smoke scenarios for the stable tools
 
-Status: built and unit-tested on the fake federation (2026-11-22), revised after an external review the same day (below). First run on the validation federation 2026-11-23, control and smoke pair, and classified ([Results](#results-of-the-first-smoke-run-2026-11-23)): `add_file_qos_requirement` is at risk (one new tool-attributable finding); `get_file_qos_summary` and `get_file_distribution` stay stable only if a record that deferred a finding to this run may serve as its baseline (the operator's call); four rows stay stable; the hint row is not verified.
+Status: built and unit-tested on the fake federation (2026-11-22), revised after an external review the same day (below). First run on the validation federation 2026-11-23, control and smoke pair, and classified ([Results](#results-of-the-first-smoke-run-2026-11-23)): `add_file_qos_requirement` had one new tool-attributable finding (SF1); `get_file_qos_summary` and `get_file_distribution` stayed stable only if a record that deferred a finding to this run could serve as its baseline (SF2, SF3; the operator's call); four rows stay stable; the hint row is not verified. The three findings are fixed in the results, errors and hints of those tools ([Fixes and the re-run](#fixes-for-sf1-to-sf3-and-their-re-run)), under design/10's rule that a tool is fixed and re-run, not demoted; the re-run is pending.
 
 [`10-tool-maturity.md`](10-tool-maturity.md), "Staying stable", says that a stable tool whose description wording, error hints or result shape changes must re-run "the tool's scenarios on the smoke pair at K=3". Eight such changes are owed, over seven tools:
 
 - reworded descriptions of six tools: `add_file_qos_requirement` (its `expression` field), `get_file_distribution`, `get_file_qos_summary`, `get_transfer`, `list_space_providers` and `list_space_transfers` (design/10, "Transition");
 - `get_qos_requirement`'s new error hints, which refuse a `qos_id` that cannot be an id (a path, a QoS expression, whitespace) and say where the ids are;
 - `get_file_qos_summary`'s result, which now carries the `replicas_num` its description promises.
+
+The first run's findings add three more changes of stable tools' results and errors, each owing the same re-run ([Fixes and the re-run](#fixes-for-sf1-to-sf3-and-their-re-run)): `add_file_qos_requirement`'s refusal of a `providerId=` value that is not a provider's id (SF1), `get_file_qos_summary`'s `meaning` on an empty `requirements` (SF2), and `get_file_distribution`'s `holds_whole_file` per provider (SF3).
 
 These tools were validated by the earlier benchmark: 18 scenarios in [`benchmark/scenarios.py`](../benchmark/scenarios.py), run against another federation. The operator decided to port the PPAM scenarios that exercised each tool into the validation panel (`benchmark/k2val`). The smoke re-run then tests what originally validated each tool, and later wording changes have a smoke set to run.
 
@@ -138,7 +140,7 @@ The smoke pair has no control. Before reading the pair's results, run the contro
 
 ### The pass rule
 
-The tool stays stable if no **new** tool-attributable failure appears; otherwise it goes back to experimental (design/10, "Staying stable").
+The tool stays stable if no **new** tool-attributable failure appears. If one does, the tool is fixed and its smoke scenarios are re-run at K=3; a clean re-run keeps it stable, and it goes back to experimental only if the fix fails or needs a change of name, input schema or annotations (design/10, "Staying stable", as amended 2026-11-23).
 
 1. **Classify every non-pass** as design/10 gate 4 lists: harness or oracle bug (fix and rescore), deployment artefact, tool-attributable, or model capability. A tool-attributable finding names one tool and its cause: the misread description text, the error text that did not prevent a wrong argument, or the missing or wrong result field (a `summary_shape` failure is always tool-attributable, to `get_file_qos_summary`).
 2. **New or known, defined once.** A tool-attributable finding is **known** only when the same tool has a finding with the same documented cause in an earlier record, and the classification cites it. The citation names the record (the PPAM K=8 run, `research/k8-headline-2026-05-03.md` and `research/k8-model-failures-detail-2026-05-03.md`, or a validation record in `design/`) and the trial or line there. Every other tool-attributable finding is **new**, in any scenario, direct or supporting. No citation means new. This holds for the ST scenarios too: a ST finding is known only with such a citation.
@@ -200,11 +202,11 @@ The SR readers' miss on "Once bytesReplicated equals …, the data are fully the
 
 | Tool | Change | Direct (scored trials, pair) | Supporting (target-matched call) | Tool-attributable findings | Verdict |
 |---|---|---|---|---|---|
-| `add_file_qos_requirement` | description: `expression` | ST1: 6 | none | **SF1, new** | **AT RISK** |
-| `get_file_distribution` | description | ST6: 6 | 11 of 18 (V1, SR1, SR1i) | SF3, known only by a record that deferred it to this run | **STAYS STABLE by the letter of rule 2 only**; AT RISK if that record cannot be its baseline |
-| `get_file_qos_summary` | description | ST3, ST5: 12 | 18 of 18 (V3, V3n, V3o) | SF2, known only by a record that deferred it to this run | **STAYS STABLE by the letter of rule 2 only**; AT RISK if that record cannot be its baseline |
+| `add_file_qos_requirement` | description: `expression` | ST1: 6 | none | **SF1, new** | **AT RISK**; SF1 fixed (this PR), smoke re-run pending |
+| `get_file_distribution` | description | ST6: 6 | 11 of 18 (V1, SR1, SR1i) | SF3, known only by a record that deferred it to this run | **STAYS STABLE by the letter of rule 2 only**; AT RISK if that record cannot be its baseline; SF3 fixed (this PR), smoke re-run pending |
+| `get_file_qos_summary` | description | ST3, ST5: 12 | 18 of 18 (V3, V3n, V3o) | SF2, known only by a record that deferred it to this run | **STAYS STABLE by the letter of rule 2 only**; AT RISK if that record cannot be its baseline; SF2 fixed (this PR), smoke re-run pending |
 | `get_file_qos_summary` | result: `replicas_num` | ST3, ST5: 12; shape check applied in 12 (control 2), failed in 0 | none | none | verified; the tool's verdict is the row above |
-| `get_qos_requirement` | error hints | ST2: 6, all pass | 0 of 12 (ST3, ST5) | none | **NOT VERIFIED**: no exposure |
+| `get_qos_requirement` | error hints | ST2: 6, all pass | 0 of 12 (ST3, ST5) | none | **NOT VERIFIED**: no exposure (open) |
 | `get_transfer` | description | ST4, ST4i: 12 | none | F2 (design/12) recurs, known | **STAYS STABLE** |
 | `list_space_providers` | description | ST7: 6 | 19 of 24 (SR1, SR1i, SR1n, ST1) | none | **STAYS STABLE** |
 | `list_space_transfers` | description | ST4: 6 | none | none | **STAYS STABLE** |
@@ -216,15 +218,15 @@ The SR readers' miss on "Once bytesReplicated equals …, the data are fully the
 
 **Tool-attributable (L3a)**
 
-- **SF1 (new; `add_file_qos_requirement`): a provider's name in the `providerId=` operand, accepted silently.** Qwen3-Coder ST1 #0: [0] `add_file_qos_requirement(expression "providerId=local", replicas_num 1)` → `{"qosRequirementId": …}`, no hint; [1] the summary: `"status": "impossible"`. The answer reads the impossible rule as a site problem ("Your local site might not support the space that contains this file") and the file never arrives (0 of 262144 bytes after the settle). FAIL.
+- **SF1 (new; `add_file_qos_requirement`): a provider's name in the `providerId=` operand, accepted silently.** *Fixed (this PR); smoke re-run pending.* Qwen3-Coder ST1 #0: [0] `add_file_qos_requirement(expression "providerId=local", replicas_num 1)` → `{"qosRequirementId": …}`, no hint; [1] the summary: `"status": "impossible"`. The answer reads the impossible rule as a site problem ("Your local site might not support the space that contains this file") and the file never arrives (0 of 262144 bytes after the settle). FAIL.
   - *The same slip, elsewhere in the run.* Qwen3-Coder ST1 #1 made it too ([0] `providerId=local`, `impossible`), then listed the providers on its own and added a rule by id ([7]): PASS. In SR1i #0, #1 and #2 the same model passed the name `local` as `schedule_file_replication`'s target and drew "Pass its id '…', not its name"; its next schedule passed an id each time (#1 and #2 the site's at once; #0 the owner's after listing the providers, then the site's). In the gate-4 run, design/12 counts ten trials that drew this hint, each followed by a schedule with the id.
   - *The evidence bar:* one family (Haiku and the control listed the providers first and used the id in all their ST1 trials), so the third clause: one model with a traced mechanism. The trace runs name → silent acceptance → `impossible` → a wrong diagnosis, and the in-run contrast shows the same model correcting the same slip at once wherever a tool's error text named it. That is design/10's "a wrong argument the schema or error text could have prevented". It is not F2's shape (an instruction not followed): here the argument was taken without a word.
   - *New:* no earlier record has a provider name as a `providerId` value of a QoS expression. M-8 (the empirical findings) and PPAM A5 concern operand keys that do not exist (`cloud=EU`), not this.
   - *Context:* the reworded `expression` text is the one this case is about (ST1, above). The federation's provider names, `local` and `owner`, read like keywords and may invite the slip; a site-like name (`providerId=vistula-dc`) is the same mistake.
-- **SF2 (`get_file_qos_summary`): `"status": "fulfilled"` with no requirements read as "fully stored here".** Qwen3-Coder V1 #2 ([0]–[5] each → `{"status": "fulfilled", "requirements": {}}`; "The QoS summary for each file shows a status of "fulfilled" with no requirements, indicating that each file is completely replicated locally"), V1 #0 ([7]–[12], with SF3), SR1 #0 ([5]: "the data should already be fully present at the local site"), SR1i #2 ([4], with F2). All four FAIL. The V1 answers were false (four of the six files had 0 local bytes); the SR1 and SR1i claims were true when made but unread.
+- **SF2 (`get_file_qos_summary`): `"status": "fulfilled"` with no requirements read as "fully stored here".** *Fixed (this PR); smoke re-run pending.* Qwen3-Coder V1 #2 ([0]–[5] each → `{"status": "fulfilled", "requirements": {}}`; "The QoS summary for each file shows a status of "fulfilled" with no requirements, indicating that each file is completely replicated locally"), V1 #0 ([7]–[12], with SF3), SR1 #0 ([5]: "the data should already be fully present at the local site"), SR1i #2 ([4], with F2). All four FAIL. The V1 answers were false (four of the six files had 0 local bytes); the SR1 and SR1i claims were true when made but unread.
   - *The evidence bar:* one family, so the third clause, applied as for SF1. The trace is complete in each trial: the call, the vacuous `fulfilled` it returned, and an answer that gives that field as its reason. The description lists the status values but says neither what `fulfilled` means with no requirement nor that the status says nothing of where the data are. SF1's in-run contrast is corroboration, not the clause, and SF2 has none: no trial shows another wording preventing it.
   - *Known by the letter:* design/13, "Results", V1, Qwen3-Coder #5 and #7, logged there (as L3b) for this re-run. See "known" above.
-- **SF3 (`get_file_distribution`): the local provider's empty entry read as holding the file.** Qwen3-Coder V1 #0 ([6]: the local entry has `"success": true`, `virtualSize` 262144, `physicalSize` 0 and no blocks; the answer: "each file has a successful distribution at the local provider", "the correct virtual size matching its physical size at the local provider") and SR1n #0 ([2]: "the file is already present at the "local" provider with a full physical size of 262144 bytes", which then shaped its copy to `owner`). Both FAIL (V1 #0 also for SF2; SR1n #0 for its write).
+- **SF3 (`get_file_distribution`): the local provider's empty entry read as holding the file.** *Fixed (this PR); smoke re-run pending.* Qwen3-Coder V1 #0 ([6]: the local entry has `"success": true`, `virtualSize` 262144, `physicalSize` 0 and no blocks; the answer: "each file has a successful distribution at the local provider", "the correct virtual size matching its physical size at the local provider") and SR1n #0 ([2]: "the file is already present at the "local" provider with a full physical size of 262144 bytes", which then shaped its copy to `owner`). Both FAIL (V1 #0 also for SF2; SR1n #0 for its write).
   - *The evidence bar:* the third clause, as SF2: in V1 #0 the answer reasons from the empty entry's `success` and `virtualSize`. SR1n #0 gives the owner's size to the local site, a plainer misread of the same entry.
   - *Known by the letter:* design/12, "Results", SR1o, Qwen3-Coder #0–#2, #4–#7, logged there (as L3b) for this re-run.
 - **F2, completion claimed off the transfer's status (logged against `get_transfer`).** Qwen3-Coder SR1i #1 ("I've checked the transfer status and can confirm … Bytes replicated: 12,425,587 (which matches the file size)"; the file is 134,217,728 bytes) and SR1i #2 ("the replication transfer is complete"). Known: design/12, "Results", F2 (Qwen3-Coder SR1i #1, #3, #5, #6).
@@ -240,10 +242,38 @@ The SR readers' miss on "Once bytesReplicated equals …, the data are fully the
 
 ### What the protocol asks next
 
-- **`add_file_qos_requirement`.** By design/10, "Staying stable", a new tool-attributable failure sends the tool back to experimental. The fix the trace points to is in the tool: refuse (or answer with a hint) a `providerId=` operand whose value is the name of a provider of the file's space, as `schedule_file_replication` does ("Pass its id …, not its name"). That is a change to its error hints, so ST1 then re-runs on the smoke pair at K=3. Whether the tool returns to stable after that re-run, or goes through the five gates again as an experimental tool, is the operator's call.
-- **`get_file_qos_summary` and `get_file_distribution`.** Cleared only if the operator takes the deferring records as their baseline. Otherwise SF2 and SF3 are new, each tool goes back to experimental, and the fixes the traces point to are result or description wording, each followed by its scenarios on the smoke pair at K=3: for SF2, say in the summary (or its description) that a status with no requirement is vacuous and says nothing of where the data are; for SF3, say that a provider entry with no blocks holds none of the file, whatever its `virtualSize`.
+- **`add_file_qos_requirement`.** The fix the trace points to is in the tool: refuse a `providerId=` operand whose value is the name of a provider of the file's space, as `schedule_file_replication` does ("Pass its id …, not its name"). That is a change to its error hints, so ST1 re-runs on the smoke pair at K=3. The operator ruled on 2026-11-23 (design/10, "Staying stable") that a tool with a new tool-attributable finding is fixed and re-run, and demoted only if the fix fails or needs a name, schema or annotation change; the fix needs none.
+- **`get_file_qos_summary` and `get_file_distribution`.** Whether the deferring records could be the baseline no longer decides anything: SF2 and SF3 are treated as new and fixed, each tool followed by its scenarios on the smoke pair at K=3. For SF2 the summary says that a status with no requirement is vacuous and says nothing of where the data are; for SF3 each provider entry says whether it holds the whole file.
 - **`get_qos_requirement`'s hints:** not verified; the Transition item stays open.
 - **The other four rows** (`get_file_qos_summary`'s `replicas_num`, `get_transfer`, `list_space_providers`, `list_space_transfers`): cleared.
+
+## Fixes for SF1 to SF3 and their re-run
+
+The three fixes change results, errors and hints only (design/10, "Aim"; findings M-36 to M-38 in `research/empirical-mcp-server-findings.md`). No tool's name, input schema, annotations or description changed: the `tools/list` hash of each of the three tools, of K1 (`9192d3f5…`) and of ST7_TOOLS is the one before the change.
+
+| Finding | Tool | What a model now gets |
+|---|---|---|
+| SF1 | `add_file_qos_requirement` | Before the rule is created, each `providerId=<value>` operand is checked against the providers of the file's space (one `GET /spaces/{id}`; the space comes from the file id). A value that is a provider's name is refused: "'local' is a provider's name; providerId= takes its id: providerId=<id>, here providerId=<that id>", with the space's providers listed. A value that is neither a name nor an id of one is refused with the providers listed. Ids pass unchanged and no other operand is looked at. With no `providerId=` operand there is no extra request, and if the space or its providers cannot be read the rule is created as before. |
+| SF2 | `get_file_qos_summary` | When `requirements` is an empty mapping, a `meaning` field: "No QoS requirement applies to this file (inherited ones included); 'fulfilled' here says nothing about where its data are." (the status as returned). With requirements, nothing is added. |
+| SF3 | `get_file_distribution` | On each readable provider entry of a regular file, `holds_whole_file`: true or false, from that provider's blocks against the file's size (the largest size any provider reports, or a block's end if larger). `null` with a `holds_whole_file_note` when no provider reports a size above 0, or the provider's blocks could not be read in full. The existing fields stay; a directory's entries and failed entries are left as they are. |
+
+Unit tests: `test/unit/api/test_qos_provider_operands.py` (a name, an unknown value, a valid id, a compound expression, a failed or empty listing, an id that does not decode, no operand), `test/unit/modules/test_qos_wrapper.py` (the refusal through the tool; an empty and a non-empty summary), `test/unit/modules/test_files_wrapper.py` (whole, partial, empty, zero or unknown size, unreadable blocks).
+
+### The re-run
+
+Each of the three tools owes its scenarios on the smoke pair at K=3 (design/10, "Staying stable"): ST1 for `add_file_qos_requirement`; V1, V3, V3n, V3o, ST3 and ST5 for the summary; V1, SR1, SR1i, SR1n and ST6 for the distribution. The union is 11 scenarios, 2 × 11 × 3 = 66 trials. SR1n is not in the map's row for `get_file_distribution` (V1, SR1, SR1i, ST6); it is added because SF3 was seen there (SR1n #0). The map is unchanged.
+
+    make valfed-up && make valfed-reset && make valfed-check   # check $VALFED_HOME/HOLD first: the host is shared
+    SSL_CERT_FILE=$VALFED_HOME/tls/ca-bundle.pem \
+      make k2val K2VAL_CONFIG=benchmark/k2val/k2val.valfed.toml \
+        K2VAL_ARTEFACT_ROOT=$VALFED_HOME/evidence/k2val \
+        K2VAL_MODELS=qwencoder,haiku-low K2VAL_K=3 K2VAL_RID=smoke-stable-2 \
+        K2VAL_SCENARIOS=V1,V3,V3n,V3o,SR1,SR1i,SR1n,ST1,ST3,ST5,ST6
+
+`K2VAL_ARTEFACT_ROOT` is the Makefile's name for `--artefact-root`. The pass rule is the one above: a clean re-run keeps the three tools stable.
+
+- **SF1's refusal is NOT VERIFIED** until a re-run trial draws it, that is, a model sends a provider's name (or another value that is not an id) in `providerId=` and is shown the refusal. With no such trial the hint stays an open item: unit tests do not clear it (design/10). SF2's `meaning` and SF3's `holds_whole_file` are in front of a model on every call that returns an empty summary or a regular file's distribution. The report counts exposures only of `get_qos_requirement`'s hint, so for these three they are read off the recorded calls.
+- **The `get_qos_requirement` hint row stays NOT VERIFIED (open).** Nothing here changes it: the run still needs a trial that sends that tool a malformed id.
 
 ## Review of 2026-11-22 (external, jailed)
 

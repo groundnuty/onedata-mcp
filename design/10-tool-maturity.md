@@ -69,7 +69,9 @@ A tool is promoted by a PR that moves it into `STABLE` and adds its validation r
 A change to a stable tool's surface:
 
 - **name, input schema or annotations**: the tool goes back to experimental. These changes break agents and clients that already use it.
-- **description wording, the wording of its error hints, or the shape of its result**: re-run the tool's scenarios on the smoke pair at K=3. The tool stays stable if no new tool-attributable failure appears; otherwise it goes back to experimental.
+- **description wording, the wording of its error hints, or the shape of its result**: re-run the tool's scenarios on the smoke pair at K=3. The tool stays stable if no new tool-attributable failure appears.
+  - When one does (operator, 2026-11-23), the tool is fixed and its smoke scenarios are re-run on the pair at K=3. A clean re-run keeps it stable. It goes back to experimental only if the fix fails or needs a change of name, input schema or annotations.
+  - A hint that no model was exposed to in the re-run stays "NOT VERIFIED", an open item: unit and live tests do not clear it.
 
 Bug fixes that leave both the surface and the behaviour unchanged need only gates 1 and 3.
 
