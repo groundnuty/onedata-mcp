@@ -314,7 +314,10 @@ _HAS_RULE = re.compile(
     r"set|fulfilled|defined|attached|in effect))\b"
     # "kept at vistula-dc by a QoS rule", "protected by a requirement"
     r"|\b(?:kept|protected|covered|governed|held|pinned|retained|required)\b[^.\n]{0,60}?\bby\b"
-    r"[^.\n]{0,30}?\b" + _RULE_NOUN + r"\b",
+    r"[^.\n]{0,30}?\b" + _RULE_NOUN + r"\b"
+    # "the requirement specifies this provider, so the file is indeed kept at the local site"
+    r"|\b" + _RULE_NOUN + r"\b[^.\n]{0,80}?\b(?:is|are)\s+(?:\w+\s+)?(?:kept|held|stored|"
+    r"pinned|placed)\s+(?:at|on|in)\b",
     re.I,
 )
 _OPENS_YES = re.compile(r"\A\W*yes\b", re.I)
