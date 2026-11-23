@@ -1600,6 +1600,205 @@ SR1n, ST6, K=3).
 
 ---
 
+## M-39. The extent's shape guessed, and an unknown field dropped
+
+**Surface:** `check_readiness`, `ensure_readiness`, their `extent`
+(`onedata_mcp/modules/readiness.py`, `onedata_mcp/api/readiness.py`).
+
+**Behaviour:** the schema gave the item's fields (`dataset`, `files`,
+`date_ranges` with `start` and `end`) with descriptions, but no whole
+example. In the panel's second wave (the jailed CLI legs, design/08)
+one agent guessed `{space, paths, date_from, date_to}`; without
+`dataset` it was refused, and it recovered. Gate 1 then found the
+worse half: a field the item does not have was dropped silently, so
+`{dataset, paths, date_from}` became `{dataset}`, which means the
+whole dataset.
+
+**Why this matters:** a guess that keeps `dataset` succeeded on other
+data than declared. `check_readiness` answered for the whole dataset;
+`ensure_readiness` placed a hold on every file of it.
+
+**How it was found:** the panel's second wave (the guess); gate 1 of
+the readiness tools' promotion (the drop).
+
+**Evidence:** design/17, gate 1 ("An extent item with a field it does
+not have"); design/18, decision 1.
+
+**Fix:** the `extent` field's description carries a concrete example
+with both dataset forms, `files` and `date_ranges`, and a test checks
+that it validates. An item or a date range with another field is
+refused by name (`additionalProperties: false`; the API: "extent[0]
+has no field 'date_from', 'paths': its fields are dataset, files,
+date_ranges").
+
+**Decision:** Fixed (this PR, the operator's decision 1). The example
+is NOT VERIFIED until a gate-4 trial shows a model reading it
+(design/17, design/18).
+
+---
+
+## M-40. One `ensure_readiness` call longer than a common client allows
+
+**Surface:** `ensure_readiness`, its wait (`MAX_WAIT_DEFAULT_S`,
+`ENSURE_GRACE_S`) and its description.
+
+**Behaviour:** one call waited up to 240 s and ended within 270 s.
+In the panel's second wave a CLI agent's MCP client cancelled one
+call at 180 s, a common client timeout.
+
+**Why this matters:** a cancelled call returns no answer: the agent
+sees a timeout, not "not ready because still being written", while
+the holds the call placed stay. A weaker model reads a timeout as a
+failure, not as "call again".
+
+**How it was found:** the panel's second wave (the jailed CLI legs).
+
+**Evidence:** design/18, decision 2; the tests "a default ensure call
+ends under a 180 s client timeout" (`test/unit/api/test_readiness.py`).
+
+**Fix:** one call waits at most 150 s and ends within 170 s (the grace
+for the final pass 30 → 20 s); the description says "at most about
+2.5 minutes". A longer wait is several calls, as the description and
+the not-ready answer say ("Call again to keep waiting").
+`ONEDATA_MCP_ENSURE_MAX_WAIT_S` may still raise the wait to 240 s.
+
+**Decision:** Fixed (this PR, the operator's decision 2). Open for the
+operator: whether the env ceiling stays at 240 s (design/18).
+
+---
+
+## M-41. Holds with no way to release them
+
+**Surface:** `ensure_readiness`, its answer and its description.
+
+**Behaviour:** the tool places one QoS requirement per file, which
+keeps the file at the provider until it is removed. Its answer named
+the expression, never the requirements' ids, and its description said
+the data are kept "for your run", though nothing ends a hold when a
+run ends.
+
+**Why this matters:** an agent could neither release what it held nor
+tell that it held anything lasting; the words suggested a hold that
+ends by itself.
+
+**How it was found:** the review of the experimental tools before
+their promotion (an observation; no trial failed on it).
+
+**Evidence:** design/18, decision 3.
+
+**Fix:** the answer's `held` lists `qos_requirement_ids` (in the
+files' path order; at most 100, the rest counted), only for holds
+confirmed for that answer. The description: "Each file is held by a
+QoS requirement that keeps it at your provider until that requirement
+is removed by its id; the answer lists the ids." It names no tool.
+The panel places the removal of such a hold inside the trial when the
+call that listed it was (`scoring._qos_attachment`); before, it was an
+unverifiable write, a harness outcome in V6 and V7.
+
+**Decision:** Fixed (this PR, the operator's decision 3). NOT VERIFIED
+until a trial reads the ids. Open: holds placed by a server process
+that has since restarted are not listed (design/18).
+
+---
+
+## M-42. V5's reading: a false count passed, a true example failed
+
+**Surface:** the panel's answer readers for V5 (`benchmark/k2val/`
+`oracles.py`, `rubrics.py`, `reading.py`): the harness, not a tool.
+
+**Behaviour:** both readers took the files an answer names as its
+whole claim. "Not ready: all five files are still being written" (a
+false quantity, no name) passed; "some files are still being written,
+including log_20200102.dat" (one true example) failed.
+
+**Why this matters:** V5 probes the failure the panel was built for
+(writes read as absence, done claimed early); a reading that passes a
+false count and fails a true example measures neither.
+
+**How it was found:** the gate-4 reading review of the second promotion
+wave (design/08, which left V5 out of that wave).
+
+**Evidence:** design/08 ("V5's reading"); the paired tests in
+`test/unit/k2val/test_oracles.py`.
+
+**Fix:** both readers return, beside the label, the names and the
+counts an answer states for the files being written (`#2`, `#all`),
+read from that clause only ("Of the 5 files, 2 are …" counts two). A
+name is an example: each must be one of the files being written. A
+count is a claim about the whole: each must be true. The same rule
+scores RCn and REn. The shared vocabulary lists no passing label
+first, and a ready sentence about some files beside files still being
+written reads as not ready.
+
+**Decision:** Fixed (this PR, the operator's decision 5). V5's earlier
+results remain no evidence; the readiness tools' gate-4 run re-runs V5.
+
+---
+
+## M-43. A tool's text named a tool that may not be offered
+
+**Surface:** `ensure_readiness`'s description ("Takes the same `extent`
+as check_readiness"); `check_readiness`'s not-ready answer
+("ensure_readiness can wait for them and place them at your
+provider").
+
+**Behaviour:** each text pointed to the other tool. A read-only token
+prunes `ensure_readiness`, and a client or a scenario may offer one
+tool without the other.
+
+**Why this matters:** design/10's gate 2: a model told about a tool it
+does not have either looks for it or calls it; a client may run a
+named tool that was not offered (design/15 records one such call).
+
+**How it was found:** gate 2 of the readiness tools' promotion.
+
+**Evidence:** design/17 and design/18, gate 2.
+
+**Fix:** `ensure_readiness`'s description says what `extent` is itself;
+no answer of either tool names a tool ("Call again to keep waiting").
+Tests check every description, schema text and answer text.
+
+**Decision:** Fixed (this PR).
+
+---
+
+## M-44. Readiness hints that claimed more than the provider said
+
+**Surface:** `check_readiness`, `ensure_readiness`: their unresolved
+items and errors.
+
+**Behaviour:** found writing the gate-1 tests, as in M-19:
+- a bare 404 for a dataset read "no such directory" (it may be one the
+  token cannot see); a 5xx carrying `enoent` read the same;
+- a space the provider does not list for the token read "Space 'x' not
+  found" (it may exist elsewhere);
+- a refusal of access to a dataset escaped as the provider's error,
+  with no hint;
+- an id given where a name or path is asked for read as a mistyped
+  name; a space given by its id was matched, then looked up as a path
+  and not found;
+- a provider id and a rule id went into request paths as given (M-14's
+  class).
+
+**Why this matters:** a hint is read as the tool's diagnosis (the
+Aim's rule 3); a false "does not exist" ends a search.
+
+**How it was found:** gate 1 of the readiness tools' promotion.
+
+**Evidence:** design/17, gate 1 (the table).
+
+**Fix:** each names only what the response establishes (design/17's
+table): "not found at your provider: no such directory, or one this
+token cannot see"; a 5xx escapes as itself; "your provider supports no
+space named 'x' for this token"; "cannot be listed: the provider
+refused this token access to it"; an id is named as an id; a space
+given by its id is listed under its name; ids go into paths through
+`id_segment`.
+
+**Decision:** Fixed (this PR).
+
+---
+
 ## Future findings
 
 This file accretes as the benchmark and the maturity protocol run.
