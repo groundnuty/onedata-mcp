@@ -1085,8 +1085,9 @@ docstring and tests use `expression`, which changes no model-facing
 text.
 
 **Decision:** Fixed (PR #35). The first fix changes a stable tool's
-result shape, so `get_file_qos_summary` owes the K=3 smoke re-run
-(design/10, "Staying stable"). Its ST3 and ST5 scenarios check the
+result shape, so `get_file_qos_summary` owed the K=3 smoke re-run
+(design/10, "Staying stable"); run `smoke-stable-1` verified the shape in every
+exposed trial (design/16). Its ST3 and ST5 scenarios check the
 field in every summary a model receives (design/16).
 
 ---
@@ -1272,7 +1273,7 @@ reading directly (the summary already includes inherited rules), and
 is rule 4 of the aim above. Cost: a stable tool's result, so a K=3
 smoke re-run of its rows (design/16). The same change serves M-34's
 V1 misreading. **Now implemented by M-37** (a `meaning` field on an
-empty summary); smoke re-run pending.
+empty summary); smoke re-run `smoke-stable-2`: clean (design/16).
 
 ---
 
@@ -1410,7 +1411,9 @@ the same stop in a second family or at the control.
 
 **Evidence:** design/12 and design/13, Results.
 
-**Decision:** Not changed: model capability; logged against both
+**Decision:** Superseded by M-37 and M-38 (PR #48): the accommodation
+was made after all, and run `smoke-stable-2` was clean. Originally:
+not changed, model capability; logged against both
 tools for their K=3 smoke re-run (design/16), whose scenarios for
 `get_file_distribution` include V1 and ST6 (per-provider shares). The
 answers were unambiguous: the entry says 0 bytes, and a summary with
@@ -1425,10 +1428,12 @@ a tool finding.
   provider's blocks and the file size, so a 0-byte entry cannot read
   as a copy. Cost: a stable tool's result, so a K=3 smoke re-run (its
   rows: ST6, V1, SR1, SR1i). **Now implemented by M-38** (a
-  `holds_whole_file` field per provider); smoke re-run pending.
+  `holds_whole_file` field per provider); smoke re-run
+  `smoke-stable-2`: clean (design/16).
 - `get_file_qos_summary`: M-30's explicit "no QoS requirement applies
   to this file" when the summary is empty. One change, one re-run.
-  **Now implemented by M-37**; smoke re-run pending.
+  **Now implemented by M-37**; smoke re-run `smoke-stable-2`: clean
+  (design/16).
 - The fabrication (V1 #4): none; no tool was called.
 
 ---
@@ -1514,8 +1519,10 @@ is checked against the providers of the file's space (one `GET
 The tool's name, input schema, annotations and description are
 unchanged.
 
-**Decision:** Fixed (this PR); smoke re-run pending (ST1, K=3). The
-refusal is NOT VERIFIED until a re-run trial draws it (design/10).
+**Decision:** Fixed (PR #48); smoke re-run `smoke-stable-2`: clean.
+The name refusal was shown twice (Qwen3-Coder ST1 #1, #2), and each
+next call of the tool passed the id. The refusal of a value that is neither an id
+nor a name was shown to no model: NOT VERIFIED, open (design/16).
 
 ---
 
@@ -1554,8 +1561,12 @@ names no tool. This is the accommodation candidate of M-30 and M-34,
 now implemented. The tool's name, input schema, annotations and
 description are unchanged.
 
-**Decision:** Fixed (this PR); smoke re-run pending (V1, V3, V3n, V3o,
-ST3, ST5, K=3).
+**Decision:** Fixed (PR #48); smoke re-run `smoke-stable-2`: clean.
+`meaning` was shown in 13 trials, 6 of them asking where the data are,
+and no answer read it as a statement about the data (design/16). One
+trial read the summary's `pending` after adding a rule and stopped
+(Qwen3-Coder ST1 #0): model capability, by the operator's decision of
+2026-11-23. It did not wait, and the summary was accurate.
 
 ---
 
@@ -1595,8 +1606,11 @@ fields stay; a directory's entries and failed entries are left as they
 are. This is the accommodation candidate of M-34, now implemented. The
 tool's name, input schema, annotations and description are unchanged.
 
-**Decision:** Fixed (this PR); smoke re-run pending (V1, SR1, SR1i,
-SR1n, ST6, K=3).
+**Decision:** Fixed (PR #48); smoke re-run `smoke-stable-2`: clean.
+`holds_whole_file` was shown in 31 trials, 19 with an entry that is
+not whole, and no answer read such an entry as whole. Twice an empty
+entry was read as part of a copy (design/16). The `null` branch was
+shown to no model: NOT VERIFIED, open.
 
 ---
 
