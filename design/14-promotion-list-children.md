@@ -1,6 +1,6 @@
 # Promotion record: `list_children`
 
-Status: **in progress** (updated 2026-11-23). Gates 1 to 3 are done: the live test passed against Onedata 25.0 (2026-11-21, 10 passed). Gate 4 ran 2026-11-22 (results below); by the operator's decision F3 is fixed (PR #46), and LCp and LCi are being re-run at K=8 before promotion.
+Status: **gate 4 passed** (updated 2026-11-24). Gates 1 to 3 are done: the live test passed against Onedata 25.0 (2026-11-21, 10 passed). Gate 4 ran 2026-11-22 (results below); by the operator's decision F3 was fixed (PR #46), and LCp and LCi were re-run at K=8 on the six-config panel on 2026-11-23 (run `rerun-k8`, "Re-run after the 2026-11-23 decisions", below). The re-run leaves no tool-attributable finding open.
 
 The short commit ids below are **branch commits** on `feat/promote-file-tools`. A squash merge leaves them unreachable from `master`. **The anchor is the surface hash.**
 
@@ -81,7 +81,7 @@ The 25.0 error bodies are unverified, as in design/13.
 - **`make conformance`: passed** on the integrated server (the integration branch `feat/promotion-harness` at `501c867`, which carries all five packages), run 2026-11-21 (`conformance-results/20261121T010707Z`) with `@modelcontextprotocol/conformance@0.1.16`, the version `make conformance` now pins: 12 passed, 20 failed, every failure expected (`conformance-baseline.yaml`: scenarios that need prompts, resources, completion, sampling, elicitation or the suite's own test tools, none of which this server has), and the baseline check passed. Conformance tests the protocol, not one tool, so this one run serves design/11–15.
 - **Reported, not changed:** the curation note `design/03-tool-allowlist-curation.md` says `list_files_recursively` with `max_depth=1` reproduces this tool; that tool has no such parameter (triage). Stable `list_files_recursively`'s `attributes` field still points to `get_file_attributes` (design/13).
 
-## Gate 3: live check (built in branch commits `d94e5c9` and `ab05369`; first live run 2026-11-21, recorded in part)
+## Gate 3: live check (built in branch commits `d94e5c9` and `ab05369`; done, first live run 2026-11-21: 10 passed)
 
 [`test/live/test_files_live.py`](../test/live/test_files_live.py), section `list_children`:
 
@@ -90,16 +90,17 @@ The 25.0 error bodies are unverified, as in design/13.
 
 Gated and guarded as design/13 describes; run with `make valfed-files-live` or `make test-files-live`. Since the external review (findings 4 and 11): the probe directory is made exclusively and deleted by its id; the page read with `offset: 10` must equal the token walk's second page; the three subdirectories must carry `type` `DIR`; listing a regular file, a made-up token and a missing path are asserted against the expected contracts and marked `TODO(first live run)` (the first two are settled by the first live run, below). `make valfed-check` now also builds LCp's fixture (15 entries, waited for at the local provider).
 
-**Results: recorded in part.** The first live run (2026-11-21, Onedata 25.0) settled these:
+**Results.** The first live run (2026-11-21, Onedata 25.0, `make valfed-files-live`, 10 passed) settled these:
 
 - **A regular file as the parent:** 25.0 does not fail. It lists the file as its own only entry (gate 1's row); the tool refuses it with `'<path>' is a regular file, not a directory; it has no children.`, and the live test asserts that text.
 - **A made-up token** (`not-a-token`) on a directory that lists without one: **`500 internalServerError`**, not the 400 this record first assumed. The live test pins `BAD_TOKEN_STATUS = 500` and `BAD_TOKEN_ERROR_ID = "internalServerError"`, and lists the directory without a token right before and right after, since a 500 is also the answer to any server failure. The model reads the page-token hint of gate 1 (`5e05990`). Findings log M-24; Onedata-side entry 22 of `research/empirical-onedata-25.0-findings.md`.
 - **Token paging:** the live file's 10 tests passed on the same day (`make valfed-files-live`, design/15's gate 3), and one of them is LCp's token walk. It asserts that the first page (default limit) holds 10 entries with `isLast` false, that each next page, requested with the token and no offset, returns a new token until `isLast`, that the walk covers all 14 entries and starts with the first page, and that a page read with `offset: 10` equals the walk's second page. So a token page is accepted without an offset. This is read from the test's assertions and the pass count, not from a recorded printout.
 
-Still to record:
+Recorded since, from the same run's printout (2026-11-23):
 
-- the order of the entries, printed by that test but not recorded here. If 25.0 does not list in name order, LCp may hold all three subdirectories on its first page: change LCp's names so the two empty ones sort last, before the run;
-- the error text of a missing path.
+- **The order of the entries:** name order. The token walk listed `calib_runs`, `log_20200101.dat` … `log_20200111.dat`, `raw_frames`, `spare_slots`, the first page holding the first ten, and the page read with `offset: 10` held the last four. LCp does not depend on it: its fixture check refuses to start unless the first page of 100 holds none of the three subdirectories.
+- **A missing path:** `Path "<path>/no-such-dir" not found`.
+- **An empty directory:** `{"children": [], "isLast": true}`, with a `nextPageToken` beside them.
 
 ## Gate 4: validation run (scenarios built in branch commit `9694c3d`; run 2026-11-22, results below)
 
@@ -179,7 +180,7 @@ PASS per config and scenario, after classification (K=8):
   - **Deployment artefact (1): DeepSeek LCp #4,** NO_RESULT. After four good pages, 29 of its `list_children` calls failed with `connection_error` from the provider, and it ran out of its 40 rounds. Not a control trial; a re-run would only complete the grid.
   - **Paging stopped while `isLast` was false (3): Qwen3.6 LCp #4, Qwen3-Coder LCp #3, #5.** This is finding F3 below.
 - **Tool-attributable findings:**
-  - **F3 (was L3a, open; since 2026-11-23 not L3a under the one-family rule, fixed by decision, re-run TODO): paging stopped while `isLast` was false (LCp).**
+  - **F3 (was L3a, open; since 2026-11-23 not L3a under the one-family rule, fixed by decision; re-run 2026-11-23, below): paging stopped while `isLast` was false (LCp).**
     - Qwen3.6 #4 read four pages of 10 and one of 100, each `isLast: false`, and answered "`acq_0001.dat` through `acq_0100.dat` (and potentially more …). **The directory has no subdirectories.**"
     - Qwen3-Coder #3 read one page (10 entries, `isLast: false`) and answered "does not contain any subdirectories".
     - Qwen3-Coder #5 read four pages, each `isLast: false`, and answered "I've checked all pages".
@@ -190,37 +191,54 @@ PASS per config and scenario, after classification (K=8):
 
     *Fixes to consider:* a result that states the continuation when `isLast` is false (for example "more entries follow: call again with token"), or a larger default `limit` (10 now; 100 would fit LC's fixtures, though not LCp's 113 entries). Either changes the result's shape or the schema's default, so after it LCp must be re-run.
 
-    **Decision (operator, 2026-11-23): fix, and re-run LCp at K=8.** Not L3a under the one-family rule, but a modest tool change prevents the failure, and the protocol's aim is tools that less capable models can use (design/10, "Aim"). The first option was taken, not a larger default `limit`: that changes the schema (the surface), and does not help a directory longer than the limit. A page that is not the last now carries `more` (gate 1, the rows added after gate 4). The description is unchanged, so the surface hashes are. Unit tests: `test_a_page_that_is_not_the_last_says_more_entries_follow` and the cases around it (nothing on a last page, nothing when the answer does not say), and `test_the_note_reaches_the_model_and_agrees_with_the_description`. The re-run is a TODO below.
+    **Decision (operator, 2026-11-23): fix, and re-run LCp at K=8.** Not L3a under the one-family rule, but a modest tool change prevents the failure, and the protocol's aim is tools that less capable models can use (design/10, "Aim"). The first option was taken, not a larger default `limit`: that changes the schema (the surface), and does not help a directory longer than the limit. A page that is not the last now carries `more` (gate 1, the rows added after gate 4). The description is unchanged, so the surface hashes are. Unit tests: `test_a_page_that_is_not_the_last_says_more_entries_follow` and the cases around it (nothing on a last page, nothing when the answer does not say), and `test_the_note_reaches_the_model_and_agrees_with_the_description`. The re-run is below.
 - **The run passes when** (design/10, gate 4): every control trial passes, with control trials lost to a harness bug or deployment artefact re-run after the fix, so each scenario ends with K passing control trials; and no tool-attributable finding is open (fixed and re-run, or accepted only with its cause outside the tool and the operator's sign-off).
 
-**Verdict: BLOCKED by F3 until the re-run below passes.** The control passes every trial. On 2026-11-23 the operator chose the fix over a sign-off: the fix is made (above), and gate 4 passes once LCp is re-run at K=8 and the re-run is clean. `list_children` also shared the hints on a mis-copied id of design/13 ("Open: the hints on a mis-copied id"). No LCi trial passed a mis-copied id, but the same fix is made here (design/13, "Fixed 2026-11-23"), and LCi is re-run on the smoke pair at K=3.
+**Verdict of the first run: BLOCKED by F3 until the re-run.** The control passes every trial. On 2026-11-23 the operator chose the fix over a sign-off: the fix is made (above), and gate 4 passes once LCp is re-run at K=8 and the re-run is clean. `list_children` also shared the hints on a mis-copied id of design/13 ("Open: the hints on a mis-copied id"). No LCi trial passed a mis-copied id, but the same fix is made here (design/13, "Fixed 2026-11-23"), and LCi is re-run. **Superseded by the re-run, below.**
 
-### Re-runs after the 2026-11-23 decisions (TODO, not run)
+### Re-run after the 2026-11-23 decisions (run 2026-11-23)
 
-Nothing here has run. Before starting, check `$VALFED_HOME/HOLD` and the study coordinator's limits: the federation is on a shared host. `K2VAL_ARTEFACT_ROOT` (new in the Makefile) passes `--artefact-root`. LCp uses the panel and K above (six configs, K=8, the control `sonnet-medium`), in the same three batches as the first run; new run ids, in the durable evidence store. LCi uses this record's reading of "the smoke pair at K=3" (design/10, "Staying stable"): Qwen3-Coder and Haiku at effort low. The operator did not fix the panel or K for the LCi re-run.
+LCp and LCi ran at K=8 on the six-config panel, in one invocation with design/13's FAi and design/12's SR1 and SR1i, in the three batches of the first run (each batch resumed after the federation was restarted):
 
 ```
 make valfed-up && make valfed-reset
 SSL_CERT_FILE=$VALFED_HOME/tls/ca-bundle.pem \
   make k2val K2VAL_CONFIG=benchmark/k2val/k2val.valfed.toml \
     K2VAL_ARTEFACT_ROOT=$VALFED_HOME/evidence/k2val \
-    K2VAL_RID=files-f3-k8-sonnet-medium-glm \
-    K2VAL_SCENARIOS=LCp K2VAL_K=8 K2VAL_MODELS=sonnet-medium,glm
+    K2VAL_RID=rerun-k8-sonnet-medium-glm \
+    K2VAL_SCENARIOS=SR1,SR1i,LCp,LCi,FAi K2VAL_K=8 K2VAL_MODELS=sonnet-medium,glm
 # then the same options with
-#   K2VAL_RID=files-f3-k8-haiku-low-qwen36    K2VAL_MODELS=haiku-low,qwen36
-#   K2VAL_RID=files-f3-k8-qwencoder-deepseek  K2VAL_MODELS=qwencoder,deepseek
-
-# the mis-copied-id guard, on the smoke pair
-SSL_CERT_FILE=$VALFED_HOME/tls/ca-bundle.pem \
-  make k2val K2VAL_CONFIG=benchmark/k2val/k2val.valfed.toml \
-    K2VAL_ARTEFACT_ROOT=$VALFED_HOME/evidence/k2val \
-    K2VAL_RID=lc-guard-k8 \
-    K2VAL_SCENARIOS=LCi K2VAL_K=8 \
-    K2VAL_MODELS=sonnet-medium,haiku-low,glm,qwen36,qwencoder,deepseek
+#   K2VAL_RID=rerun-k8-haiku-low-qwen36    K2VAL_MODELS=haiku-low,qwen36
+#   K2VAL_RID=rerun-k8-qwencoder-deepseek  K2VAL_MODELS=qwencoder,deepseek
 ```
 
-- **LCp at K=8 (F3).** 1 scenario × 6 configs × 8 = 48 trials. Passes when every control trial passes and no new tool-attributable finding appears. F3 is closed when no config's answer stops paging while `isLast` is false, or each that does is classified. DeepSeek LCp #4 (a deployment artefact in the first run) is run again with the rest.
-- **LCi at K=8 on the full panel (the guard).** 1 scenario × 6 configs × 8 = 48 trials; the same reading and pass test as design/13's FAi re-run. It may share one invocation with LCp and FAi (`K2VAL_SCENARIOS=LCp,LCi,FAi`).
+- **Run.** 2026-11-23, 15:56 to 23:04 UTC; run ids `rerun-k8-sonnet-medium-glm`, `rerun-k8-haiku-low-qwen36` and `rerun-k8-qwencoder-deepseek`, in the durable evidence store. The runner was master `e2697c2`: after the `more` note and the id guard (PR #46), before PR #52 (the replication tool's name refusal). `list_children` and `get_file_attributes` are the same at `e2697c2` and at master `2ce1182`.
+- **Records.** The three directories hold 265 records for the 240 planned trials. The 25 superseded ones are infrastructure (19 ORACLE_ERROR, an unreadable snapshot; 5 RESET_FAIL; 1 HARNESS_ERROR), each followed by a valid record of the same trial; 13 of them are LC's (LCp: 7 ORACLE_ERROR, 3 RESET_FAIL; LCi: 1 and 2). The record per trial is the last valid one. The offered surface in every counted LC trial is FILE_TOOLS, `c030429d0e04de218f50a1bda935d17e84026c8c24ea1a61fd6d91b0bac31922`, as above.
+- **Scoring.** Each answer was read by the deterministic reader and the judge. Re-scored offline at master `2ce1182` with the stored verdicts (`rejudge --cached-only`, no judge call), every stored outcome is reproduced. The reader fix of this round (design/12, the re-run) changes SR1 readings only; across every scored answer in the evidence store, no LC reading changes.
+
+PASS per config (K=8; the first run's in brackets where it differs):
+
+| Config | LCp | LCi |
+|---|---|---|
+| sonnet-medium (control) | 8/8 | 8/8 |
+| haiku-low | 8/8 | 8/8 |
+| glm | 8/8 | 8/8 |
+| qwen36 | 8/8 (7/8) | 8/8 |
+| qwencoder | 7/8 (6/8) | 8/8 |
+| deepseek | 7/8 | 8/8 |
+
+94 of 96 pass, with no NEEDS_REVIEW; the control passes all 16, so every control trial of the five LC scenarios has passed (40 in the first run, 16 here). DeepSeek LCp #4, the first run's deployment artefact, passed.
+
+- **F3: the fix was exposed, and it worked.** Every LCp trial met a page with `isLast` false, so all 48 got the `more` note (207 notes in all), and 46 read the listing to its end. Qwen3.6 did in 8 of 8 (7 of 8 before), Qwen3-Coder in 7 of 8 (6 of 8). DeepSeek said it read the note: "There are more entries. Let me get the next page." (#1, before its second call).
+- **Classifications (2 FAIL):**
+  - **Qwen3-Coder #2: F3's shape, once, with the note in the answer it acted on. Model capability (L3b).** [0] one page of 10 entries, `isLast: false`, ending `"more": "More entries follow: call again with token set to nextPageToken."`; the answer: "does not contain any subdirectories. It only includes regular files … Thus, there are no subdirectories in this path." One family (Qwen) and no control failure, so the two-family clause does not apply. Nor does the third (one model with a traced mechanism): the answer it acted on said that more entries follow, the opposite of its conclusion. The same model, with the same note in the same place, paged to the end in the other seven trials.
+  - **DeepSeek #1: a files-only listing taken for the whole directory. Model capability (L3b), not F3** (findings log M-48). It read four pages, each with the note, then: "So far all entries are regular files (acq_*.dat), not directories. Let me continue to check for any directories among the remaining entries. Let me use a recursive listing with a larger limit to be more efficient." It listed with `list_files_recursively` (stable), whose description says it lists "non-directory files", to the end ([4], [5], `name` and `type` only), and answered: "I've now listed all the files in the directory. All entries are regular files (`acq_*.dat` files and one `log_20200112.dat`). There are **no subdirectories**". That `log_20200112.dat` is the file inside `calib_runs`. It knew that more entries followed, so F3's mechanism (a page taken for the last) is absent; what failed is reading a listing of files as the directory's entries. **The verdict rests on this reading:** counted as F3's diagnosis, F3 would recur in two families (Qwen and DeepSeek) and be L3a again.
+- **The id guard: no exposure here.** Every LCi call passed the directory's id exactly as given, so neither the refusal of an incomplete id nor the reworded `403` and `spaceNotSupportedBy` hints was drawn: **NOT VERIFIED** in this tool's scenarios. The check is shared with `get_file_attributes`, where it refused 28 calls in FAi (design/13, the re-run).
+- **The Aim (design/10), per remaining failure:**
+  - Qwen3-Coder #2: no change proposed. The note was there and plain. The options would be the note before `children` (it comes last), or a larger default `limit` (a schema change, rejected with F3's decision); nothing in the other 47 trials points to the note's place.
+  - DeepSeek #1: `list_children`'s note could say that a page holds up to 100 entries (`limit`), since the model left the tool "to be more efficient". Not proposed: DeepSeek set `limit` to 100 itself in 6 of its other 7 LCp trials. `list_files_recursively`'s answer could say that it lists no directories: a stable tool's result, so a K=3 smoke re-run (M-48).
+
+**Verdict: PASSES gate 4** (2026-11-24). The control passes every trial of both runs; F3's fix was exposed in every LCp trial, and its one recurrence is L3b; DeepSeek #1 is another diagnosis (above); no tool-attributable finding is open. The guard's hints stay NOT VERIFIED here (no model exposed to them). The offline rescore is `rescore-rerun-k8-2026-11-23`, in the evidence store.
 
 ## External review (2026-11-20)
 
