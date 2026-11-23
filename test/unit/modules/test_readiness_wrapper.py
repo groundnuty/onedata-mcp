@@ -95,18 +95,15 @@ async def test_extent_schema_is_small(readiness_mcp: FastMCP) -> None:
         item = extent["items"]
         assert set(item["properties"]) == {"dataset", "files", "date_ranges"}
         assert item["required"] == ["dataset"]
-        date_range = next(
-            branch["items"]
-            for branch in item["properties"]["date_ranges"]["anyOf"]
-            if branch.get("type") == "array"
-        )
+        date_range = item["properties"]["date_ranges"]["items"]
         assert set(date_range["properties"]) == {"start", "end"}
         assert sorted(date_range["required"]) == ["end", "start"]
-        # the caps of one item: 20000 names, 400 date ranges
-        arrays = {
-            name: next(b for b in item["properties"][name]["anyOf"] if b.get("type") == "array")
-            for name in ("files", "date_ranges")
-        }
+        # a selector is a non-empty list, or left out: never null, never [] (Codex 1, Gemini 4)
+        # and capped per item: 20000 names, 400 date ranges
+        arrays = {name: item["properties"][name] for name in ("files", "date_ranges")}
+        for array in arrays.values():
+            assert array["type"] == "array" and array["minItems"] == 1
+            assert "anyOf" not in array and "default" not in array
         assert arrays["files"]["maxItems"] == 20_000
         assert arrays["date_ranges"]["maxItems"] == 400
 
@@ -190,12 +187,7 @@ async def test_an_extent_item_or_a_date_range_takes_no_other_field(readiness_mcp
     for name in ("check_readiness", "ensure_readiness"):
         item = tools[name].inputSchema["properties"]["extent"]["items"]
         assert item["additionalProperties"] is False
-        date_range = next(
-            branch["items"]
-            for branch in item["properties"]["date_ranges"]["anyOf"]
-            if branch.get("type") == "array"
-        )
-        assert date_range["additionalProperties"] is False
+        assert item["properties"]["date_ranges"]["items"]["additionalProperties"] is False
 
 
 @pytest.mark.asyncio
@@ -501,7 +493,6 @@ async def test_a_host_that_offers_fewer_tools_than_registered_is_believed(
     ],
     ids=["files-null", "date_ranges-null", "files-empty", "date_ranges-empty"],
 )
-@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
 async def test_review_an_explicitly_empty_selector_is_refused_through_the_mcp_client(
     readiness_mcp: FastMCP, item: dict
 ) -> None:
@@ -514,7 +505,6 @@ async def test_review_an_explicitly_empty_selector_is_refused_through_the_mcp_cl
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
 async def test_review_an_unknown_field_through_the_mcp_client_lists_the_valid_fields(
     readiness_mcp: FastMCP,
 ) -> None:

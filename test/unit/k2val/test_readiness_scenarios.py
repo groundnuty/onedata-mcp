@@ -730,7 +730,6 @@ def test_review_ren_does_not_pass_when_the_complete_files_were_never_made_ready(
     assert result.federation_pass is False
 
 
-@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
 def test_review_the_required_call_does_not_credit_a_path_the_tool_does_not_resolve() -> None:
     """Codex 5: `./` in a declared path resolved to nothing in the tool and to the file in the
     oracle's own reading of the extent."""

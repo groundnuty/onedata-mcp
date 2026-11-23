@@ -1,16 +1,18 @@
 """MCP tool registration for the readiness tools: check_readiness, ensure_readiness."""
 
-from typing import Any
+from collections.abc import Mapping
+from typing import Annotated, Any
 
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from onedata_mcp.api.readiness import (
     MAX_DATE_RANGES_PER_ITEM,
     MAX_DEADLINE_S,
     MAX_EXTENT_ITEMS,
     MAX_FILES_PER_ITEM,
+    check_extent_item,
 )
 from onedata_mcp.api.readiness import check_readiness as api_check_readiness
 from onedata_mcp.api.readiness import ensure_readiness as api_ensure_readiness
@@ -19,9 +21,10 @@ from onedata_mcp.tool_maturity import is_offered
 # How both tools take the data. Each description says it in full: either tool may be offered
 # without the other, so neither names the other (design/10, gate 2).
 EXTENT_SENTENCE = (
-    "Describe the data as `extent`: for each dataset (a space name such as 'my-dataset', or a "
-    "directory path inside it), optionally the files or date ranges you need; dates are read "
-    "from the YYYYMMDD in each file name."
+    "Describe the data as `extent`: for each dataset (a space, by its name such as "
+    "'my-dataset' or its id, or a directory path inside it), optionally the files or the date "
+    "ranges you need (with both, every file that either selects); dates are read from the "
+    "YYYYMMDD in each file name."
 )
 
 CHECK_DESCRIPTION = (
@@ -70,38 +73,65 @@ class DateRange(BaseModel):
     )
 
 
+def _no_default(schema: dict[str, Any]) -> None:
+    """A selector may be left out, never given as null: the schema shows no `default: null`."""
+    schema.pop("default", None)
+
+
 class ExtentItem(BaseModel):
     # An unknown field is refused, not dropped: an item left with no `files` and no
-    # `date_ranges` would mean the whole dataset, which ensure_readiness would then hold.
+    # `date_ranges` would mean the whole dataset, which ensure_readiness would then hold. For
+    # the same reason a selector given as null or as an empty list is refused (minItems 1, and
+    # no null): left out, it means the whole dataset; empty, it would select nothing.
     model_config = ConfigDict(extra="forbid")
 
     dataset: str = Field(
         description=(
-            "A space name such as 'my-dataset', or an absolute directory path inside a "
-            "space such as '/my-dataset/sub/dir'"
+            "A space's name such as 'my-dataset' or its id, or an absolute directory path "
+            "inside a space such as '/my-dataset/sub/dir'"
         )
     )
-    files: list[str] | None = Field(
+    files: list[str] = Field(
         default=None,
+        min_length=1,
         max_length=MAX_FILES_PER_ITEM,
         description=(
-            "File names or absolute paths inside the dataset. With neither files nor "
-            "date_ranges, the whole dataset is meant"
+            "File names, or paths (inside the dataset, or absolute). A name that several "
+            "files share is refused: give such a file by its path. Leave files and "
+            "date_ranges out for the whole dataset"
         ),
+        json_schema_extra=_no_default,
     )
-    date_ranges: list[DateRange] | None = Field(
+    date_ranges: list[DateRange] = Field(
         default=None,
+        min_length=1,
         max_length=MAX_DATE_RANGES_PER_ITEM,
         description=(
             "Inclusive day ranges. They select the files whose name carries a YYYYMMDD "
             "date inside any range"
         ),
+        json_schema_extra=_no_default,
     )
 
 
+def _hint_first(value: Any) -> Any:
+    """Before the schema refuses an item with its own generic words ("Extra inputs are not
+    permitted", "Input should be a valid list"), refuse it with the API's hint: the fields an
+    item has, and that an explicitly empty selector selects nothing (design/17, gate 1)."""
+    if isinstance(value, list):
+        for index, raw in enumerate(value):
+            if isinstance(raw, Mapping):
+                check_extent_item(raw, f"extent[{index}]")
+    return value
+
+
+Extent = Annotated[list[ExtentItem], BeforeValidator(_hint_first)]
+
+
 def _as_dicts(extent: list[Any]) -> list[dict[str, Any]]:
+    """Each item as the caller gave it: a field left out stays out (never sent as null)."""
     return [
-        item.model_dump(exclude_none=True) if isinstance(item, BaseModel) else dict(item)
+        item.model_dump(exclude_unset=True) if isinstance(item, BaseModel) else dict(item)
         for item in extent
     ]
 
@@ -115,7 +145,7 @@ def register_module(mcp: FastMCP) -> None:
         annotations=ToolAnnotations(readOnlyHint=True),
     )
     async def mcp_check_readiness(
-        extent: list[ExtentItem] = Field(
+        extent: Extent = Field(
             description=EXTENT_FIELD_DESCRIPTION,
             min_length=1,
             max_length=MAX_EXTENT_ITEMS,
@@ -132,7 +162,7 @@ def register_module(mcp: FastMCP) -> None:
         annotations=ToolAnnotations(destructiveHint=False),
     )
     async def mcp_ensure_readiness(
-        extent: list[ExtentItem] = Field(
+        extent: Extent = Field(
             description=EXTENT_FIELD_DESCRIPTION,
             min_length=1,
             max_length=MAX_EXTENT_ITEMS,

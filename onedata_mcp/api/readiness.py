@@ -40,6 +40,7 @@ from datetime import date
 from typing import Any
 
 from onedata_mcp.api.files import (
+    _file_id_parts,
     get_file_attributes,
     get_file_distribution,
     get_file_id,
@@ -406,12 +407,12 @@ class FileInfo:
 @dataclass
 class _Item:
     dataset: str  # as declared
-    space: str  # space name
-    root: str  # absolute directory path: /<space>[/dir...]
+    space: str  # the space segment as declared: a space's name or its id
+    # absolute directory path, /<space>[/dir...], with one leading or trailing slash dropped
+    # (`my-dataset/sub` is read as /my-dataset/sub when its first segment is a space)
+    root: str
     files: list[str]  # as declared: matched exactly, never trimmed or normalised
     ranges: list[tuple[date, date]]
-    # A "/" but no leading one: read as /<dataset> when its first segment is a space.
-    misspelled: bool = False
 
 
 _ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -441,16 +442,76 @@ def _unknown_keys(raw: Mapping[str, Any], known: tuple[str, ...], where: str) ->
         )
 
 
-def _check_dataset(dataset: str, space: str, where: str) -> None:
-    """An empty, `.` or `..` component is refused: the provider would resolve it to another
-    directory (`/my-dataset/..` is above every space)."""
-    parts = dataset.strip("/").split("/") if dataset.strip("/") else [""]
-    if any(part in ("", ".", "..") for part in parts):
+_BAD_COMPONENTS = ("", ".", "..")
+
+
+def _dataset_root(dataset: str, where: str) -> tuple[str, str]:
+    """(the dataset's directory as an absolute path, its space segment).
+
+    One leading and one trailing slash are dropped (`/my-dataset/sub/` is `/my-dataset/sub`,
+    and `my-dataset/sub` is read as `/my-dataset/sub` when its first segment is a space). An
+    empty, `.` or `..` component is refused, and so is a second leading or trailing slash: the
+    provider would resolve such a path to another directory (`/my-dataset/..` is above every
+    space)."""
+    body = dataset[1:] if dataset.startswith("/") else dataset
+    body = body[:-1] if body.endswith("/") else body
+    parts = body.split("/")
+    if any(part in _BAD_COMPONENTS for part in parts):
+        space = parts[0] if parts[0] not in _BAD_COMPONENTS else "my-dataset"
         raise ValueError(
             f"{where}.dataset {dataset!r} has an empty, '.' or '..' component: give a space "
-            f"name such as '{space or 'my-dataset'}', or an absolute directory path inside it "
-            "such as '/my-dataset/sub/dir'"
+            f"name such as '{space}', or an absolute directory path inside it such as "
+            f"'/{space}/sub/dir'"
         )
+    return "/" + body, parts[0]
+
+
+def _check_file_path(name: str, where: str) -> None:
+    """A declared file path is matched exactly, so an empty, `.` or `..` component could only
+    ever select nothing (or, read loosely, another file): it is refused, with how to give it."""
+    parts = (name[1:] if name.startswith("/") else name).split("/")
+    if "/" in name and any(part in _BAD_COMPONENTS for part in parts):
+        raise ValueError(
+            f"{where} {name!r} has an empty, '.' or '..' component: give the file's exact "
+            "name, its path inside the dataset (such as 'sub/data_20180801.nc') or its "
+            "absolute path, without them"
+        )
+
+
+# How an explicitly empty selector is refused: it selects no file, and read as left out it
+# would mean the whole dataset (an empty search result passed on would hold every file).
+_EMPTY_SELECTOR = {
+    "files": "name the files you need",
+    "date_ranges": "give at least one date range",
+}
+
+
+def _selector(raw: Mapping[str, Any], key: str, where: str) -> list[Any]:
+    """`files` or `date_ranges`: [] when left out; refused when given as null or an empty list."""
+    if key not in raw:
+        return []
+    value = raw[key]
+    if value is None or (isinstance(value, list) and not value):
+        what = "null" if value is None else "empty"
+        raise ValueError(
+            f"{where}.{key} is {what}, so it selects no file: {_EMPTY_SELECTOR[key]}, or leave "
+            f"{key} out (an item with neither files nor date_ranges means its whole dataset)"
+        )
+    if not isinstance(value, list):
+        raise ValueError(f"{where}.{key} must be a list")
+    return value
+
+
+def check_extent_item(raw: Mapping[str, Any], where: str) -> None:
+    """What the MCP schema would refuse with a generic error, refused first with a hint: a field
+    the item (or a date range) does not have, and a selector given as null or empty."""
+    _unknown_keys(raw, _ITEM_KEYS, where)
+    for key in ("files", "date_ranges"):
+        _selector(raw, key, where)
+    ranges = raw.get("date_ranges")
+    for r_index, rng in enumerate(ranges if isinstance(ranges, list) else ()):
+        if isinstance(rng, Mapping):
+            _unknown_keys(rng, _RANGE_KEYS, f"{where}.date_ranges[{r_index}]")
 
 
 def _normalise_extent(extent: Sequence[Mapping[str, Any]]) -> list[_Item]:
@@ -467,17 +528,15 @@ def _normalise_extent(extent: Sequence[Mapping[str, Any]]) -> list[_Item]:
         dataset = raw.get("dataset")
         if not isinstance(dataset, str) or not dataset.strip("/"):
             raise ValueError(f"{where}.dataset must be a space name or a path inside a space")
-        root = dataset if dataset.startswith("/") else "/" + dataset
-        space = root.split("/")[1]
-        _check_dataset(dataset, space, where)
-        files = raw.get("files") or []
-        if not isinstance(files, list) or not all(isinstance(f, str) and f for f in files):
+        root, space = _dataset_root(dataset, where)
+        files = _selector(raw, "files", where)
+        if not all(isinstance(f, str) and f for f in files):
             raise ValueError(f"{where}.files must be a list of file names or paths")
+        for f_index, name in enumerate(files):
+            _check_file_path(name, f"{where}.files[{f_index}]")
         if len(files) > MAX_FILES_PER_ITEM:
             raise ValueError(f"{where}.files may name at most {MAX_FILES_PER_ITEM} files")
-        raw_ranges = raw.get("date_ranges") or []
-        if not isinstance(raw_ranges, list):
-            raise ValueError(f"{where}.date_ranges must be a list")
+        raw_ranges = _selector(raw, "date_ranges", where)
         if len(raw_ranges) > MAX_DATE_RANGES_PER_ITEM:
             raise ValueError(
                 f"{where}.date_ranges may hold at most {MAX_DATE_RANGES_PER_ITEM} ranges"
@@ -496,7 +555,6 @@ def _normalise_extent(extent: Sequence[Mapping[str, Any]]) -> list[_Item]:
                     "give the earlier day as start"
                 )
             ranges.append((start, end))
-        misspelled = not dataset.startswith("/") and "/" in dataset
         # A name or a range declared twice is looked for once.
         unique = list(dict.fromkeys(files))
         named += len(unique)
@@ -505,7 +563,7 @@ def _normalise_extent(extent: Sequence[Mapping[str, Any]]) -> list[_Item]:
                 f"The extent names more than {MAX_FILES} files in all. "
                 "Declare a smaller extent, or select files by date range."
             )
-        items.append(_Item(dataset, space, root, unique, list(dict.fromkeys(ranges)), misspelled))
+        items.append(_Item(dataset, space, root, unique, list(dict.fromkeys(ranges))))
     return items
 
 
@@ -549,6 +607,73 @@ class _Transfer:
     status: str | None
 
 
+@dataclass(frozen=True)
+class _Space:
+    """The one space an item's space segment names, chosen by its id or its name."""
+
+    space_id: str
+    name: str
+    # The name is a path's first segment for this space only: no other listed space has it as
+    # its name or its id. When it is not, no path is looked up by it (`_list_dataset`).
+    name_unique: bool
+    dir_id: str | None = None  # the space's own directory, when the provider's list gives it
+
+
+class _AmbiguousSpace(ValueError):
+    """An item's space segment names more than one space: refused, never guessed."""
+
+
+def _dir_id_of(entry: Mapping[str, Any]) -> str | None:
+    for key in ("dirId", "fileId"):  # the swagger's Space: dirId, and fileId (deprecated)
+        value = entry.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _space_label(entry: Mapping[str, Any]) -> str:
+    return f"the space '{entry.get('name')}' (id '{entry['spaceId']}')"
+
+
+def _choose_space(space: str, entries: list[dict[str, Any]]) -> _Space:
+    """The space `space` names among the provider's list: one whose id is exactly `space`, or
+    whose name is. Refused (ValueError, with the candidates) when no space or more than one does:
+    a name that is another space's id, or a name two spaces share. Pure."""
+    matches = {e["spaceId"]: e for e in entries if e["spaceId"] == space or e.get("name") == space}
+    if not matches:
+        names = sorted(e["name"] for e in entries if isinstance(e.get("name"), str))
+        # Only the spaces this provider supports for the token are listed: another space of
+        # that name may still exist, so "not found" says where it was looked for.
+        raise ValueError(
+            f"your provider supports no space named {space!r} for this token "
+            f"(the spaces it lists: {names})"
+        )
+
+    def names_one(value: object) -> bool:
+        return sum(value in (e["spaceId"], e.get("name")) for e in entries) == 1
+
+    if len(matches) > 1:
+        shown = " and ".join(_space_label(e) for e in matches.values())
+        forms = [
+            repr(form)
+            for e in matches.values()
+            for form in (e.get("name"), e["spaceId"])
+            if isinstance(form, str) and form and names_one(form)
+        ]
+        how = (
+            f"Give {' or '.join(dict.fromkeys(forms))} instead: each names one space only."
+            if forms
+            else "No name or id names one of them alone."
+        )
+        raise _AmbiguousSpace(
+            f"{space!r} names more than one space at your provider: {shown}. {how}"
+        )
+    (entry,) = matches.values()
+    name = entry.get("name")
+    name = name if isinstance(name, str) and name else entry["spaceId"]
+    return _Space(entry["spaceId"], name, names_one(name), _dir_id_of(entry))
+
+
 class _Run:
     """One tool call: its local provider, its time limit, its caches, its REST-call limit.
 
@@ -561,8 +686,7 @@ class _Run:
         self.local_id = local_id
         self.deadline = deadline
         self._rest = asyncio.Semaphore(CHECK_CONCURRENCY)
-        self._space_ids: dict[str, str] = {}
-        self._space_names: dict[str, str] = {}  # a space declared by its id -> its name
+        self._space_of: dict[str, _Space] = {}
         self._spaces: list[dict[str, Any]] | None = None
         self._online: dict[str, asyncio.Future[bool]] = {}
         self._transfers: dict[str, asyncio.Future[list[_Transfer] | None]] = {}
@@ -589,43 +713,56 @@ class _Run:
         """`call`, cut off by the budget (waiting for the limit counts against it)."""
         return await self.within(self.call(fn, *args, **kwargs))
 
+    async def space(self, space: str) -> _Space:
+        """The one space `space` names, by its exact id or its exact name (see `_choose_space`).
+        ValueError when none or more than one does; OnedataApiError when the provider's list
+        cannot be read as one."""
+        if space not in self._space_of:
+            self._space_of[space] = _choose_space(space, await self.within(self._space_list()))
+        return self._space_of[space]
+
     async def space_id(self, space: str) -> str:
-        if space not in self._space_ids:
-            self._space_ids[space] = await self.within(self._space_id_from_provider(space))
-        return self._space_ids[space]
+        return (await self.space(space)).space_id
 
-    async def _space_id_from_provider(self, space: str) -> str:
-        """A space's id from the local provider's own `GET /spaces`, matched by name or id.
+    async def _space_list(self) -> list[dict[str, Any]]:
+        """The local provider's own `GET /spaces`, read once per call.
 
-        One provider call per tool call and no Onezone lookup, so a token valid only at the
-        local provider resolves names too (the existing resolver also reads each space's
-        details from Onezone).
+        No Onezone lookup, so a token valid only at the local provider resolves names too (the
+        existing resolver also reads each space's details from Onezone). An answer that is not
+        a list is the provider's failure, not a missing space: OnedataApiError.
         """
         if self._spaces is None:
             response = await self.call(request, get_oneprovider_config(), "GET", "/spaces")
             body = response["body"]
             if not isinstance(body, list):
-                raise ValueError("the provider's list of spaces has an unexpected shape")
-            self._spaces = [entry for entry in body if isinstance(entry, dict)]
-        for entry in self._spaces:
-            if entry.get("name") == space or entry.get("spaceId") == space:
-                space_id = entry.get("spaceId")
-                if isinstance(space_id, str) and space_id:
-                    name = entry.get("name")
-                    if entry.get("name") != space and isinstance(name, str) and name:
-                        self._space_names[space] = name  # paths name a space by its name
-                    return space_id
-        names = sorted(e["name"] for e in self._spaces if isinstance(e.get("name"), str))
-        # Only the spaces this provider supports for the token are listed: another space of
-        # that name may still exist, so "not found" says where it was looked for.
-        raise ValueError(
-            f"your provider supports no space named {space!r} for this token "
-            f"(the spaces it lists: {names})"
-        )
+                raise OnedataApiError(
+                    "Oneprovider's list of spaces (GET /spaces) is not a list, so no dataset's "
+                    "space can be resolved. Call again; if it persists, the provider is at fault.",
+                    response,
+                )
+            self._spaces = [
+                entry
+                for entry in body
+                if isinstance(entry, dict)
+                and isinstance(entry.get("spaceId"), str)
+                and entry["spaceId"]
+            ]
+        return self._spaces
 
-    def space_name(self, space: str) -> str:
-        """The name to put in a path for a space declared by name or by id."""
-        return self._space_names.get(space, space)
+    async def space_dir_id(self, space: _Space) -> str | None:
+        """The id of the space's own directory, bound to the space's id: from the provider's list
+        when it gives one (`dirId`, or the deprecated `fileId`), else from `GET /spaces/{id}`.
+        None when neither says. TODO(first live run): what 25.0 lists here."""
+        if space.dir_id:
+            return space.dir_id
+        segment = id_segment(space.space_id, "space id")
+        response = await self.call_in_time(
+            request, get_oneprovider_config(), "GET", f"/spaces/{segment}"
+        )
+        body = response.get("body")
+        if not isinstance(body, dict) or body.get("spaceId") != space.space_id:
+            return None  # an answer about another space (or none) gives no directory
+        return _dir_id_of(body)
 
     async def provider_online(self, provider_id: str) -> bool:
         """Onezone's `online` for a provider, looked up once per call.
@@ -769,10 +906,20 @@ def _not_allowed(item: _Item) -> str:
     )
 
 
-def _misspelled(item: _Item) -> str:
+def _shared_name(item: _Item, space: _Space) -> str:
     return (
-        f"dataset '{item.dataset}' not found: give a space name (e.g. '{item.space}') "
-        f"or an absolute directory path ('/{item.dataset}')."
+        f"dataset '{item.dataset}': the name of its space, '{space.name}', is also another "
+        "space's name or id at your provider, so no path inside it is looked up by that name. "
+        f"Declare the space itself by its id ('{space.space_id}') and name the files by their "
+        "path inside it."
+    )
+
+
+def _other_space(item: _Item, space: _Space, found: str) -> str:
+    return (
+        f"dataset '{item.dataset}' resolved to a directory of another space (id '{found}'), not "
+        f"of the space '{space.name}' (id '{space.space_id}'), so nothing there is checked. "
+        "Declare the space by its id, or an absolute directory path inside it."
     )
 
 
@@ -821,14 +968,17 @@ async def _list_dataset(run: _Run, item: _Item) -> _Listing:
     """
     listing = _Listing()
     try:
-        space_id = await run.space_id(item.space)
+        space = await run.space(item.space)
+    except _AmbiguousSpace as exc:
+        listing.problems.append(f"dataset '{item.dataset}': {exc}")
+        return listing
     except ValueError as exc:
-        if item.misspelled:  # 'nosuch/sub': its first segment is not a space
-            listing.problems.append(_misspelled(item))
-        elif _looks_like_id(item.dataset):
+        if _looks_like_id(item.space):
             listing.problems.append(
-                f"dataset '{item.dataset}' not found: it looks like an id, and this field "
-                "takes a space name or an absolute directory path, such as '/my-dataset/sub'."
+                f"dataset '{item.dataset}' not found: it looks like an id, and no space your "
+                "provider lists for this token has that id (a file's or a directory's id is not "
+                "taken here). Give a space's name or id, or an absolute directory path such as "
+                "'/my-dataset/sub'."
             )
         else:  # the message names the spaces the provider lists
             listing.problems.append(
@@ -839,11 +989,22 @@ async def _list_dataset(run: _Run, item: _Item) -> _Listing:
     except TimeoutError:
         listing.problems.append(_no_time(item))
         return listing
-    # A space declared by its id is named by its name in paths (the lookup takes names).
-    root = "/" + run.space_name(item.space) + item.root[len(item.space) + 1 :]
+    # Once chosen, the space is bound to its id: its name is put in a path only when no other
+    # space has that name or id, and the directory found is checked against the id.
+    rest = item.root[len(item.space) + 1 :]  # "" for the space itself, else "/sub/dir"
+    root = "/" + space.name + rest
     listing.root = root
     try:
-        root_id = await run.within(get_file_id(root))
+        if space.name_unique:
+            root_id = await run.within(get_file_id(root))
+        elif rest:
+            listing.problems.append(_shared_name(item, space))
+            return listing
+        elif (dir_id := await run.space_dir_id(space)) is not None:
+            root_id = dir_id
+        else:
+            listing.problems.append(_shared_name(item, space))
+            return listing
     except (FileNotFoundError, OnedataInvalidSpaceError):
         listing.problems.append(_no_such_directory(item))
         return listing
@@ -858,6 +1019,11 @@ async def _list_dataset(run: _Run, item: _Item) -> _Listing:
     except TimeoutError:
         listing.problems.append(_no_time(item))
         return listing
+    parts = _file_id_parts(root_id)
+    if parts is not None and parts[1] != space.space_id:
+        listing.problems.append(_other_space(item, space, parts[1]))
+        return listing
+    space_id = space.space_id
 
     seen = 0
     incomplete = False
@@ -966,32 +1132,62 @@ async def _list_dataset(run: _Run, item: _Item) -> _Listing:
     return listing
 
 
-def _select(item: _Item, files: list[FileInfo], unresolved: list[str]) -> list[FileInfo]:
-    """The files an item declares; whatever it names that is not there goes to `unresolved`."""
+MAX_SAME_NAME_SHOWN = 5  # paths listed for a file name that more than one file has
+
+
+def _same_name(item: _Item, name: str, matches: list[str]) -> str:
+    shown = sorted(matches)
+    listed = ", ".join(f"'{p}'" for p in shown[:MAX_SAME_NAME_SHOWN])
+    if len(shown) > MAX_SAME_NAME_SHOWN:
+        listed += f" and {len(shown) - MAX_SAME_NAME_SHOWN} more"
+    inside = shown[0][len(item.root.rstrip("/")) + 1 :]
+    return (
+        f"file '{name}' in '{item.dataset}' matches {len(shown)} files ({listed}), so none of "
+        f"them is taken: give the one you mean by its path inside the dataset (such as "
+        f"'{inside}') or its absolute path."
+    )
+
+
+def select_paths(item: _Item, paths: Sequence[str]) -> tuple[list[str], list[str]]:
+    """The paths of `paths` (every file listed under the item's dataset, absolute, named by the
+    space's name) that an item selects, and a text for each thing it declares that selects no
+    file or that cannot say which one. Pure: the tool's `_select` and the validation panel's
+    scorer (`benchmark/k2val/readiness_oracles.extent_selects`) share this one rule.
+
+    - neither `files` nor `date_ranges`: every file of the dataset;
+    - `files`: each matched exactly as declared, by its absolute path, its path inside the
+      dataset, or its name; a name that more than one file has selects none of them (the text
+      lists them, to be given by path), never all of them;
+    - `date_ranges`: the files whose name carries a YYYYMMDD inside one of the ranges;
+    - both: the files that either one selects (their union).
+    """
+    unresolved: list[str] = []
     if not item.files and not item.ranges:
-        if not files:
+        if not paths:
             unresolved.append(
                 f"dataset '{item.dataset}' holds no files. "
                 "Give a directory that holds the data, or name the files."
             )
-        return files
+        return list(paths), unresolved
 
-    by_path = {f.path: f for f in files}
-    by_name: dict[str, list[FileInfo]] = {}
-    for f in files:
-        by_name.setdefault(f.basename, []).append(f)
+    known = set(paths)
+    by_name: dict[str, list[str]] = {}
+    for path in paths:
+        by_name.setdefault(path.rsplit("/", 1)[-1], []).append(path)
 
-    chosen: dict[str, FileInfo] = {}
+    chosen: dict[str, None] = {}
     for name in item.files:
         # Names are matched exactly as declared: no trimming, no normalising.
         if name.startswith("/"):
-            found = by_path.get(name)
-            matches = [found] if found else []
+            matches = [name] if name in known else []
         elif "/" in name:
-            found = by_path.get(_absolute(item.root, name))
-            matches = [found] if found else []
+            full = _absolute(item.root, name)
+            matches = [full] if full in known else []
         else:
             matches = by_name.get(name, [])
+            if len(matches) > 1:
+                unresolved.append(_same_name(item, name, matches))
+                continue
         if not matches and _looks_like_id(name):
             unresolved.append(
                 f"file '{name}' in '{item.dataset}' not found: it looks like a file id, and "
@@ -1002,19 +1198,27 @@ def _select(item: _Item, files: list[FileInfo], unresolved: list[str]) -> list[F
                 f"file '{name}' in '{item.dataset}' not found: "
                 "give the exact file name, or its absolute path."
             )
-        chosen.update((f.file_id, f) for f in matches)
+        chosen.update(dict.fromkeys(matches))
 
-    dated = [(f, name_date(f.basename)) for f in files] if item.ranges else []
+    dated = [(p, name_date(p.rsplit("/", 1)[-1])) for p in paths] if item.ranges else []
     for start, end in item.ranges:
-        matches = [f for f, day in dated if day is not None and start <= day <= end]
+        matches = [p for p, day in dated if day is not None and start <= day <= end]
         if not matches:
             unresolved.append(
                 f"date range {start.isoformat()}..{end.isoformat()} in '{item.dataset}' "
                 "matched no file: dates are read from the YYYYMMDD in file names. "
                 "Widen the range or name the files."
             )
-        chosen.update((f.file_id, f) for f in matches)
-    return list(chosen.values())
+        chosen.update(dict.fromkeys(matches))
+    return list(chosen), unresolved
+
+
+def _select(item: _Item, files: list[FileInfo], unresolved: list[str]) -> list[FileInfo]:
+    """The files an item declares (`select_paths`); what selects nothing goes to `unresolved`."""
+    by_path = {f.path: f for f in files}
+    selected, problems = select_paths(item, list(by_path))
+    unresolved.extend(problems)
+    return [by_path[path] for path in selected]
 
 
 def _merge_file(into: FileInfo, other: FileInfo) -> None:

@@ -30,7 +30,7 @@ RECORDED_SURFACES: Mapping[frozenset[str], tuple[str, str]] = {
     ),
     frozenset(K2_TOOLS): (
         "K2",
-        "b61a0fe00c063fe734c3c91da76e01cf93746a8b4bc7e8d3d71c93d09f7ad7e4",
+        "cfcb58c63c464bc8a8f6807dce000f8bc937deecd41b836dbd15967e962fb24b",
     ),
     frozenset(FILE_TOOLS): (
         "FILE_TOOLS",
@@ -44,11 +44,11 @@ RECORDED_SURFACES: Mapping[frozenset[str], tuple[str, str]] = {
     # the readiness tools' requiring scenarios (design/17, design/18): RC, RCn, RCp; RE, REn, REp
     frozenset(RC_TOOLS): (
         "RC_TOOLS",
-        "338b1d18b4e89e9d4702224aed20ab4e6a58adc4572d12f8f27c34b6f74a0742",
+        "1418bf54c44a152e9cd6a7ef99cc1e46386fa23e46041d8002dc0efa0be8c795",
     ),
     frozenset(RE_TOOLS): (
         "RE_TOOLS",
-        "26845b029051b181e246ff4724c38944ed3f8997c6f89d9dd6f60d387498c02b",
+        "b96279e5df4173fc40cb8737fdb6373cb3d51b9fa05a690c3c28737ce2a34ec9",
     ),
 }
 

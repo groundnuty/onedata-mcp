@@ -29,7 +29,7 @@ from benchmark._runtime_types import AgentTrace, OracleResult
 from benchmark.k2val import oracles, sr_oracles
 from benchmark.k2val.readiness_scenarios import READINESS_SCENARIOS, WRITING
 from benchmark.k2val.snapshot import FileState, UnusableSnapshot, require_usable
-from onedata_mcp.api.readiness import _normalise_extent, name_date
+from onedata_mcp.api.readiness import _normalise_extent, select_paths
 
 if TYPE_CHECKING:
     from benchmark.k2val.oracles import K2Context
@@ -57,34 +57,23 @@ def _norm(path: str) -> str:
 
 
 def extent_selects(extent: object, paths: Iterable[str]) -> set[str]:
-    """The paths (of `paths`) an `extent` argument selects, by the tool's own rules: per item,
-    every file under its dataset, or those its `files` name (a name, an absolute path, or a
-    path relative to the dataset) and those whose YYYYMMDD falls in one of its `date_ranges`.
-    An extent the tool would refuse selects nothing."""
+    """The paths (of `paths`) an `extent` argument selects, by the tool's own rule
+    (`readiness.select_paths`, which the tool itself uses): per item, every file under its
+    dataset, or those its `files` name (an exact name that one file has, a path inside the
+    dataset, an absolute path) and those whose YYYYMMDD falls in one of its `date_ranges`. An
+    extent the tool would refuse selects nothing; so does an item whose dataset is given by a
+    space id, which `paths` (named by the space's name) cannot show."""
     try:
         items = _normalise_extent(extent)  # type: ignore[arg-type]
     except (ValueError, TypeError):
         return set()
-    known = [_norm(p) for p in paths]
+    known = sorted(_norm(p) for p in paths)
     chosen: set[str] = set()
     for item in items:
-        root = _norm(item.root)
-        under = [p for p in known if p.startswith(root.rstrip("/") + "/")]
-        if not item.files and not item.ranges:
-            chosen.update(under)
-            continue
-        for name in item.files:
-            if name.startswith("/"):
-                chosen.update(p for p in under if p == _norm(name))
-            elif "/" in name:
-                chosen.update(p for p in under if p == _norm(f"{root}/{name}"))
-            else:
-                chosen.update(p for p in under if p.rsplit("/", 1)[-1] == name)
-        for start, end in item.ranges:
-            for p in under:
-                day = name_date(p.rsplit("/", 1)[-1])
-                if day is not None and start <= day <= end:
-                    chosen.add(p)
+        root = item.root.rstrip("/")
+        under = [p for p in known if p.startswith(root + "/")]
+        selected, _ = select_paths(item, under)
+        chosen.update(selected)
     return chosen
 
 

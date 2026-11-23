@@ -124,7 +124,8 @@ class Fed:
         self.total = 0  # requests in flight, all routes together
         self.total_peak = 0
         self.listing_pages = 0
-        self.dirs: dict[str, str] = {}  # opaque directory id -> path
+        # opaque directory id -> path; the space's own directory is listed by its `dirId`
+        self.dirs: dict[str, str] = {"root-file-id": f"/{SPACE}"}
         self.qos_get_override: Callable[[str], httpx.Response] | None = None
         self.hang: set[str] = set()  # routes that never answer (they sleep 10 real seconds)
 
@@ -460,9 +461,12 @@ def no_access(path: str, dataset: str = SPACE) -> str:
 
 
 def misspelled(dataset: str, space: str) -> str:
+    """A dataset whose first segment is no space: the hint names the spaces there are (Gemini
+    10: it used to suggest the segment that was not found)."""
     return (
-        f"dataset '{dataset}' not found: give a space name (e.g. '{space}') "
-        f"or an absolute directory path ('/{dataset}')."
+        f"dataset '{dataset}' not found: your provider supports no space named '{space}' for "
+        f"this token (the spaces it lists: ['{SPACE}']). Give one of those names, or an absolute "
+        "directory path inside one."
     )
 
 
@@ -917,16 +921,17 @@ async def test_a_space_is_matched_by_name_or_by_id(fed: Fed) -> None:
 
 
 @pytest.mark.asyncio
-async def test_check_a_provider_list_of_spaces_in_an_unexpected_shape_does_not_crash(
+async def test_a_provider_list_of_spaces_that_is_not_a_list_is_the_providers_failure(
     fed: Fed,
 ) -> None:
+    """Gemini 10: it was reported as a dataset "not found", with a hint to give one of the
+    names listed (none were). It is the provider's failure: an error, never a missing space."""
+    from onedata_mcp.utils import OnedataApiError
+
     fed.spaces = {"error": {"id": "forbidden"}}  # type: ignore[assignment]
 
-    result = await check()
-
-    assert result["ready"] is False
-    assert result["files"] == 0
-    assert len(result["unresolved"]) == 1
+    with pytest.raises(OnedataApiError, match=r"list of spaces \(GET /spaces\) is not a list"):
+        await check()
 
 
 @pytest.mark.asyncio
@@ -1953,9 +1958,10 @@ async def test_check_a_dataset_without_its_leading_slash_and_no_such_directory_i
 
 
 def test_the_example_text_for_a_dataset_without_its_leading_slash() -> None:
-    assert misspelled("my-dataset/sub", "my-dataset") == (
-        "dataset 'my-dataset/sub' not found: give a space name (e.g. 'my-dataset') "
-        "or an absolute directory path ('/my-dataset/sub')."
+    assert misspelled("nosuch/sub", "nosuch") == (
+        "dataset 'nosuch/sub' not found: your provider supports no space named 'nosuch' for "
+        "this token (the spaces it lists: ['my-dataset']). Give one of those names, or an "
+        "absolute directory path inside one."
     )
 
 
@@ -2109,7 +2115,7 @@ async def test_ensure_the_final_pass_reads_every_confirmed_file_once_more(fed: F
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", [" a.nc", "a.nc ", "A.NC", "./a.nc", "sub//a.nc"])
+@pytest.mark.parametrize("name", [" a.nc", "a.nc ", "A.NC"])
 async def test_check_file_names_are_matched_exactly_as_declared(fed: Fed, name: str) -> None:
     fed.add("a.nc", 100, local="full", owner="full")
     fed.add("sub/a.nc", 100, local="full", owner="full")
@@ -2121,7 +2127,7 @@ async def test_check_file_names_are_matched_exactly_as_declared(fed: Fed, name: 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("dataset", [f" {SPACE}", f"{SPACE} ", f"/{SPACE}/sub/", f"/{SPACE}/sub//"])
+@pytest.mark.parametrize("dataset", [f" {SPACE}", f"{SPACE} "])
 async def test_check_dataset_names_are_matched_exactly_as_declared(fed: Fed, dataset: str) -> None:
     fed.add("sub/a.nc", 100, local="full", owner="full")
 
@@ -3101,7 +3107,16 @@ async def test_an_unknown_field_is_refused_and_named(bad: list, needle: str) -> 
 
 @pytest.mark.parametrize(
     "dataset",
-    [f"/{SPACE}/..", f"/{SPACE}/a/../b", f"{SPACE}/./sub", f"/{SPACE}//sub", "/..", "/./x"],
+    [
+        f"/{SPACE}/..",
+        f"/{SPACE}/a/../b",
+        f"{SPACE}/./sub",
+        f"/{SPACE}//sub",
+        "/..",
+        "/./x",
+        f"//{SPACE}/sub",  # a second leading slash (Gemini 10)
+        f"/{SPACE}/sub//",  # a second trailing slash
+    ],
 )
 @pytest.mark.asyncio
 async def test_a_dataset_with_a_dot_or_empty_component_is_refused_before_any_request(
@@ -3119,6 +3134,43 @@ async def test_a_dataset_with_a_dot_or_empty_component_is_refused_before_any_req
 def test_a_trailing_slash_or_a_missing_leading_one_is_not_refused(dataset: str) -> None:
     (item,) = readiness._normalise_extent([{"dataset": dataset}])
     assert item.dataset == dataset
+
+
+@pytest.mark.parametrize("dataset", [f"/{SPACE}/sub/", f"{SPACE}/sub/", f"{SPACE}/sub"])
+@pytest.mark.asyncio
+async def test_one_trailing_or_a_missing_leading_slash_names_the_same_directory(
+    fed: Fed, dataset: str
+) -> None:
+    """Gemini 10: `/my-dataset/sub/` was kept as declared and its lookup failed, though the
+    record said a trailing slash is accepted."""
+    fed.add("sub/a.nc", 100, local="full", owner="full")
+
+    result = await readiness.check_readiness([{"dataset": dataset}])
+
+    assert (result["ready"], result["files"]) == (True, 1), result
+
+
+@pytest.mark.parametrize("dataset", ["/..", "/.", "../x", "/./x"])
+def test_a_dataset_with_no_space_segment_is_shown_a_real_example(dataset: str) -> None:
+    """Gemini 10: `/..` was answered "give a space name such as '..'"."""
+    with pytest.raises(ValueError) as caught:
+        readiness._normalise_extent([{"dataset": dataset}])
+    assert "such as 'my-dataset'" in str(caught.value)
+    assert "such as '.'" not in str(caught.value) and "such as '..'" not in str(caught.value)
+
+
+@pytest.mark.parametrize("name", ["./a.nc", "sub//a.nc", "sub/../a.nc", "sub/a.nc/", "/x//a.nc"])
+@pytest.mark.asyncio
+async def test_a_file_path_with_a_dot_or_empty_component_is_refused_before_any_request(
+    fed: Fed, name: str
+) -> None:
+    """Codex 5: such a path selected nothing in the tool (names are matched exactly) and the
+    file in the scorer's looser reading. Refused, with how to give it."""
+    fed.add("a.nc", 100, local="full", owner="full")
+
+    with pytest.raises(ValueError, match=r"files\[0\] .* has an empty, '\.' or '\.\.' component"):
+        await check(files=[name])
+    assert fed.requests == []
 
 
 @pytest.mark.parametrize(
@@ -3202,8 +3254,9 @@ async def test_an_id_given_where_a_name_or_path_is_asked_for_is_named_as_an_id(f
     as_file = await check(files=[file_id])
 
     assert by_id["unresolved"] == [
-        f"dataset '{file_id}' not found: it looks like an id, and this field takes a space name "
-        "or an absolute directory path, such as '/my-dataset/sub'."
+        f"dataset '{file_id}' not found: it looks like an id, and no space your provider lists "
+        "for this token has that id (a file's or a directory's id is not taken here). Give a "
+        "space's name or id, or an absolute directory path such as '/my-dataset/sub'."
     ]
     assert as_file["unresolved"] == [
         f"file '{file_id}' in '{SPACE}' not found: it looks like a file id, and files are given "
@@ -3514,7 +3567,6 @@ def test_only_the_offered_tool_is_ever_named() -> None:
     ids=["files-empty", "date_ranges-empty", "files-null", "date_ranges-null"],
 )
 @pytest.mark.asyncio
-@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
 async def test_review_an_explicitly_empty_selector_is_refused_not_read_as_the_whole_dataset(
     fed: Fed, item: dict
 ) -> None:
@@ -3529,7 +3581,6 @@ async def test_review_an_explicitly_empty_selector_is_refused_not_read_as_the_wh
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
 async def test_review_a_basename_matching_two_files_is_refused_and_neither_is_held(
     fed: Fed,
 ) -> None:
@@ -3546,7 +3597,6 @@ async def test_review_a_basename_matching_two_files_is_refused_and_neither_is_he
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
 async def test_review_a_space_name_equal_to_another_space_id_is_refused_as_ambiguous(
     fed: Fed,
 ) -> None:
@@ -3563,7 +3613,6 @@ async def test_review_a_space_name_equal_to_another_space_id_is_refused_as_ambig
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
 async def test_review_a_space_given_by_id_is_not_looked_up_by_a_name_two_spaces_share(
     fed: Fed,
 ) -> None:
@@ -3658,3 +3707,73 @@ async def test_review_the_advice_states_every_reason_not_only_the_largest(fed: F
 
     assert "3 files are complete at another provider" in result["advice"]
     assert "2 files are still being written" in result["advice"]
+
+
+# --- The space, chosen once and bound to its id (Codex 2) --------------------------------------
+
+
+def _whole_id(uuid: str, space_id: str) -> str:
+    """A 25.0-shaped file id (`api.files._file_id_parts` reads its space id)."""
+    payload = f"guid#{uuid}#{space_id}".encode()
+    return (bytes([0, 0, 0, 0, 0, len(payload), 0, 0]) + payload).hex().upper()
+
+
+@pytest.mark.asyncio
+async def test_a_directory_inside_a_space_whose_name_is_shared_is_not_looked_up_by_it(
+    fed: Fed,
+) -> None:
+    fed.add("sub/a.nc", 100, local="full", owner="full")
+    fed.spaces.append({"name": SPACE, "spaceId": "s2", "providers": []})
+
+    result = await readiness.ensure_readiness([{"dataset": f"/{SPACE_ID}/sub"}], 5)
+
+    assert fed.rules == {} and result["files"] == 0
+    assert result["unresolved"] == [
+        f"dataset '/{SPACE_ID}/sub': the name of its space, '{SPACE}', is also another space's "
+        "name or id at your provider, so no path inside it is looked up by that name. Declare "
+        f"the space itself by its id ('{SPACE_ID}') and name the files by their path inside it."
+    ]
+    assert not [p for m, p in fed.requests if m == "POST" and "lookup-file-id" in p]
+
+
+@pytest.mark.asyncio
+async def test_a_space_whose_name_is_shared_is_listed_by_its_own_directory_id(fed: Fed) -> None:
+    """Given by its id, the space itself is listed by its directory's id, never by the name."""
+    fed.add("sub/a.nc", 100, local="full", owner="full")
+    fed.spaces.append({"name": SPACE, "spaceId": "s2", "providers": []})
+
+    result = await readiness.check_readiness([{"dataset": SPACE_ID, "files": ["sub/a.nc"]}])
+
+    assert (result["ready"], result["files"]) == (True, 1), result
+    assert ("GET", "/api/v3/oneprovider/data/root-file-id/files") in fed.requests
+
+
+@pytest.mark.asyncio
+async def test_a_directory_found_in_another_space_is_refused(fed: Fed) -> None:
+    """The lookup goes by the space's name: what it finds is checked against the space's id
+    (a 25.0 id carries it), and a directory of another space is not used."""
+    fed.add("sub/a.nc", 100, local="full", owner="full")
+    elsewhere = _whole_id("u1", "another-space")
+    fed._lookup = lambda path: httpx.Response(200, json={"fileId": elsewhere})  # type: ignore[method-assign]
+
+    result = await ensure(deadline_s=5)
+
+    assert fed.rules == {} and result["files"] == 0
+    assert result["unresolved"] == [
+        f"dataset '{SPACE}' resolved to a directory of another space (id 'another-space'), not "
+        f"of the space '{SPACE}' (id '{SPACE_ID}'), so nothing there is checked. Declare the "
+        "space by its id, or an absolute directory path inside it."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_ambiguous_space_text_names_both_and_how_to_tell_them_apart(fed: Fed) -> None:
+    fed.spaces.append({"name": SPACE_ID, "spaceId": "s2", "providers": []})
+
+    result = await readiness.check_readiness([{"dataset": SPACE_ID}])
+
+    assert result["unresolved"] == [
+        f"dataset '{SPACE_ID}': '{SPACE_ID}' names more than one space at your provider: the "
+        f"space '{SPACE}' (id '{SPACE_ID}') and the space '{SPACE_ID}' (id 's2'). Give "
+        f"'{SPACE}' or 's2' instead: each names one space only."
+    ]
