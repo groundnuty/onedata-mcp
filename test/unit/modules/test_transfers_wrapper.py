@@ -144,7 +144,7 @@ async def test_the_schedule_answer_says_scheduled_is_not_copied_and_names_no_too
 async def test_a_providers_name_is_refused_before_any_transfer_and_without_onedatas_text(
     transfers_mcp: FastMCP, httpx_mock: HTTPXMock
 ) -> None:
-    """F3 (design/12): the tool checks the target against the space's providers. Onedata
+    """M-46 (design/12): the tool checks the target against the space's providers. Onedata
     answers a name with a message that says the space is not supported by that "provider",
     the opposite of the hint, and a model believed it. The refusal is made before any transfer
     is requested, and the model reads none of Onedata's text."""

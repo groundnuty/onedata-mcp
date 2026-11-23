@@ -1604,7 +1604,7 @@ SR1n, ST6, K=3).
 
 ---
 
-## M-46. F3: Onedata's message after "Pass its id" said the opposite
+## M-46. Onedata's message after "Pass its id" said the opposite
 
 **Surface:** `schedule_file_replication` (experimental), its error for
 a provider's name given as `target_provider_id`.
@@ -1674,6 +1674,10 @@ unchanged (surface hashes unchanged: design/12).
 **Decision:** Fixed (this PR); SR1/SR1i K=8 re-run pending (the six-
 config panel; design/12). The refusal is NOT VERIFIED until a re-run
 trial draws it (design/10).
+
+*Numbering: master's last entry is M-38, and M-39 to M-45 are written
+on another branch (the readiness tools), so this is M-46, after the
+highest number present.*
 
 ---
 

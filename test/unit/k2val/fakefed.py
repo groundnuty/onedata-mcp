@@ -244,7 +244,7 @@ class FakeFed:
         if m == "POST" and (mm := re.fullmatch(r"/spaces/([^/]+)/evaluate_qos_expression", rest)):
             return self._evaluate(mm[1], body)
         # A space by its name, or by the id the whole file ids carry (`whole_ids`): the tools
-        # list a file's space's providers from that id before they schedule (design/12, F3).
+        # list a file's space's providers from that id before they schedule (design/12, M-46).
         if (
             m == "GET"
             and (mm := re.fullmatch(r"/spaces/([^/]+)", rest))

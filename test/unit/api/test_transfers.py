@@ -602,7 +602,7 @@ async def test_a_provider_name_given_as_the_id_is_answered_with_its_id_first(
     hint = text.split(" [", 1)[0]
     assert "no provider with that id" not in hint and "not a valid provider id" not in hint
     assert "not a provider that supports" not in hint and "No file is known" not in hint
-    # the hint stands alone: nothing of Onedata's after it, which would say the opposite (F3)
+    # the hint stands alone: nothing of Onedata's after it, which would say the opposite (M-46)
     assert text == hint and "Onedata API request failed" not in text and "status=" not in text
 
 
@@ -1128,7 +1128,7 @@ async def test_a_4xx_unsupported_space_on_the_path_lookup_says_so_without_a_miss
     assert "the space may still exist" in text and "does not exist" not in text.split(" [")[0]
 
 
-# --- F3 (design/12): the target is checked against the space's providers before the request ---
+# --- M-46 (design/12): the target is checked against the space's providers before the request ---
 #
 # A model passed the provider's NAME as the id. Onedata refused it, and the hint said "Pass its
 # id", but Onedata's own message followed it and said the space is "not supported by provider

@@ -178,7 +178,7 @@ async def create_transfer(
 # and nothing here pretends otherwise.
 #
 # Before the request, a target is checked against the providers of the file's space
-# (`_refuse_unusable_target`, F3 in design/12): a provider's NAME is refused with its id, and a
+# (`_refuse_unusable_target`, M-46 and design/12): a provider's NAME is refused with its id, and a
 # value that is neither a name nor an id of one of them with the providers listed, both without
 # a word of Onedata's. That is so for the MCP tool only (`check_providers`): when the listing
 # cannot be read the request goes as it would have without the check, and the mapping above
@@ -357,9 +357,10 @@ class _StandsAlone(str):
     For a hint that Onedata's message can contradict. A provider's name given as the id is
     answered "Pass its id ..., not its name: ... is the name of a provider that supports the
     space"; Onedata, which reads the name as an id, says the space is "not supported by provider
-    <name>". A model took the second for the fact and copied to the other provider (design/12,
-    F3). No other hint here has that problem: each either agrees with what Onedata says or says
-    it does not know which argument is meant, so those keep the message after the hint."""
+    <name>". A model took the second for the fact and copied to the other provider (M-46,
+    design/12). No other hint here has that problem: each either agrees with what Onedata says
+    or says it does not know which argument is meant, so those keep the message after the
+    hint."""
 
 
 def _hinted(hint: str, error: OnedataApiError) -> OnedataApiError:
@@ -389,7 +390,7 @@ def _name_given_as_id_hint(
 
 async def _refuse_unusable_target(file_arg: str, file_id: str, target: str) -> None:
     """Refuse, before the request, a target that is not the id of a provider supporting the
-    file's space (F3, design/12).
+    file's space (M-46, design/12).
 
     Onedata answers a provider's NAME with `spaceNotSupportedBy`, whose message says the space
     is "not supported by provider <name>": a model read that as true and copied to the other
