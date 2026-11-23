@@ -78,7 +78,7 @@ The extent's rows are design/17's (unknown fields refused, empty selectors, a sh
 
 ## Gate 3: live check (re-run TODO)
 
-[`test/live/test_readiness_live.py`](../test/live/test_readiness_live.py), `make valfed-readiness-live`. It passed for the freeze (design/09: the hold expression accepted; ready and held after the writes; eviction refused under the rule). New, marked `TODO(first live run)`: the answer lists the hold's id; that id is the file's QoS requirement; removing it by that id releases it; and (the external review) an ensure call that resolves nothing, and one with an empty selector, place no rule on the probe file. The failure paths of the extent are design/17's. **Re-run it:** the wait, the answer and `ready` changed.
+[`test/live/test_readiness_live.py`](../test/live/test_readiness_live.py), `make valfed-readiness-live`. It passed for the freeze (design/09: the hold expression accepted; ready and held after the writes; eviction refused under the rule). New, marked `TODO(first live run)`: the answer lists the hold's id; that id is the file's QoS requirement; removing it by that id releases it; and (the external review) an ensure call that resolves nothing, and one with an empty selector, place no rule on the probe file. The failure paths of the extent are design/17's, and so is the check, on every lookup, that the directory found carries the chosen space's id. **Re-run it:** the wait, the answer and `ready` changed.
 
 ## Gate 4: validation run (scenarios built in branch commit `3898c22`, judged anew in `70f9e09`; run TODO)
 
