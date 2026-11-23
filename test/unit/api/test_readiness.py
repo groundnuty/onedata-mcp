@@ -427,13 +427,16 @@ def out_of_time(dataset: str = SPACE) -> str:
 
 def no_such_directory(dataset: str) -> str:
     return (
-        f"dataset '{dataset}' not found: no such directory. "
-        "Give a space name or an existing absolute directory path."
+        f"dataset '{dataset}' not found at your provider: no such directory, or one this "
+        "token cannot see. Give a space name or an existing absolute directory path."
     )
 
 
 def no_files(dataset: str = SPACE) -> str:
-    return f"dataset '{dataset}' has no files: there is nothing to make ready."
+    return (
+        f"dataset '{dataset}' holds no files. "
+        "Give a directory that holds the data, or name the files."
+    )
 
 
 def file_not_found(name: str, dataset: str = SPACE) -> str:
@@ -674,8 +677,7 @@ async def test_check_s0_complete_at_the_owner_nothing_local(fed: Fed) -> None:
     assert result["unresolved"] == []
     assert result["bytes_local"] == 0
     assert result["advice"] == (
-        "Not ready: 1 file is complete at another provider and not yet at yours. "
-        "ensure_readiness can wait for it and place it at your provider."
+        "Not ready: 1 file is complete at another provider and not yet at yours."
     )
 
 
@@ -702,8 +704,7 @@ async def test_check_s2_owner_partial_preallocated_is_being_written(fed: Fed) ->
     assert result["bytes"] == 1500
     assert result["bytes_local"] == 100
     assert result["advice"] == (
-        "Not ready: 14 files are still being written at their owner, so their bytes are "
-        "incomplete. ensure_readiness can wait for them and place them at your provider."
+        "Not ready: 14 files are still being written at their owner, so their bytes are incomplete."
     )
 
 
@@ -903,7 +904,9 @@ async def test_a_space_is_matched_by_name_or_by_id(fed: Fed) -> None:
     assert await run.space_id("archive") == "sp-archive-id"
     assert await run.space_id("sp-archive-id") == "sp-archive-id"
     assert await run.space_id(SPACE) == SPACE_ID
-    with pytest.raises(ValueError, match=r"Space 'nope' not found. Available names: \['archive'"):
+    with pytest.raises(
+        ValueError, match=r"no space named 'nope'.*the spaces it lists: \['archive'"
+    ):
         await run.space_id("nope")
 
 
@@ -986,8 +989,8 @@ async def test_check_unresolved_dataset(fed: Fed) -> None:
     assert result["files"] == 0
     assert len(result["unresolved"]) == 1
     assert result["unresolved"] == [
-        "dataset 'no-such-space' not found: Space 'no-such-space' not found. "
-        f"Available names: ['{SPACE}']. "
+        "dataset 'no-such-space' not found: your provider supports no space named "
+        f"'no-such-space' for this token (the spaces it lists: ['{SPACE}']). "
         "Give one of those names, or an absolute directory path inside one."
     ]
     assert "1 declared item was not resolved (see unresolved)." in result["advice"]
@@ -1415,7 +1418,7 @@ async def test_ensure_returns_not_ready_at_the_wait_cap_with_the_reason(
     assert result["held"] == {"files": 16, "rule": HOLD}
     assert result["advice"] == (
         "Not ready after 240 s: 14 files are still being written at their owner. "
-        "Call ensure_readiness again to keep waiting."
+        "Call again to keep waiting."
     )
     assert clock.elapsed <= readiness.MAX_WAIT_DEFAULT_S + readiness.ENSURE_GRACE_S
 
@@ -1429,7 +1432,7 @@ async def test_ensure_waits_only_as_long_as_the_agent_offered(fed: Fed, clock: C
     assert result["waited_s"] == 12
     assert result["advice"] == (
         "Not ready after 12 s: 1 file is still being written at its owner. "
-        "Call ensure_readiness again to keep waiting."
+        "Call again to keep waiting."
     )
 
 
@@ -1512,7 +1515,8 @@ async def test_ensure_reports_hold_failed_and_holds_the_rest(fed: Fed) -> None:
     assert result["hold_failed"] == {"files": 1, "examples": [bad.path]}
     assert result["advice"] == (
         "Ready: all declared files are complete and readable at your provider now. "
-        "A placement rule could not be created for 1 file."
+        "A hold could not be placed for 1 file: the provider refused this token the right "
+        "to add QoS requirements."
     )
 
 
@@ -1971,9 +1975,7 @@ async def test_every_unresolved_text_is_one_plain_line_that_says_what_to_give(fe
     for text in texts:
         assert "\n" not in text
         assert not re.search(r"comput|analy|should|must|do not|don't", text, re.IGNORECASE), text
-        assert re.search(
-            r"[Gg]ive|[Cc]all again|[Dd]eclare|[Ww]iden|nothing to make ready", text
-        ), text
+        assert re.search(r"[Gg]ive|[Cc]all again|[Dd]eclare|[Ww]iden", text), text
 
 
 # --- 2. inaccessible directories --------------------------------------------------------------
@@ -2114,7 +2116,7 @@ async def test_check_dataset_names_are_matched_exactly_as_declared(fed: Fed, dat
     assert result["ready"] is False
     assert result["files"] == 0
     assert result["unresolved"] and result["unresolved"][0].startswith(
-        f"dataset '{dataset}' not found: "
+        f"dataset '{dataset}' not found"
     )
 
 
@@ -3043,3 +3045,197 @@ def test_no_answer_text_advises_the_agent_on_its_analysis() -> None:
     assert texts
     for text in texts:
         assert not re.search(r"comput|analy|do not|don't|should|must", text, re.IGNORECASE), text
+
+
+# ---------------------------------------------------------------------------
+# Gate 1 (design/10): every error a model can trigger says how to fix the call, and claims no
+# more than the provider's answer shows. design/17 and design/18 list these paths.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("bad", "needle"),
+    [
+        # a guessed shape (an external CLI leg guessed `paths` and `date_from`): refused, never
+        # dropped, since an item left with neither files nor date_ranges is the whole dataset
+        (
+            [{"dataset": "x", "paths": ["a.nc"], "date_from": "2018-06-01"}],
+            r"extent\[0\] has no field 'date_from', 'paths': its fields are dataset, files, "
+            r"date_ranges",
+        ),
+        ([{"dataset": "x", "file": ["a.nc"]}], r"has no field 'file'"),
+        (
+            [{"dataset": "x", "date_ranges": [{"from": "2018-06-01", "to": "2018-06-02"}]}],
+            r"extent\[0\]\.date_ranges\[0\] has no field 'from', 'to': its fields are start, end",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_an_unknown_field_is_refused_and_named(bad: list, needle: str) -> None:
+    with pytest.raises(ValueError, match=needle):
+        await readiness.check_readiness(bad)
+
+
+@pytest.mark.parametrize(
+    "dataset",
+    [f"/{SPACE}/..", f"/{SPACE}/a/../b", f"{SPACE}/./sub", f"/{SPACE}//sub", "/..", "/./x"],
+)
+@pytest.mark.asyncio
+async def test_a_dataset_with_a_dot_or_empty_component_is_refused_before_any_request(
+    fed: Fed, dataset: str
+) -> None:
+    """`/my-dataset/..` would be resolved by the provider to the directory above every space."""
+    with pytest.raises(ValueError, match=r"has an empty, '\.' or '\.\.' component: give a space"):
+        await readiness.check_readiness([{"dataset": dataset}])
+    with pytest.raises(ValueError, match=r"component"):
+        await readiness.ensure_readiness([{"dataset": dataset}], 60)
+    assert fed.requests == []
+
+
+@pytest.mark.parametrize("dataset", [f"/{SPACE}/sub/", f"{SPACE}/sub", f"/{SPACE}"])
+def test_a_trailing_slash_or_a_missing_leading_one_is_not_refused(dataset: str) -> None:
+    (item,) = readiness._normalise_extent([{"dataset": dataset}])
+    assert item.dataset == dataset
+
+
+@pytest.mark.parametrize(
+    ("bad", "needle"),
+    [
+        (
+            [{"dataset": "x", "date_ranges": [{"start": "2020-02-30", "end": "2020-03-01"}]}],
+            r"start '2020-02-30' is not a calendar date: give a real day, as YYYY-MM-DD",
+        ),
+        (
+            [{"dataset": "x", "date_ranges": [{"start": "June 1", "end": "2020-03-01"}]}],
+            r"must be a date in YYYY-MM-DD form, got 'June 1'",
+        ),
+        (
+            [{"dataset": "x", "date_ranges": [{"start": "2020-03-02", "end": "2020-03-01"}]}],
+            r"start 2020-03-02 is after end 2020-03-01; give the earlier day as start",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_bad_date_range_says_how_to_fix_it(bad: list, needle: str) -> None:
+    with pytest.raises(ValueError, match=needle):
+        await readiness.check_readiness(bad)
+
+
+@pytest.mark.asyncio
+async def test_the_names_of_the_whole_extent_are_capped_not_only_each_item(fed: Fed) -> None:
+    half = [f"f{i}.nc" for i in range(readiness.MAX_FILES // 2 + 1)]
+    with pytest.raises(ValueError, match=r"names more than 20000 files in all"):
+        await readiness.check_readiness([{"dataset": SPACE, "files": half}] * 2)
+    assert fed.requests == []
+
+
+@pytest.mark.parametrize(
+    "response",
+    [_error(403, "forbidden"), _error(400, "posix", "eacces"), _error(400, "posix", "eperm")],
+    ids=["403", "eacces", "eperm"],
+)
+@pytest.mark.asyncio
+async def test_a_dataset_the_token_may_not_read_is_unresolved_with_the_reason(
+    fed: Fed, response: httpx.Response
+) -> None:
+    fed.add("a.nc", 100, local="full", owner="full")
+    for which in ("lookup", "listing"):
+        readiness.reset_state()
+        original = fed._lookup, fed._listing
+        if which == "lookup":
+            fed._lookup = lambda path: response  # type: ignore[method-assign]
+        else:
+            fed._listing = lambda root_id, body: response  # type: ignore[method-assign]
+
+        result = await check()
+
+        fed._lookup, fed._listing = original  # type: ignore[method-assign]
+        assert result["ready"] is False, which
+        assert result["unresolved"] == [
+            f"dataset '{SPACE}' cannot be listed: the provider refused this token access to "
+            "it. Declare data the token can read."
+        ], which
+
+
+@pytest.mark.asyncio
+async def test_a_5xx_carrying_enoent_is_not_read_as_a_missing_directory(fed: Fed) -> None:
+    """A structured not-found counts only on a 4xx: a failing provider is not "not found"."""
+    from onedata_mcp.utils import OnedataApiError
+
+    fed.add("a.nc", 100, local="full", owner="full")
+    fed._listing = lambda root_id, body: _error(500, "posix", "enoent")  # type: ignore[method-assign]
+
+    with pytest.raises(OnedataApiError):
+        await check()
+
+
+@pytest.mark.asyncio
+async def test_an_id_given_where_a_name_or_path_is_asked_for_is_named_as_an_id(fed: Fed) -> None:
+    file_id = "0000000000526A3A67756964233136" + "a" * 40
+    space_id = "c2a1b7d34f2e4b0f9a1c3e5d7f9b1d3e"
+    fed.add("a.nc", 100, local="full", owner="full")
+
+    by_id = await readiness.check_readiness([{"dataset": file_id}])
+    as_file = await check(files=[file_id])
+
+    assert by_id["unresolved"] == [
+        f"dataset '{file_id}' not found: it looks like an id, and this field takes a space name "
+        "or an absolute directory path, such as '/my-dataset/sub'."
+    ]
+    assert as_file["unresolved"] == [
+        f"file '{file_id}' in '{SPACE}' not found: it looks like a file id, and files are given "
+        "by their exact name or their absolute path."
+    ]
+    # a space's id is a legitimate dataset: the provider's list matches it by id
+    fed.spaces[0]["spaceId"] = space_id
+    readiness.reset_state()
+    assert (await readiness.check_readiness([{"dataset": space_id}]))["ready"] is True
+
+
+@pytest.mark.parametrize(
+    ("status", "sentence"),
+    [
+        (
+            403,
+            "A hold could not be placed for 1 file: the provider refused this token the right "
+            "to add QoS requirements.",
+        ),
+        (500, "A hold could not be placed for 1 file; the next call tries again."),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_hold_that_could_not_be_placed_says_why_as_far_as_the_provider_said(
+    fed: Fed, status: int, sentence: str
+) -> None:
+    fed.add("a.nc", 100, owner="full")
+    fed.qos_status = lambda fid, expression: status
+
+    result = await ensure(deadline_s=5)
+
+    assert result["hold_failed"]["files"] == 1
+    assert sentence in result["advice"]
+
+
+def test_no_answer_text_names_a_tool() -> None:
+    """Either tool may be offered without the other (a read-only token prunes ensure_readiness;
+    a scenario may offer one alone), so no answer names a tool (design/10, gate 2)."""
+    texts = [
+        readiness._advice(
+            ready=ready,
+            counts={reason: n},
+            unresolved=n,
+            unchecked=n,
+            waited_s=waited,
+            hold_failed=failed,
+            hold_forbidden=forbidden,
+        )
+        for ready in (True, False)
+        for waited in (None, 0, 150)
+        for failed in (0, 2)
+        for forbidden in (False, True)
+        for reason in readiness.REASONS
+        for n in (1, 5)
+    ]
+    texts += [readiness._config_unavailable()["advice"], readiness._config_unavailable(3)["advice"]]
+    for text in texts:
+        assert not re.search(r"\b\w+_readiness\b|\b[a-z]+_[a-z_]+\(", text), text

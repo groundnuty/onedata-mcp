@@ -7,6 +7,7 @@ through the MCP client.
 
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
@@ -137,6 +138,64 @@ async def test_check_rejects_a_malformed_extent_before_doing_anything(
     async with Client(readiness_mcp) as client:
         with pytest.raises(ToolError):
             await client.call_tool("check_readiness", arguments)
+
+
+@pytest.mark.asyncio
+async def test_descriptions_name_no_tool_and_cite_no_document(readiness_mcp: FastMCP) -> None:
+    """Gate 2 (design/10): either tool may be offered without the other (a read-only token
+    prunes ensure_readiness; a scenario may offer one alone), so neither names the other."""
+    tools = await _tools(readiness_mcp)
+    for tool in tools.values():
+        schema_text = json.dumps(tool.inputSchema)
+        for text in (tool.description, schema_text):
+            assert not re.search(r"\b\w+_readiness\b", text), tool.name
+            assert not re.search(r"design/|research/|\.md\b|M-\d|swagger|GET |POST ", text)
+        # what it takes and what it returns, in the model's terms
+        assert "`extent`" in tool.description and "YYYYMMDD" in tool.description
+        assert "a directory path inside it" in tool.description
+        assert "The answer is ready" in tool.description
+
+
+@pytest.mark.asyncio
+async def test_an_extent_item_or_a_date_range_takes_no_other_field(readiness_mcp: FastMCP) -> None:
+    """An unknown field used to be dropped: `{dataset, paths}` became the whole dataset."""
+    tools = await _tools(readiness_mcp)
+    for name in ("check_readiness", "ensure_readiness"):
+        item = tools[name].inputSchema["properties"]["extent"]["items"]
+        assert item["additionalProperties"] is False
+        date_range = next(
+            branch["items"]
+            for branch in item["properties"]["date_ranges"]["anyOf"]
+            if branch.get("type") == "array"
+        )
+        assert date_range["additionalProperties"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("item", "needle"),
+    [
+        ({"dataset": "x", "paths": ["a.nc"], "date_from": "2018-06-01"}, "paths"),
+        ({"dataset": "x", "file": ["a.nc"]}, "file"),
+        ({"dataset": "x", "date_ranges": [{"from": "2018-06-01", "to": "2018-06-02"}]}, "from"),
+    ],
+)
+async def test_an_unknown_field_is_refused_by_name_before_anything_is_read(
+    readiness_mcp: FastMCP, item: dict, needle: str
+) -> None:
+    for tool, extra in (("check_readiness", {}), ("ensure_readiness", {"deadline_s": 60})):
+        async with Client(readiness_mcp) as client:
+            with pytest.raises(ToolError, match=needle):
+                await client.call_tool(tool, {"extent": [item], **extra})
+
+
+@pytest.mark.asyncio
+async def test_a_dataset_above_its_space_is_refused_with_a_hint_the_model_sees(
+    readiness_mcp: FastMCP,
+) -> None:
+    async with Client(readiness_mcp) as client:
+        with pytest.raises(ToolError, match=r"empty, '\.' or '\.\.' component: give a space"):
+            await client.call_tool("check_readiness", {"extent": [{"dataset": "/my-dataset/.."}]})
 
 
 @pytest.mark.asyncio

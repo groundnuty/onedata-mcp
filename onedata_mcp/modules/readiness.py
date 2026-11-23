@@ -4,7 +4,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from onedata_mcp.api.readiness import (
     MAX_DATE_RANGES_PER_ITEM,
@@ -15,29 +15,40 @@ from onedata_mcp.api.readiness import (
 from onedata_mcp.api.readiness import check_readiness as api_check_readiness
 from onedata_mcp.api.readiness import ensure_readiness as api_ensure_readiness
 
+# How both tools take the data. Each description says it in full: either tool may be offered
+# without the other, so neither names the other (design/10, gate 2).
+EXTENT_SENTENCE = (
+    "Describe the data as `extent`: for each dataset (a space name such as 'my-dataset', or a "
+    "directory path inside it), optionally the files or date ranges you need; dates are read "
+    "from the YYYYMMDD in each file name."
+)
+
 CHECK_DESCRIPTION = (
     "Check whether the data your analysis needs are ready to read at your provider: "
-    "complete there, with all writes finished. Describe the data as `extent`: for each "
-    "dataset (a space name such as 'my-dataset'), optionally the files or date ranges you "
-    "need; dates are read from the YYYYMMDD in each file name. The answer is ready, or not "
-    "ready and why: being_written (the owner is still writing them, so their bytes are "
-    "incomplete), at_other_site (complete at another provider, not yet at yours), "
-    "in_transfer (on their way to your provider), or unreachable (only at a provider that "
-    "is down). Read-only."
+    "complete there, with all writes finished. "
+    + EXTENT_SENTENCE
+    + " The answer is ready, or not ready and why: being_written (the owner is still writing "
+    "them, so their bytes are incomplete), at_other_site (complete at another provider, not "
+    "yet at yours), in_transfer (on their way to your provider), or unreachable (only at a "
+    "provider that is down). Read-only."
 )
 
 ENSURE_DESCRIPTION = (
-    "Make the data your analysis needs ready at your provider, and keep them there for "
-    "your run. Takes the same `extent` as check_readiness, plus `deadline_s`, how long you "
-    "can wait. The system chooses where to copy from and waits for unfinished writes and "
-    "transfers. The answer is ready (the data are complete and readable at your provider "
-    "now, and held there), or not ready with the reason. One call waits at most about 4 "
-    "minutes; if the answer is not ready because data are being written or in transfer, "
-    "call it again."
+    "Make the data your analysis needs ready at your provider, and keep them there for your "
+    "run. "
+    + EXTENT_SENTENCE
+    + " `deadline_s` is how long you can wait. The system chooses where to copy from and "
+    "waits for unfinished writes and transfers. The answer is ready (the data are complete "
+    "and readable at your provider now, and held there), or not ready with the reason. One "
+    "call waits at most about 4 minutes; if the answer is not ready because data are being "
+    "written or in transfer, call it again."
 )
 
 
 class DateRange(BaseModel):
+    # An unknown field is refused, not dropped.
+    model_config = ConfigDict(extra="forbid")
+
     start: str = Field(
         description="First day, inclusive, as YYYY-MM-DD",
         pattern=r"^\d{4}-\d{2}-\d{2}$",
@@ -49,6 +60,10 @@ class DateRange(BaseModel):
 
 
 class ExtentItem(BaseModel):
+    # An unknown field is refused, not dropped: an item left with no `files` and no
+    # `date_ranges` would mean the whole dataset, which ensure_readiness would then hold.
+    model_config = ConfigDict(extra="forbid")
+
     dataset: str = Field(
         description=(
             "A space name such as 'my-dataset', or an absolute directory path inside a "

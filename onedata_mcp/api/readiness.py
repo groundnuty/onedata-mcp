@@ -35,7 +35,7 @@ import os
 import re
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import Any
 
@@ -398,11 +398,43 @@ class _Item:
     misspelled: bool = False
 
 
+_ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+_ITEM_KEYS = ("dataset", "files", "date_ranges")
+_RANGE_KEYS = ("start", "end")
+
+
 def _parse_day(value: Any, where: str) -> date:
+    if not isinstance(value, str) or not _ISO_DAY.fullmatch(value):
+        raise ValueError(f"{where} must be a date in YYYY-MM-DD form, got {value!r}")
     try:
         return date.fromisoformat(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"{where} must be a date in YYYY-MM-DD form, got {value!r}") from None
+    except ValueError:
+        raise ValueError(
+            f"{where} {value!r} is not a calendar date: give a real day, as YYYY-MM-DD"
+        ) from None
+
+
+def _unknown_keys(raw: Mapping[str, Any], known: tuple[str, ...], where: str) -> None:
+    """A field the item does not have is refused: dropped silently, it would widen the item
+    (an item with no `files` and no `date_ranges` is the whole dataset)."""
+    unknown = sorted(str(key) for key in raw if key not in known)
+    if unknown:
+        raise ValueError(
+            f"{where} has no field {', '.join(repr(k) for k in unknown)}: "
+            f"its fields are {', '.join(known)}"
+        )
+
+
+def _check_dataset(dataset: str, space: str, where: str) -> None:
+    """An empty, `.` or `..` component is refused: the provider would resolve it to another
+    directory (`/my-dataset/..` is above every space)."""
+    parts = dataset.strip("/").split("/") if dataset.strip("/") else [""]
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError(
+            f"{where}.dataset {dataset!r} has an empty, '.' or '..' component: give a space "
+            f"name such as '{space or 'my-dataset'}', or an absolute directory path inside it "
+            "such as '/my-dataset/sub/dir'"
+        )
 
 
 def _normalise_extent(extent: Sequence[Mapping[str, Any]]) -> list[_Item]:
@@ -410,17 +442,18 @@ def _normalise_extent(extent: Sequence[Mapping[str, Any]]) -> list[_Item]:
     if not isinstance(extent, list | tuple) or not 1 <= len(extent) <= MAX_EXTENT_ITEMS:
         raise ValueError(f"extent must be a list of 1 to {MAX_EXTENT_ITEMS} items")
     items: list[_Item] = []
+    named = 0
     for index, raw in enumerate(extent):
         where = f"extent[{index}]"
         if not isinstance(raw, Mapping):
             raise ValueError(f"{where} must be an object")
+        _unknown_keys(raw, _ITEM_KEYS, where)
         dataset = raw.get("dataset")
-        if not isinstance(dataset, str) or not dataset:
+        if not isinstance(dataset, str) or not dataset.strip("/"):
             raise ValueError(f"{where}.dataset must be a space name or a path inside a space")
         root = dataset if dataset.startswith("/") else "/" + dataset
         space = root.split("/")[1]
-        if not space:
-            raise ValueError(f"{where}.dataset must be a space name or a path inside a space")
+        _check_dataset(dataset, space, where)
         files = raw.get("files") or []
         if not isinstance(files, list) or not all(isinstance(f, str) and f for f in files):
             raise ValueError(f"{where}.files must be a list of file names or paths")
@@ -438,23 +471,25 @@ def _normalise_extent(extent: Sequence[Mapping[str, Any]]) -> list[_Item]:
             r_where = f"{where}.date_ranges[{r_index}]"
             if not isinstance(rng, Mapping):
                 raise ValueError(f"{r_where} must be an object with start and end")
+            _unknown_keys(rng, _RANGE_KEYS, r_where)
             start = _parse_day(rng.get("start"), f"{r_where}.start")
             end = _parse_day(rng.get("end"), f"{r_where}.end")
             if start > end:
-                raise ValueError(f"{r_where}: start is after end")
+                raise ValueError(
+                    f"{r_where}: start {start.isoformat()} is after end {end.isoformat()}; "
+                    "give the earlier day as start"
+                )
             ranges.append((start, end))
         misspelled = not dataset.startswith("/") and "/" in dataset
         # A name or a range declared twice is looked for once.
-        items.append(
-            _Item(
-                dataset,
-                space,
-                root,
-                list(dict.fromkeys(files)),
-                list(dict.fromkeys(ranges)),
-                misspelled,
+        unique = list(dict.fromkeys(files))
+        named += len(unique)
+        if named > MAX_FILES:
+            raise ValueError(
+                f"The extent names more than {MAX_FILES} files in all. "
+                "Declare a smaller extent, or select files by date range."
             )
-        )
+        items.append(_Item(dataset, space, root, unique, list(dict.fromkeys(ranges)), misspelled))
     return items
 
 
@@ -511,6 +546,7 @@ class _Run:
         self.deadline = deadline
         self._rest = asyncio.Semaphore(CHECK_CONCURRENCY)
         self._space_ids: dict[str, str] = {}
+        self._space_names: dict[str, str] = {}  # a space declared by its id -> its name
         self._spaces: list[dict[str, Any]] | None = None
         self._online: dict[str, asyncio.Future[bool]] = {}
         self._transfers: dict[str, asyncio.Future[list[_Transfer] | None]] = {}
@@ -559,9 +595,21 @@ class _Run:
             if entry.get("name") == space or entry.get("spaceId") == space:
                 space_id = entry.get("spaceId")
                 if isinstance(space_id, str) and space_id:
+                    name = entry.get("name")
+                    if entry.get("name") != space and isinstance(name, str) and name:
+                        self._space_names[space] = name  # paths name a space by its name
                     return space_id
         names = sorted(e["name"] for e in self._spaces if isinstance(e.get("name"), str))
-        raise ValueError(f"Space {space!r} not found. Available names: {names}")
+        # Only the spaces this provider supports for the token are listed: another space of
+        # that name may still exist, so "not found" says where it was looked for.
+        raise ValueError(
+            f"your provider supports no space named {space!r} for this token "
+            f"(the spaces it lists: {names})"
+        )
+
+    def space_name(self, space: str) -> str:
+        """The name to put in a path for a space declared by name or by id."""
+        return self._space_names.get(space, space)
 
     async def provider_online(self, provider_id: str) -> bool:
         """Onezone's `online` for a provider, looked up once per call.
@@ -676,6 +724,7 @@ async def _local_id() -> str:
 class _Listing:
     files: list[FileInfo] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)  # why this is not the whole dataset
+    root: str = ""  # the dataset's directory, its space named by name (a space id replaced)
 
 
 def _no_time(item: _Item) -> str:
@@ -686,9 +735,18 @@ def _no_time(item: _Item) -> str:
 
 
 def _no_such_directory(item: _Item) -> str:
+    # A bare 404 does not say why (no such directory, or one this token cannot see): the
+    # text names both and claims neither.
     return (
-        f"dataset '{item.dataset}' not found: no such directory. "
-        "Give a space name or an existing absolute directory path."
+        f"dataset '{item.dataset}' not found at your provider: no such directory, or one this "
+        "token cannot see. Give a space name or an existing absolute directory path."
+    )
+
+
+def _not_allowed(item: _Item) -> str:
+    return (
+        f"dataset '{item.dataset}' cannot be listed: the provider refused this token access "
+        "to it. Declare data the token can read."
     )
 
 
@@ -699,12 +757,37 @@ def _misspelled(item: _Item) -> str:
     )
 
 
+# An Onedata file or space id: a long run of hexadecimal digits. Given where a name or a path
+# is asked for, it is named as an id in the hint.
+_ID_LIKE = re.compile(r"[0-9A-Fa-f]{32,}")
+
+
+def _looks_like_id(value: str) -> bool:
+    return bool(_ID_LIKE.fullmatch(value.strip("/")))
+
+
+def _status(exc: OnedataError) -> int | None:
+    status = exc.response.get("status_code") if isinstance(exc.response, dict) else None
+    return status if isinstance(status, int) else None
+
+
 def _is_gone(exc: OnedataError) -> bool:
-    """The path does not exist (any more): enoent, a 404 or notFound, or an unsupported space."""
+    """The provider answered that the path is not there: an unsupported space, a structured
+    not-found (enoent, notFound) on a 4xx, or a bare 404. A 5xx is never read as gone."""
     if isinstance(exc, OnedataInvalidSpaceError):
         return True
-    status = exc.response.get("status_code") if isinstance(exc.response, dict) else None
-    return exc.errno == "enoent" or exc.error_id == "notFound" or status == 404
+    status = _status(exc)
+    client_error = status is not None and 400 <= status < 500
+    return status == 404 or (client_error and (exc.errno == "enoent" or exc.error_id == "notFound"))
+
+
+def _is_forbidden(exc: OnedataError) -> bool:
+    """A 403, or a 4xx with the `forbidden` error id or an `eacces`/`eperm` errno."""
+    status = _status(exc)
+    client_error = status is not None and 400 <= status < 500
+    return status == 403 or (
+        client_error and (exc.error_id == "forbidden" or exc.errno in {"eacces", "eperm"})
+    )
 
 
 _FILE_TYPES = frozenset({"REG", "DIR", "SYMLNK"})  # the swagger's FileType
@@ -721,23 +804,35 @@ async def _list_dataset(run: _Run, item: _Item) -> _Listing:
     try:
         space_id = await run.space_id(item.space)
     except ValueError as exc:
-        listing.problems.append(
-            _misspelled(item)
-            if item.misspelled  # 'nosuch/sub': its first segment is not a space
-            else f"dataset '{item.dataset}' not found: {exc}. "  # names the existing spaces
-            "Give one of those names, or an absolute directory path inside one."
-        )
+        if item.misspelled:  # 'nosuch/sub': its first segment is not a space
+            listing.problems.append(_misspelled(item))
+        elif _looks_like_id(item.dataset):
+            listing.problems.append(
+                f"dataset '{item.dataset}' not found: it looks like an id, and this field "
+                "takes a space name or an absolute directory path, such as '/my-dataset/sub'."
+            )
+        else:  # the message names the spaces the provider lists
+            listing.problems.append(
+                f"dataset '{item.dataset}' not found: {exc}. "
+                "Give one of those names, or an absolute directory path inside one."
+            )
         return listing
     except TimeoutError:
         listing.problems.append(_no_time(item))
         return listing
+    # A space declared by its id is named by its name in paths (the lookup takes names).
+    root = "/" + run.space_name(item.space) + item.root[len(item.space) + 1 :]
+    listing.root = root
     try:
-        root_id = await run.within(get_file_id(item.root))
+        root_id = await run.within(get_file_id(root))
     except (FileNotFoundError, OnedataInvalidSpaceError):
         listing.problems.append(_no_such_directory(item))
         return listing
     except OnedataApiError as exc:
-        if not _is_gone(exc):  # a plain 404 or notFound from the lookup is "no such directory"
+        if _is_forbidden(exc):
+            listing.problems.append(_not_allowed(item))
+            return listing
+        if not _is_gone(exc):  # a plain 404 or notFound from the lookup is "not found"
             raise
         listing.problems.append(_no_such_directory(item))
         return listing
@@ -762,6 +857,9 @@ async def _list_dataset(run: _Run, item: _Item) -> _Listing:
             listing.problems.append(_no_time(item))
             break
         except (OnedataApiError, OnedataInvalidSpaceError) as exc:
+            if _is_forbidden(exc):
+                listing.problems.append(_not_allowed(item))
+                break
             if not _is_gone(exc):
                 raise
             listing.problems.append(_no_such_directory(item))
@@ -803,7 +901,7 @@ async def _list_dataset(run: _Run, item: _Item) -> _Listing:
             origin = entry.get("originProviderId")
             info = FileInfo(
                 file_id=file_id,
-                path=_absolute(item.root, rel),
+                path=_absolute(root, rel),
                 space_id=space_id,
                 size=size if size_known else 0,
                 size_known=size_known,
@@ -842,7 +940,7 @@ async def _list_dataset(run: _Run, item: _Item) -> _Listing:
         )
     for path in dict.fromkeys(inaccessible):
         listing.problems.append(
-            f"directory '{_absolute(item.root, path)}' in '{item.dataset}' is not listed "
+            f"directory '{_absolute(root, path)}' in '{item.dataset}' is not listed "
             "(no access), so files under it cannot be checked. "
             "Declare files outside it, or get access."
         )
@@ -854,7 +952,8 @@ def _select(item: _Item, files: list[FileInfo], unresolved: list[str]) -> list[F
     if not item.files and not item.ranges:
         if not files:
             unresolved.append(
-                f"dataset '{item.dataset}' has no files: there is nothing to make ready."
+                f"dataset '{item.dataset}' holds no files. "
+                "Give a directory that holds the data, or name the files."
             )
         return files
 
@@ -874,7 +973,12 @@ def _select(item: _Item, files: list[FileInfo], unresolved: list[str]) -> list[F
             matches = [found] if found else []
         else:
             matches = by_name.get(name, [])
-        if not matches:
+        if not matches and _looks_like_id(name):
+            unresolved.append(
+                f"file '{name}' in '{item.dataset}' not found: it looks like a file id, and "
+                "files are given by their exact name or their absolute path."
+            )
+        elif not matches:
             unresolved.append(
                 f"file '{name}' in '{item.dataset}' not found: "
                 "give the exact file name, or its absolute path."
@@ -918,7 +1022,8 @@ async def _resolve(run: _Run, items: list[_Item]) -> tuple[list[FileInfo], list[
         listing = listings[item.root]
         if not listing.files and listing.problems:
             continue  # nothing to pick from; the problems are reported above
-        for f in _select(item, listing.files, unresolved):
+        named = replace(item, root=listing.root) if listing.root else item
+        for f in _select(named, listing.files, unresolved):
             if f.file_id in resolved:
                 _merge_file(resolved[f.file_id], f)
             else:
@@ -1058,6 +1163,16 @@ def _phrase(reason: str, n: int, *, ensure: bool) -> str:
     return f"the only copies of {_noun(n)} are at a provider that is down."
 
 
+def _hold_failed_sentence(n: int, forbidden: bool) -> str:
+    """Why a hold is missing, as far as the provider said. Only a refusal (403, `forbidden`,
+    `eacces`, `eperm`) is called one; anything else (a timeout, another error, a rule that
+    vanished) may pass, so the next call tries again."""
+    text = f"A hold could not be placed for {_noun(n)}"
+    if forbidden:
+        return f"{text}: the provider refused this token the right to add QoS requirements."
+    return f"{text}; the next call tries again."
+
+
 def _advice(
     *,
     ready: bool,
@@ -1066,8 +1181,10 @@ def _advice(
     unchecked: int,
     waited_s: int | None,
     hold_failed: int,
+    hold_forbidden: bool = False,
 ) -> str:
-    """One or two plain sentences: what the answer means and how the other tool is used.
+    """One or two plain sentences: what the answer means. It names no tool (the other tool may
+    not be offered alongside: design/10, gate 2).
 
     Never advice on what the agent does with the data.
     """
@@ -1077,7 +1194,7 @@ def _advice(
         if not ensure:
             return text + "."
         if hold_failed:
-            return f"{text}. A placement rule could not be created for {_noun(hold_failed)}."
+            return f"{text}. {_hold_failed_sentence(hold_failed, hold_forbidden)}"
         return text + ", and held there."
 
     sentences: list[str] = []
@@ -1090,15 +1207,9 @@ def _advice(
     if unchecked:
         sentences.append(f"{_noun(unchecked)} could not be checked.")
     if hold_failed:
-        sentences.append(f"A placement rule could not be created for {_noun(hold_failed)}.")
-    if dominant is not None and dominant != "unreachable":
-        if ensure:
-            sentences.append("Call ensure_readiness again to keep waiting.")
-        else:
-            them = "it" if counts[dominant] == 1 else "them"
-            sentences.append(
-                f"ensure_readiness can wait for {them} and place {them} at your provider."
-            )
+        sentences.append(_hold_failed_sentence(hold_failed, hold_forbidden))
+    if ensure and dominant in ("being_written", "in_transfer", "at_other_site"):
+        sentences.append("Call again to keep waiting.")
     lead = f"Not ready after {waited_s} s:" if ensure else "Not ready:"
     return f"{lead} {' '.join(sentences)}"
 
@@ -1108,6 +1219,7 @@ class _Hold:
     expression: str
     held_ids: set[str]  # files whose rule was confirmed to exist, or created
     failed: list[FileInfo]
+    forbidden: bool = False  # the provider refused to create a rule (403, eacces, ...)
 
     @property
     def held(self) -> int:
@@ -1160,6 +1272,7 @@ def _answer(
         unchecked=unchecked,
         waited_s=waited_s,
         hold_failed=len(hold.failed) if hold else 0,
+        hold_forbidden=bool(hold and hold.forbidden),
     )
     if hold is not None:
         answer["waited_s"] = waited_s
@@ -1191,7 +1304,7 @@ def _config_unavailable(waited_s: int | None = None) -> dict[str, Any]:
         return answer
     answer["advice"] = (
         f"Not ready after {waited_s} s: provider configuration unavailable, so nothing could "
-        "be placed or checked. Call ensure_readiness again."
+        "be placed or checked. Call again."
     )
     answer["waited_s"] = waited_s
     answer["held"] = {"files": 0, "rule": HOLD_EXPRESSION.format(provider_id="<local provider>")}
@@ -1232,8 +1345,14 @@ def _hold_expression(local_id: str) -> str:
     return (HOLD_EXPRESSION_PLAIN if _hold_plain else HOLD_EXPRESSION).format(provider_id=local_id)
 
 
-async def _place_one(run: _Run, file: FileInfo) -> bool:
-    """Add the placement rule for a file; falls back to the plain expression on a 400."""
+_REFUSED = "refused"  # `_place_one`'s answer when the provider refused the token the right
+
+
+async def _place_one(run: _Run, file: FileInfo) -> bool | str:
+    """Add the placement rule for a file; falls back to the plain expression on a 400.
+
+    True when the rule was created; `_REFUSED` when the provider refused the token (403,
+    `forbidden`, `eacces`, `eperm`); False otherwise (a timeout, another error, no id)."""
     global _hold_plain
     templates = [HOLD_EXPRESSION_PLAIN] if _hold_plain else [HOLD_EXPRESSION, HOLD_EXPRESSION_PLAIN]
     for index, template in enumerate(templates):
@@ -1247,6 +1366,8 @@ async def _place_one(run: _Run, file: FileInfo) -> bool:
             return False
         except OnedataApiError as exc:
             status = exc.response.get("status_code") if exc.response else None
+            if _is_forbidden(exc):
+                return _REFUSED
             if status == 400 and index + 1 < len(templates):
                 continue  # Onedata rejected the expression form: try the plain one
             return False
@@ -1306,6 +1427,7 @@ async def _place(run: _Run, files: list[FileInfo]) -> _Hold:
     """
     held: set[str] = set()
     failed: list[FileInfo] = []
+    refused = False
     cached = [f for f in files if f.file_id in _rules]
 
     confirmed = await _bounded(
@@ -1323,19 +1445,17 @@ async def _place(run: _Run, files: list[FileInfo]) -> _Hold:
     if todo:
         # The first rule settles which expression form Onedata takes; the rest follow it.
         first, rest = todo[0], todo[1:]
-        if await _place_one(run, first):
-            held.add(first.file_id)
-        else:
-            failed.append(first)
+        outcome = await _place_one(run, first)
         results = await _bounded(
             PLACE_CONCURRENCY, rest, lambda f: _place_one(run, f), run.deadline
         )
-        for f, ok in zip(rest, results, strict=True):
+        for f, ok in zip([first, *rest], [outcome, *results], strict=True):
             if ok is True:
                 held.add(f.file_id)
             else:
                 failed.append(f)
-    return _Hold(_hold_expression(run.local_id), held, failed)
+                refused = refused or ok == _REFUSED
+    return _Hold(_hold_expression(run.local_id), held, failed, refused)
 
 
 async def _poll_round(run: _Run, pending: list[FileInfo]) -> None:
