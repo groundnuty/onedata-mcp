@@ -249,9 +249,10 @@ _ENSURE_REQUIRED = (
 )
 # The brief's bound on the wait, scored in RE, REn and REp alike (`scoring.waited_s`).
 _WAIT = (
-    " The wait: at most the brief's five minutes inside ensure_readiness calls (from their "
-    "recorded start and end, calls that overlap counted once), plus 20 s a call for its final "
-    "read-back, which the tool takes beyond any deadline_s; more fails (WAITED TOO LONG)."
+    " The wait: the union of the agent's ensure_readiness calls' recorded work intervals (calls "
+    "that overlap counted once) is at most the brief's five minutes plus a tolerance of 20 s, "
+    "once (one final read-back, which the tool takes after its deadline_s); more fails "
+    "(WAITED TOO LONG)."
 )
 _END_STATE = (
     " At the answer, every file asked about is covered by the local blocks and held there: a "

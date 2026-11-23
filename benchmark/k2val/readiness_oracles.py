@@ -179,15 +179,22 @@ def _state(ctx: K2Context, snap: Any, name: str) -> FileState:
 
 
 def _baseline(ctx: K2Context) -> None:
-    """The start state the end state is compared with: every file of the fixture in it."""
+    """The start state the end state is compared with: every file of the fixture in it, with
+    the rules it had (`qos_ids`, a list, empty when none). A baseline without them cannot say
+    which rules are new: unusable, never read as "no rule"."""
     missing = [n for n in ctx.file_names if n not in ctx.baseline_files]
     if not ctx.baseline_files or missing:
         raise UnusableSnapshot(f"no baseline was recorded for {missing or 'the files'}")
+    unread = [
+        n for n in ctx.file_names if not isinstance(ctx.baseline_files[n].get("qos_ids"), list)
+    ]
+    if unread:
+        raise UnusableSnapshot(f"the baseline does not say which rules {unread} had")
 
 
 def _new_rules(ctx: K2Context, name: str, state: FileState) -> set[str]:
-    base = ctx.baseline_files.get(name) or {}
-    return set(state.qos_ids) - set(base.get("qos_ids") or ())
+    """The rules on the file that it did not have at the start (`_baseline` checked them)."""
+    return set(state.qos_ids) - set(ctx.baseline_files[name]["qos_ids"])
 
 
 def holds_here(ctx: K2Context, state: FileState) -> list[str]:

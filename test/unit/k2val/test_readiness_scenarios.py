@@ -1030,10 +1030,11 @@ def _ensure_call(index: int, start: float, end: float, deadline_s: int = 300):
 @pytest.mark.parametrize(
     ("spans", "ok"),
     [
-        ([(0, 170), (180, 350)], True),  # two calls at the cap: 340 s, within 300 + 2 x 20
-        ([(0, 170), (180, 350), (360, 530)], False),  # a third: 510 s, over 300 + 3 x 20
+        ([(0, 150), (160, 310)], True),  # two calls of 150 s: 300 s
+        ([(0, 170), (180, 350)], False),  # two of 170 s: 340 s, over 300 + 20 (none per call)
         ([(0, 170), (100, 270)], True),  # overlapping calls are counted once (270 s)
-        ([(0, 330)], False),  # one call can take no more than 170 s; 330 is over 320
+        ([(0, 320)], True),  # 320 s is exactly 300 + 20
+        ([(0, 321)], False),
     ],
 )
 def test_ren_the_five_minutes_are_scored_from_the_recorded_calls(spans, ok) -> None:
@@ -1320,8 +1321,8 @@ def _re_scored(spans: list[tuple[float, float]]):
 @pytest.mark.parametrize(
     ("spans", "outcome"),
     [
-        ([(0, 170), (180, 350)], "PASS"),  # two calls at the cap: 340 s, within 300 + 2 x 20
-        ([(0, 170), (180, 350), (360, 530)], "FAIL"),  # a third: 510 s, over 360
+        ([(0, 150), (160, 310)], "PASS"),  # two calls of 150 s: 300 s
+        ([(0, 170), (180, 350)], "FAIL"),  # 340 s: over 300 + 20, whatever the number of calls
         ([(0, 320)], "PASS"),  # one call: 320 s is exactly 300 + 20
         ([(0, 321)], "FAIL"),  # ... and a second more is over
     ],
@@ -1462,7 +1463,6 @@ async def test_verify_the_recorder_keeps_a_cancelled_call_as_unconfirmed() -> No
     assert unconfirmed(app.calls[0])
 
 
-@_XF
 def test_verify_a_baseline_without_its_rules_is_unusable() -> None:
     """Codex 9: a baseline entry with no `qos_ids` read as "no rule", so a hold there before
     the agent counted as new."""
@@ -1475,7 +1475,6 @@ def test_verify_a_baseline_without_its_rules_is_unusable() -> None:
         ORACLES["RE"](c, AgentTrace(final_answer=READY))
 
 
-@_XF
 def test_verify_the_five_minutes_have_no_allowance_per_call() -> None:
     """Codex 10: thirty sequential 20 s calls (600 s) passed: 300 s + 20 s a call."""
     from benchmark.k2val.scoring import EXTRA_CHECKS

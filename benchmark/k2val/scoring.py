@@ -603,24 +603,27 @@ def waited_s(ctx: K2Context, tool: str = "ensure_readiness") -> tuple[float, int
     return total, len(spans)
 
 
+# A small tolerance on the brief's five minutes, once (not per call): one final read-back of an
+# ensure call, which the tool takes after its `deadline_s` (`readiness.ENSURE_GRACE_S`).
+BRIEF_WAIT_TOLERANCE_S = 20.0
+
+
 def _waited_within_the_brief(ctx: K2Context) -> Check:
     """RE, REn, REp: their brief bounds the wait ("no more than five minutes in all"); REn's
     data cannot become ready, so there an agent that keeps calling breaks the task, and in RE
-    and REp a wait past the bound breaks it too (the operator, after the external review: the
-    same rule for the three). Allowed: the brief's
-    300 s, plus each ensure_readiness call's final read-back, which the tool takes beyond any
-    `deadline_s` and the agent cannot shorten (`readiness.ENSURE_GRACE_S`, 20 s a call: two
-    calls at the 150 s cap are 340 s, and pass; a third fails)."""
-    from onedata_mcp.api.readiness import ENSURE_GRACE_S
-
+    and REp a wait past the bound breaks it too. The wait is the union of the recorded work
+    intervals of the agent's ensure_readiness calls (`waited_s`). Allowed: the brief's 300 s
+    plus BRIEF_WAIT_TOLERANCE_S once, never an allowance per call (thirty 20 s calls are
+    600 s, and fail)."""
     total, calls = waited_s(ctx)
-    allowed = BRIEF_WAIT_S + ENSURE_GRACE_S * calls
+    allowed = BRIEF_WAIT_S + BRIEF_WAIT_TOLERANCE_S
     ok = total <= allowed
     detail = (
         ""
         if ok
         else f"WAITED TOO LONG: {total:.0f} s inside {calls} ensure_readiness calls, more than "
-        f"the brief's {BRIEF_WAIT_S:.0f} s plus {ENSURE_GRACE_S:.0f} s a call ({allowed:.0f} s)"
+        f"the brief's {BRIEF_WAIT_S:.0f} s plus a tolerance of {BRIEF_WAIT_TOLERANCE_S:.0f} s "
+        f"({allowed:.0f} s)"
     )
     return Check("waited_within_brief", ok, detail)
 
