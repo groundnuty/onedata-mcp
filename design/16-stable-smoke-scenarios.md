@@ -1,6 +1,6 @@
 # Smoke scenarios for the stable tools
 
-Status: built and unit-tested on the fake federation (2026-11-22), revised after an external review the same day (below). First run on the validation federation 2026-11-23, control and smoke pair, and classified ([Results](#results-of-the-first-smoke-run-2026-11-23)): `add_file_qos_requirement` had one new tool-attributable finding (SF1); `get_file_qos_summary` and `get_file_distribution` stayed stable only if a record that deferred a finding to this run could serve as its baseline (SF2, SF3; the operator's call); four rows stay stable; the hint row is not verified. The three findings are fixed in the results, errors and hints of those tools ([Fixes and the re-run](#fixes-for-sf1-to-sf3-and-their-re-run)), under design/10's rule that a tool is fixed and re-run, not demoted; the re-run is pending.
+Status: built and unit-tested on the fake federation (2026-11-22), revised after an external review the same day (below). First run on the validation federation 2026-11-23, control and smoke pair, and classified ([Results](#results-of-the-first-smoke-run-2026-11-23)): `add_file_qos_requirement` had one new tool-attributable finding (SF1); `get_file_qos_summary` and `get_file_distribution` stayed stable only if a record that deferred a finding to this run could serve as its baseline (SF2, SF3; the operator's call); four rows stay stable; the hint row is not verified. The three findings are fixed in the results, errors and hints of those tools ([Fixes and the re-run](#fixes-for-sf1-to-sf3-and-their-re-run)), under design/10's rule that a tool is fixed and re-run, not demoted. The re-run, `smoke-stable-2` (2026-11-23), is clean ([Results](#results-of-the-second-smoke-run-2026-11-23)): the three tools stay stable, each fix was shown to a model and acted on rightly, and two branches of the fixes that no model was shown stay not verified.
 
 [`10-tool-maturity.md`](10-tool-maturity.md), "Staying stable", says that a stable tool whose description wording, error hints or result shape changes must re-run "the tool's scenarios on the smoke pair at K=3". Eight such changes are owed, over seven tools:
 
@@ -272,8 +272,125 @@ Each of the three tools owes its scenarios on the smoke pair at K=3 (design/10, 
 
 `K2VAL_ARTEFACT_ROOT` is the Makefile's name for `--artefact-root`. The pass rule is the one above: a clean re-run keeps the three tools stable.
 
-- **SF1's refusal is NOT VERIFIED** until a re-run trial draws it, that is, a model sends a provider's name (or another value that is not an id) in `providerId=` and is shown the refusal. With no such trial the hint stays an open item: unit tests do not clear it (design/10). SF2's `meaning` and SF3's `holds_whole_file` are in front of a model on every call that returns an empty summary or a regular file's distribution. The report counts exposures only of `get_qos_requirement`'s hint, so for these three they are read off the recorded calls.
-- **The `get_qos_requirement` hint row stays NOT VERIFIED (open).** Nothing here changes it: the run still needs a trial that sends that tool a malformed id.
+- **SF1's refusal is NOT VERIFIED** until a re-run trial draws it, that is, a model sends a provider's name (or another value that is not an id) in `providerId=` and is shown the refusal. With no such trial the hint stays an open item: unit tests do not clear it (design/10). SF2's `meaning` and SF3's `holds_whole_file` are in front of a model on every call that returns an empty summary or a regular file's distribution. The report counts exposures only of `get_qos_requirement`'s hint, so for these three they are read off the recorded calls. *Run 2:* the name refusal was drawn in two trials; the refusal of a value that is neither, and SF3's `null`, in none ([Exposure to the fixes](#exposure-to-the-fixes)).
+- **The `get_qos_requirement` hint row stays NOT VERIFIED (open).** Nothing here changes it: the run still needs a trial that sends that tool a malformed id. *Run 2:* still no exposure.
+
+## Results of the second smoke run (2026-11-23)
+
+Run `smoke-stable-2` on the validation federation, 2026-11-23, 14:59 to 15:56 UTC, at master `e2697c2` (PR #48, the three fixes), in the durable evidence store. The smoke pair at K=3 on the 11 scenarios above: 66 records, one per trial. No trial had an infrastructure outcome, so every fixture precondition held. The offered surface of every trial is K1, `9192d3f502ebbd04a4d17ef787c27f7193df0fb89bac5eafa1ea618ae1324df3`. Answers were read by the deterministic reader and the judge (Claude Sonnet 5.5, effort medium). The classes and the L3a bar are those of the first run; this run has two families, Qwen (Qwen3-Coder) and Anthropic (Haiku).
+
+**Verdict: the re-run is clean.** No new tool-attributable failure in `add_file_qos_requirement`, `get_file_qos_summary` or `get_file_distribution`. Each fix was shown to a model, and every model shown it acted rightly. All three tools stay stable.
+
+### Rescore
+
+The stored answers were read again offline (`rejudge --cached-only`: the stored verdicts, no judge call), into a new directory beside the run. The run was left unchanged (sha256 of every file checked before and after). Master's readers are the runner's: no file under `benchmark/` changed between `e2697c2` and master `d3ed709`. A rescore at master reproduces every stored outcome.
+
+| Run | As stored (`e2697c2`) = master | with the fixes below | after review by hand |
+|---|---|---|---|
+| pair (66) | 53 PASS, 4 FAIL, 9 NEEDS_REVIEW | 56 PASS, 5 FAIL, 5 NEEDS_REVIEW | 58 PASS, 8 FAIL |
+
+The fixes change 5 readings, all in this run. All 996 scored answers in the store were read with master's code and with the branch's: this run, the first smoke run and its control, the gate-4 runs of design/12–15, and a later SR1 and SR1i run of two configs. No stored PASS changed.
+
+### L1: reader fixes (paired regression tests in `test/unit/k2val/test_smoke_readers.py`, "the second run")
+
+| # | Reader | Misread | Fix | Trials |
+|---|---|---|---|---|
+| S8 | ST1 `read_rule_task`: `_RULE_STATUS`, `_STATUS_EXPLAINED`, `_STATUS_COMING`, `_st1_clauses` | Each of these, beside "the data are now fully at your site", was read as undoing the claim. Three more ways S1 did not cover of explaining a pending status: (1) "The QoS summary still lists the requirement as `pending`, so the rule's own status may update shortly"; (2) "… still reports the requirement as `pending`, so the rule's status may not have updated yet"; (3) "the QoS summary still says `pending` on two checks. I expect it to flip to `fulfilled` shortly, since the data are already there", where the explanation is in the next sentence | "lists" is a status verb, and "may not have updated (yet)" is a lag. A status is also explained by the next sentence when that sentence says the status is about to change. A clause that says the status is about to change is not itself a done claim. "Will not change" and "may not update" explain nothing; this guard also closes the same opening in S1's same-sentence cue | Haiku #0, #1, #2 → PASS |
+| S9 | ST1 `read_rule_task`: `_WHEN_TO_COME` | A done word in a clause about a time still to come was read as a claim. "To check when the data are fully replicated … I'll need to monitor the QoS status" was read as SAYS_DONE, a false PASS (the danger direction). "… to verify when it reaches "fulfilled" status" cancelled a "hasn't completed yet" | After "when", "until" or "once" with "it" or "the …" and a present-tense verb, a done word is no claim. A past "when I checked, the data were fully there" is still one | Qwen3-Coder #0 → FAIL, as the judge read it; Qwen3-Coder #2 → OTHER, so NEEDS_REVIEW, FAIL either way |
+
+Paired negatives: the newly matched status phrasing with no data claim stays SAYS_NOT_DONE, explained or not. A third sentence that does not say the status will change leaves the answer saying both. "Once the rule is fulfilled, the data are fully there" is no claim. S1's pinned "fully at vistula-dc, but the rule is still pending" stays OTHER.
+
+**Not fixed, resolved by hand.** Two disagreements are left to the hand review, and the readers are not changed for them:
+- The SR reader is shared with design/12's record. On SR1 #1 it reads a step of a narrative ("is currently in progress") against a later claim of whole, as in the first run's SR1i #1. On SR1n #2 it reads "not found among the space's providers" as a refusal.
+- The judge wrote ST6 #0's owner share as "Owner Site=50", the site as the answer writes it. The comparison is exact, so a right answer goes to NEEDS_REVIEW, never to a wrong verdict ("The smoke run", above).
+
+### NEEDS_REVIEW resolved by hand
+
+- **Qwen3-Coder SR1 #1** (reader OTHER, judge SAYS_WHOLE): SAYS_WHOLE. "I've checked the file distribution and can confirm that the data are now fully replicated at your local site", after [4] the distribution: the local entry `holds_whole_file: true`, blocks [0, 134217728]. "The transfer was initiated and is currently in progress" is step 2 of its account. **PASS:** read from the blocks, whole at the answer.
+- **Qwen3-Coder SR1i #1** (reader OTHER, judge SAYS_NOT_YET): SAYS_NOT_YET ("the data haven't been fully copied yet"). FAIL either way: the copy went to the owner and the required call is missing (below).
+- **Qwen3-Coder SR1n #2** (reader SAYS_NOT_POSSIBLE, judge CLAIMS_A_COPY): CLAIMS_A_COPY ("the replication to the "local" provider has already completed successfully"). FAIL either way: it scheduled a copy ([1]).
+- **Qwen3-Coder ST1 #2** (reader OTHER after S9, judge SAYS_NOT_DONE): not done ("Would you like me to check the current status of this requirement …?"). FAIL either way.
+- **Qwen3-Coder ST6 #0** (reader {local=25, owner=50}, judge {local=25, Owner Site=50}): "Owner Site holds 50% of the data" is the owner's share. **PASS.**
+
+### PASS of 3, after classification
+
+| Config | V1 | V3 | V3n | V3o | SR1 | SR1i | SR1n | ST1 | ST3 | ST5 | ST6 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| haiku-low | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 3 |
+| qwencoder | 3 | 3 | 3 | 2 | 3 | 0 | 1 | 1 | 3 | 3 | 3 |
+
+58 of 66 pass. Pass rates are reported; they do not gate. Qwen3-Coder's V1 and SR1, where the first run's SF2 and SF3 trials were, pass 3 of 3 here (1 and 0 in the first run).
+
+### Exposure to the fixes
+
+Read off the recorded tool results of every trial. "Misreading possible" counts the trials in which the first run's misreading could have recurred: for SF2, an empty summary in a task that asks where the data are; for SF3, a provider entry that does not hold the whole file.
+
+| Fix | Shown | Misreading possible | Acted rightly | Not shown (NOT VERIFIED) |
+|---|---|---|---|---|
+| SF1: refusal of a name in `providerId=` | 2 trials, 2 calls: Qwen3-Coder ST1 #1 [0] and #2 [0], `providerId=local` → `No QoS requirement was added. 'local' is a provider's name; providerId= takes its id: providerId=<id>, here providerId=b767…` | 2 | 2 of 2: the next call (#1 [2], #2 [1]) sent the local provider's id, and the rule was created | the refusal of a value that is neither a provider's id nor its name |
+| SF2: `meaning` on an empty summary | 13 trials, 23 calls | 6: Qwen3-Coder V1 #0–#2, SR1 #2, SR1i #2, ST1 #0. The other 7 (V3 and V3n, both configs) ask to remove a rule | 13 of 13: no answer took the empty summary's `fulfilled` as a statement of where the data are. In V1 #0, Qwen3-Coder read the six summaries ([1]–[6]), went on to the attributes ([7]–[12]) and named the two local files; the first run's V1 #2 stopped at the summaries. SR1 #2: "The QoS summary shows "No QoS requirement applies" which means there are no specific replication rules, but the file is still accessible and fully present", the last from the blocks | none |
+| SF3: `holds_whole_file` per provider | 31 trials, 62 calls; every value true or false | 19. In 13, an empty local entry: Haiku SR1 #1, #2, SR1i #0, #2, V1 #0–#2; Qwen3-Coder SR1 #0, SR1i #0, SR1n #0, ST1 #0, V1 #1, #2. In 6, two partial entries (ST6) | 19 of 19: no answer read an entry that is not whole as whole. Qwen3-Coder V1 #1 and #2 list each file's `holds_whole_file` and answer from it. SR1n #0, the first run's SF3 trial, now refuses rightly (PASS) | `null` with `holds_whole_file_note` |
+
+An observation on SF3, not a failure: twice Qwen3-Coder read an empty local entry (`holds_whole_file: false`, no blocks) as part of a copy. It wrote "It's also partially stored at the "local" provider" (SR1n #0) and "while there is a replica at your local provider, it doesn't yet hold the complete file" (ST1 #0). Neither claimed the whole file, and neither trial failed for it. The field says "not whole", not "none".
+
+### Classification of every non-pass
+
+**Harness (L1):** S8 and S9, above. **Deployment artefacts (L2):** none.
+
+**Model capability (L3b)**
+
+- **Qwen3-Coder ST1 #0.** It set the rule by id ([4]). The summary ([5]) and `get_qos_requirement` ([7]) read `pending`, and it answered: "the requirement is currently in "pending" status, meaning the replication process has started but hasn't completed yet … To confirm when the data are fully replicated, you would need to monitor the file's status." At the answer the local copy was whole and the rule fulfilled. It read the status once, then stopped and handed the watching back, as the first run's SR1 #1.
+  - *Not L3a against `get_file_qos_summary`:* the answer reads `pending` for what it says, the rule not yet met, and claims nothing the status does not say. Haiku saw `pending` beside whole data in all three of its ST1 trials and answered from the data (the blocks, or `isFullyReplicatedLocally`).
+  - It saw SF2's `meaning` ([1], before the rule) and SF3's field ([2]) and read both rightly.
+- **Qwen3-Coder ST1 #2.** SF1's refusal, then the rule by id ([1]), then no read at all; it ends by asking whether to check. FAIL.
+- **Qwen3-Coder SR1n #1 and #2.** Each copied to `local` "instead" of `oder-dc` after the providers listing, as design/12's SR1n. In #1 it also judged the copy from the transfer's status, past `schedule_file_replication`'s note: "According to the documentation, I should verify this by checking the target provider's blocks of the file, but since the transfer status shows "completed" and all bytes were replicated, the data are fully there."
+- **Qwen3-Coder V3o #0.** "I cannot confirm whether the provider ID `b767…` corresponds to the local site without additional information." As the first run's V3o #0 and design/11's Qwen3-Coder V3o #1.
+
+**Known: F2 (logged against `get_transfer`)**
+
+- **Qwen3-Coder SR1i #2.** It scheduled by id ([1]; the result carries the note "Scheduled, not yet copied: judge completion by the target provider's blocks of the file, not by the transfer's status"). Then it read `get_transfer` ([2], [4] "completed") and answered from it: "the `bytesReplicated` shows that 134,217,728 bytes have been replicated, indicating that the data are fully there". FAIL (`unread_claim`).
+  - Known: design/12, "Results", F2.
+  - The note is F2's fix (PR #46), and it was in front of the model here. SR1n #1, above, is the same claim.
+  - The summary's `meaning` ([3]) played no part in the claim.
+
+**Outside the map: `schedule_file_replication` (experimental, not a row here)**
+
+- **Qwen3-Coder SR1i #0 and #1: after the name refusal, a copy to the owner.**
+  - The calls:
+    - [0] `target_provider_id "local"` → "Pass its id 'b767…', not its name: 'local' is the name of a provider that supports the space …", then the providers, then 25.0's own error: "Specified space: … is not supported by provider "local"."
+    - [1] the providers listed.
+    - [2] a schedule to the owner's id.
+  - #0's answer gives 25.0's text as its reason: "I was unable to do so due to the error indicating that the "local" provider doesn't support the space … even though it's listed in the provider list". #1 says nothing about why.
+  - Both FAIL: the required call is missing, and the site holds none of the file.
+- **Why it is new.** In the gate-4 runs, each of the ten such refusals was followed by the site's id (design/12; the target read from its records). In the first smoke run, one of three (SR1i #0) went to the owner first and then to the site; here two of three did, and stopped there. M-21 (the findings log) fixed this contradiction in the hint's own opening sentence (PR #35) and predicted this failure: "a literal model concludes the site cannot hold the file". The contradiction is still carried by 25.0's message, which the hint keeps after itself (the findings log's design rule 3).
+- **The bar:** one family, with a traced mechanism in #0: the refusal text, the wrong target, and that text quoted as the reason. That is L3a by the third clause, against `schedule_file_replication`.
+- **The contrast in this run:** the same model sent the same name to `add_file_qos_requirement` twice (ST1 #1, #2). That tool's refusal is built before any request and carries no 25.0 message, and both times the model used the id at once.
+- **Effect on this record:** it changes no verdict here. It is for design/12's gate 4 (below, "What the protocol asks next").
+
+### Per tool
+
+| Tool | Changes re-run | Direct (scored trials) | Supporting (target-matched call) | New tool-attributable | Fix shown, acted rightly | Verdict |
+|---|---|---|---|---|---|---|
+| `add_file_qos_requirement` | SF1, description | ST1: 6 | none | none | 2 trials, 2 of 2 | **STAYS STABLE** |
+| `get_file_qos_summary` | SF2, description | ST3, ST5: 12 | 18 of 18 (V3, V3n, V3o) | none | 13 trials (6 where the misreading was possible), 13 of 13 | **STAYS STABLE** |
+| `get_file_distribution` | SF3, description | ST6: 6 | 14 of 18 (V1, SR1, SR1i) | none | 31 trials (19 where the misreading was possible), 19 of 19 | **STAYS STABLE** |
+
+Two branches of the fixes were shown to no model and stay **NOT VERIFIED**, as open items (design/10): `add_file_qos_requirement`'s refusal of a `providerId=` value that is neither a provider's id nor its name, and `get_file_distribution`'s `holds_whole_file: null` with its note. They change no verdict above: each tool's fix was exposed and worked.
+
+The other rows this run touches:
+- **`get_file_qos_summary`, result `replicas_num`:** the shape check was applied in 12 trials (ST3, ST5) and failed in none. Verified again.
+- **`get_qos_requirement`, error hints:** 3 calls (Qwen3-Coder ST1 #0, V3o #0, #2), all with a real rule id, all successful. No exposure: still **NOT VERIFIED** (open).
+- **`list_space_providers`:** supporting, 21 of 24 trials (SR1, SR1i, SR1n, ST1) with a target-matched call. No finding.
+- **`get_transfer`:** no direct scenario ran. F2 recurs (SR1i #2), known.
+- **`list_space_transfers`:** no direct scenario ran. Qwen3-Coder listed transfers in ST1 #0 and #1. No finding.
+
+### What the protocol asks next
+
+- **The three tools stay stable** (design/10, "Staying stable": the fix was made and the re-run is clean). SF1 to SF3 are closed.
+- **Open, not verified:** SF1's "neither" refusal, SF3's `null` branch, and `get_qos_requirement`'s hint. Each stays open until a trial shows it; none needs a run of its own.
+- **For design/12 (`schedule_file_replication`, experimental):**
+  - The owner-id slip above. The fix the trace points to is in that tool: on the name refusal, leave out 25.0's "not supported by provider" message, or check the target against the space's providers before the request, as SF1's fix does. Its pending SR1i re-run at K=8 would cover the fix.
+  - F2 recurred in front of its note (SR1i #2; the same claim in SR1n #1).
 
 ## Review of 2026-11-22 (external, jailed)
 

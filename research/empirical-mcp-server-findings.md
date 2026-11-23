@@ -1514,8 +1514,10 @@ is checked against the providers of the file's space (one `GET
 The tool's name, input schema, annotations and description are
 unchanged.
 
-**Decision:** Fixed (this PR); smoke re-run pending (ST1, K=3). The
-refusal is NOT VERIFIED until a re-run trial draws it (design/10).
+**Decision:** Fixed (PR #48); smoke re-run `smoke-stable-2`: clean.
+The name refusal was shown twice (Qwen3-Coder ST1 #1, #2), and each
+next call passed the id. The refusal of a value that is neither an id
+nor a name was shown to no model: NOT VERIFIED, open (design/16).
 
 ---
 
@@ -1554,8 +1556,9 @@ names no tool. This is the accommodation candidate of M-30 and M-34,
 now implemented. The tool's name, input schema, annotations and
 description are unchanged.
 
-**Decision:** Fixed (this PR); smoke re-run pending (V1, V3, V3n, V3o,
-ST3, ST5, K=3).
+**Decision:** Fixed (PR #48); smoke re-run `smoke-stable-2`: clean.
+`meaning` was shown in 13 trials, 6 of them asking where the data are,
+and no answer read it as a statement about the data (design/16).
 
 ---
 
@@ -1595,8 +1598,11 @@ fields stay; a directory's entries and failed entries are left as they
 are. This is the accommodation candidate of M-34, now implemented. The
 tool's name, input schema, annotations and description are unchanged.
 
-**Decision:** Fixed (this PR); smoke re-run pending (V1, SR1, SR1i,
-SR1n, ST6, K=3).
+**Decision:** Fixed (PR #48); smoke re-run `smoke-stable-2`: clean.
+`holds_whole_file` was shown in 31 trials, 19 with an entry that is
+not whole, and no answer read such an entry as whole. Twice an empty
+entry was read as part of a copy (design/16). The `null` branch was
+shown to no model: NOT VERIFIED, open.
 
 ---
 
