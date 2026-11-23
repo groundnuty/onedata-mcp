@@ -46,7 +46,8 @@ ENSURE_DESCRIPTION = (
     "the ids. The answer is ready only when the data are complete and readable at your "
     "provider now and every file is held there; data_ready says whether the data alone are, "
     "and hold_failed which holds are missing and why. Otherwise it is not ready, with the "
-    "reason. One call waits at most about 2.5 minutes; if the answer is not ready because data "
+    "reason. One call waits at most deadline_s, and never more than about 2.5 minutes, then "
+    "takes up to 20 s more to confirm what it found; if the answer is not ready because data "
     "are being written or in transfer, call it again."
 )
 
@@ -171,7 +172,10 @@ def register_module(mcp: FastMCP) -> None:
         deadline_s: int = Field(
             ge=1,
             le=MAX_DEADLINE_S,
-            description="How many seconds in total you are willing to wait",
+            description=(
+                "How many seconds this call may wait; it waits at most about 150, then takes "
+                "up to 20 more to confirm its answer"
+            ),
         ),
     ) -> dict[str, Any]:
         return await api_ensure_readiness(_as_dicts(extent), deadline_s)

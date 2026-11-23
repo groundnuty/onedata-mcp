@@ -2864,6 +2864,8 @@ async def test_ensure_a_rule_that_vanishes_before_the_answer_is_not_counted_as_h
 async def test_ensure_only_a_200_json_answer_naming_the_rule_or_the_file_confirms_it(
     fed: Fed, answer, confirms: bool
 ) -> None:
+    """Anything but that is unreadable, not "gone": the rule may well be there, so no second
+    one is placed beside it (Codex 6); the hold is not confirmed, and its id is listed."""
     f = fed.add("a.nc", 100, local="full", owner="full")
     readiness._rules[f.fid] = "q-remembered"
     fed.qos_get_override = lambda qid: answer(qid, f.fid)
@@ -2871,8 +2873,24 @@ async def test_ensure_only_a_200_json_answer_naming_the_rule_or_the_file_confirm
     result = await ensure()
 
     posts = [e for e in fed.requests if e == ("POST", "/api/v3/oneprovider/qos_requirements")]
-    assert len(posts) == (0 if confirms else 1)  # not confirmed: the rule is created again
-    assert result["held"]["files"] == (1 if confirms else 0)  # and the final read decides
+    assert posts == []  # confirmed or not, never placed again beside a rule that may be there
+    assert result["held"]["files"] == (1 if confirms else 0)
+    if not confirms:
+        assert result["hold_failed"]["causes"] == {"not_confirmed": 1}
+        assert result["hold_failed"]["unconfirmed_qos_requirement_ids"] == ["q-remembered"]
+        assert result["ready"] is False and result["data_ready"] is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_places_a_hold_again_only_when_the_provider_says_it_is_gone(fed: Fed) -> None:
+    f = fed.add("a.nc", 100, local="full", owner="full")
+    readiness._rules[f.fid] = "q-removed-meanwhile"
+
+    result = await ensure()
+
+    (new,) = fed.rules
+    assert result["held"]["qos_requirement_ids"] == [new] and new != "q-removed-meanwhile"
+    assert readiness._rules[f.fid] == new
 
 
 # --- D. listing robustness --------------------------------------------------------------------
@@ -3028,7 +3046,6 @@ async def test_ensure_a_hanging_provider_configuration_read_answers_not_ready_an
 
     monkeypatch.setattr(readiness, "_monotonic", time.monotonic)
     monkeypatch.setattr(readiness, "ENSURE_GRACE_S", 0.5)
-    monkeypatch.setattr(readiness, "CLASSIFY_RESERVE_S", 0.0)
     monkeypatch.setenv(readiness.MAX_WAIT_ENV, "0.5")
     fed.add("a.nc", 100, local="full", owner="full")
     fed.hang.add("config")
@@ -3410,8 +3427,12 @@ async def test_the_ids_shown_are_capped_and_the_rest_counted(
     assert len(result["held"]["qos_requirement_ids"]) == 2
     assert result["held"]["qos_requirement_ids_not_shown"] == 3
     # where the others are found, naming no tool
+    # how to get the others, naming no tool, and not "the QoS summary", which lists other
+    # people's and inherited requirements too (Codex 6)
     assert result["held"]["note"] == (
-        "Not every id is listed here: each file's QoS summary lists its requirement ids."
+        "Not every id is listed here (the first ones, in the files' path order, are). To list "
+        "the others, call again with fewer files: a hold this server placed is read back and "
+        "listed, not placed again."
     )
     assert not re.search(r"\b[a-z]+_[a-z_]+\b", result["held"]["note"])
 
@@ -3472,7 +3493,7 @@ async def test_a_rule_id_is_one_encoded_segment_when_a_hold_is_confirmed(
     run = readiness._Run(LOCAL, readiness._monotonic() + 60)
     info = readiness.FileInfo(f.fid, f.path, SPACE_ID)
 
-    await readiness._rule_confirmed(run, info)
+    await readiness._rule_state(run, info, "q?1#2")
 
     assert "/api/v3/oneprovider/qos_requirements/q%3F1%232" in _raw_paths(httpx_mock)
 
@@ -3486,9 +3507,9 @@ async def test_a_rule_id_that_cannot_be_a_segment_is_not_confirmed_and_not_reque
     readiness._rules[f.fid] = rule_id
     run = readiness._Run(LOCAL, readiness._monotonic() + 60)
 
-    assert (
-        await readiness._rule_confirmed(run, readiness.FileInfo(f.fid, f.path, SPACE_ID)) is False
-    )
+    # an id that cannot be a segment names no rule: absent (placed again), never requested
+    info = readiness.FileInfo(f.fid, f.path, SPACE_ID)
+    assert await readiness._rule_state(run, info, rule_id) == readiness.ABSENT
     assert not any("/qos_requirements/" in p for p in _raw_paths(httpx_mock))
 
 
@@ -3656,7 +3677,6 @@ async def test_review_a_space_given_by_id_is_not_looked_up_by_a_name_two_spaces_
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
 async def test_review_a_rule_read_back_while_the_provider_fails_is_not_placed_twice(
     fed: Fed,
 ) -> None:
@@ -3673,7 +3693,6 @@ async def test_review_a_rule_read_back_while_the_provider_fails_is_not_placed_tw
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
 async def test_review_a_read_back_that_names_another_file_does_not_confirm_the_hold(
     fed: Fed,
 ) -> None:
@@ -3691,7 +3710,6 @@ async def test_review_a_read_back_that_names_another_file_does_not_confirm_the_h
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
 async def test_review_two_concurrent_ensures_place_one_hold_and_report_the_same_id(
     fed: Fed,
 ) -> None:
@@ -3882,3 +3900,64 @@ async def test_hold_failures_are_counted_by_the_cause_the_provider_showed(fed: F
         "the provider refused this token the right to add QoS requirements. A hold could not "
         "be placed for 1 file: the provider rejected the request; the next call tries again."
     )
+
+
+# --- Every phase within the caller's budget; the time measured at return (Codex 8, Gemini 8) ---
+
+
+@pytest.mark.asyncio
+async def test_a_short_deadline_bounds_placement_too(fed: Fed, clock: Clock) -> None:
+    """With `deadline_s` 5, placing holds ran on for up to 150 s: only the wait was bounded."""
+    for i in range(30):
+        fed.add(f"f{i:02d}.nc", 100, local="full", owner="full")
+
+    def slow_create(fid: str, expression: str) -> int:
+        clock.now += 10  # each create takes 10 s
+        return 201
+
+    fed.qos_status = slow_create
+
+    result = await ensure(deadline_s=5)
+
+    # the first create overran the 5 s; nothing else was started after the budget
+    assert len(fed.rules) == 1
+    assert result["hold_failed"]["causes"] == {"out_of_time": 29}
+    # the call's time is the one at return, and the whole call is within the budget, the
+    # grace and the one request in flight at the cut-off
+    assert result["waited_s"] == round(clock.elapsed)
+    assert clock.elapsed <= 5 + readiness.ENSURE_GRACE_S + 10
+
+
+@pytest.mark.asyncio
+async def test_the_time_reported_includes_the_final_reads(fed: Fed, clock: Clock) -> None:
+    """`waited_s` was taken before the final pass, which could add 20 s the answer did not
+    say."""
+    fed.add("a.nc", 100, local="full", owner="full")
+    attributes = fed._attributes
+
+    def slow(fid: str, body: dict) -> httpx.Response:
+        clock.now += 7
+        return attributes(fid, body)
+
+    fed._attributes = slow  # type: ignore[method-assign]
+
+    result = await ensure(deadline_s=5)
+
+    assert result["waited_s"] == round(clock.elapsed) > 5
+
+
+@pytest.mark.parametrize(
+    ("deadline_s", "cap", "timing"),
+    [
+        (3600, None, (150.0, 20.0)),  # the default: within 170 s in all
+        (60, None, (60.0, 20.0)),  # the caller's deadline bounds the work
+        (3600, "30", (30.0, 4.0)),  # a lowered cap scales the grace down with it
+        (10, "30", (10.0, 4.0)),
+    ],
+)
+def test_the_budget_is_the_callers_and_the_grace_scales_with_the_cap(
+    monkeypatch: pytest.MonkeyPatch, deadline_s: int, cap: str | None, timing: tuple
+) -> None:
+    if cap is not None:
+        monkeypatch.setenv(readiness.MAX_WAIT_ENV, cap)
+    assert readiness.ensure_timing(deadline_s) == timing

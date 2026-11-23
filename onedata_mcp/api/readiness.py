@@ -34,6 +34,7 @@ import logging
 import os
 import re
 import time
+import weakref
 from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date
@@ -65,14 +66,16 @@ logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_S = 5.0
 CHECK_BUDGET_S = 60.0  # check_readiness ends within this
-# One ensure_readiness call waits at most this. With the grace, the whole call ends within
-# 170 s, under the ~180 s a common MCP client allows a call (design/18). The env below may
-# lower the wait, never raise it: the description says "at most about 2.5 minutes".
+# One ensure_readiness call works and waits at most this (and at most its `deadline_s`). With
+# the grace, the whole call ends within 170 s, under the ~180 s a common MCP client allows a
+# call (design/18). The env below may lower the wait, never raise it: the description says "at
+# most about 2.5 minutes".
 MAX_WAIT_DEFAULT_S = 150
 MAX_WAIT_CAP_S = 150
 MAX_WAIT_ENV = "ONEDATA_MCP_ENSURE_MAX_WAIT_S"
-ENSURE_GRACE_S = 20.0  # the whole ensure call ends within max wait + this
-CLASSIFY_RESERVE_S = 20.0  # tail of an ensure call kept for the final classification
+# The final read-back of an ensure call (files and holds), after its budget: at the default cap
+# the whole call ends within 150 + 20 s. Scaled down with the cap (`ensure_timing`).
+ENSURE_GRACE_S = 20.0
 MAX_DEADLINE_S = 86_400
 MAX_EXTENT_ITEMS = 20
 MAX_FILES = 20_000  # files an extent may resolve to, and a dataset listing may hold
@@ -85,9 +88,12 @@ MAX_TRANSFERS = 50
 MAX_EXAMPLES = 3
 MAX_UNRESOLVED_SHOWN = 10
 MAX_HOLD_IDS_SHOWN = 100  # ids of the holds an answer lists; the rest are counted
-# Where the ids not listed are found (names no tool: design/10, gate 2).
+# How the ids not listed are found (names no tool: design/10, gate 2). Not "each file's QoS
+# summary": that lists every requirement on the file, other people's and inherited ones too.
 HOLD_IDS_ELSEWHERE = (
-    "Not every id is listed here: each file's QoS summary lists its requirement ids."
+    "Not every id is listed here (the first ones, in the files' path order, are). To list the "
+    "others, call again with fewer files: a hold this server placed is read back and listed, "
+    "not placed again."
 )
 # The pointer to the other tool, given only where that tool is offered (decision 4, design/17).
 ENSURE_POINTER = "ensure_readiness can wait for {them} and place {them} at your provider."
@@ -133,6 +139,7 @@ def reset_state() -> None:
     _local_provider_id = None
     _hold_plain = False
     _rules.clear()
+    _placing.clear()
 
 
 def max_wait_s() -> float:
@@ -1694,12 +1701,13 @@ def _hold_expression(local_id: str) -> str:
     return (HOLD_EXPRESSION_PLAIN if _hold_plain else HOLD_EXPRESSION).format(provider_id=local_id)
 
 
-async def _place_one(run: _Run, file: FileInfo) -> str:
+async def _place_one(run: _Run, file: FileInfo) -> tuple[str, str | None]:
     """Add the placement rule for a file; falls back to the plain expression on a 400.
 
-    "held" when the rule was created (its id remembered); else the cause (HOLD_CAUSES):
-    "refused" (403, `forbidden`, `eacces`, `eperm`), "no_answer" (no answer in time: a rule
-    may have been made), "rejected" (another error, or an answer without an id)."""
+    ("held", the new rule's id), remembered for the file; else (the cause, None), a cause of
+    HOLD_CAUSES: "refused" (403, `forbidden`, `eacces`, `eperm`), "no_answer" (no answer in
+    time, or the connection failed after sending: a rule may have been made), "rejected"
+    (another error, or an answer without an id)."""
     global _hold_plain
     templates = [HOLD_EXPRESSION_PLAIN] if _hold_plain else [HOLD_EXPRESSION, HOLD_EXPRESSION_PLAIN]
     for index, template in enumerate(templates):
@@ -1710,96 +1718,132 @@ async def _place_one(run: _Run, file: FileInfo) -> str:
                 )
             )
         except TimeoutError:
-            return "no_answer"
+            return "no_answer", None
         except OnedataApiError as exc:
             status = exc.response.get("status_code") if exc.response else None
             if _is_forbidden(exc):
-                return "refused"
+                return "refused", None
             if status == 400 and index + 1 < len(templates):
                 continue  # Onedata rejected the expression form: try the plain one
-            return "no_answer" if exc.kind is not None else "rejected"  # transport: unknown
+            return ("no_answer" if exc.kind is not None else "rejected"), None
         rule_id = created.get("qosRequirementId") if isinstance(created, dict) else None
         if not isinstance(rule_id, str) or not rule_id:
-            return "rejected"
+            return "rejected", None
         _rules[file.file_id] = rule_id
         if index == 1:
             _hold_plain = True  # the primary form was rejected, the plain one accepted
-        return "held"
-    return "rejected"
+        return "held", rule_id
+    return "rejected", None
 
 
-async def _rule_confirmed(run: _Run, file: FileInfo) -> bool:
-    """The remembered rule of a file exists: `GET /qos_requirements/{id}` answered 200 with
-    a JSON object that names that rule, or that file. A redirect, a page of HTML, an empty
-    answer or any other shape does not confirm it."""
-    rule_id = _rules.get(file.file_id)
-    if rule_id is None:
-        return False
+# What a read-back of a remembered rule showed.
+CONFIRMED, ABSENT, UNREADABLE = "confirmed", "absent", "unreadable"
+
+
+async def _rule_state(run: _Run, file: FileInfo, rule_id: str) -> str:
+    """Whether the rule `rule_id` is there and holds `file`, read from `GET /qos_requirements/{id}`.
+
+    CONFIRMED: a 200 JSON object that names that rule or that file, and names no other rule or
+    file. ABSENT: the provider said it is not there (a 404, or a 4xx with `enoent` or
+    `notFound`), or the id cannot be one path segment (it names no rule). UNREADABLE: anything
+    else (a timeout, a 5xx, a refusal, a redirect, another shape, an answer that names another
+    file or rule): the rule may well be there, so it is not placed again."""
     try:
-        # One encoded path segment; an id that cannot be one is not confirmed (ValueError).
+        # One encoded path segment; an id that cannot be one names no rule (ValueError).
         segment = id_segment(rule_id, "QoS requirement id")
+    except ValueError:
+        return ABSENT
+    try:
         response = await run.call_in_time(
             request, get_oneprovider_config(), "GET", f"/qos_requirements/{segment}"
         )
-    except (OnedataApiError, TimeoutError, ValueError):
-        return False
+    except TimeoutError:
+        return UNREADABLE
+    except OnedataApiError as exc:
+        return ABSENT if exc.kind is None and _is_gone(exc) else UNREADABLE
     body = response.get("body") if isinstance(response, dict) else None
-    return (
-        response["status_code"] == 200
-        and isinstance(body, dict)
-        and (body.get("qosRequirementId") == rule_id or body.get("fileId") == file.file_id)
-    )
+    if response.get("status_code") != 200 or not isinstance(body, dict):
+        return UNREADABLE
+    named_rule, named_file = body.get("qosRequirementId"), body.get("fileId")
+    if named_rule not in (None, rule_id) or named_file not in (None, file.file_id):
+        return UNREADABLE  # it names another rule or another file: not this file's hold
+    return CONFIRMED if (named_rule, named_file) != (None, None) else UNREADABLE
 
 
 async def _reconfirm_holds(run: _Run, files: list[FileInfo], hold: _Hold) -> None:
     """Read every rule counted as held once more, for the answer: `held` counts only the
-    rules confirmed here. A rule that is gone, unreadable or not read in time is listed with
-    the failed ones. Never raises."""
+    rules confirmed here. A rule that is gone is listed as failed ("gone"); one unreadable or
+    not read in time as not confirmed, with its id. Never raises."""
     held = [f for f in files if f.file_id in hold.held]
     results = await _bounded(
-        CHECK_CONCURRENCY, held, lambda f: _rule_confirmed(run, f), run.deadline
+        CHECK_CONCURRENCY, held, lambda f: _rule_state(run, f, hold.held[f.file_id]), run.deadline
     )
-    for f, ok in zip(held, results, strict=True):
-        if ok is not True:
+    for f, state in zip(held, results, strict=True):
+        if state == ABSENT:
+            hold.fail(f, "gone")
+        elif state != CONFIRMED:
             hold.fail(f, "not_confirmed", hold.held[f.file_id])
 
 
-async def _place(run: _Run, files: list[FileInfo]) -> _Hold:
-    """Hold every file: a placement rule that is known to exist.
+# One lock per file while its hold is read back or placed (process-wide): two calls at once on
+# one file must not both find no rule and both place one. Weak, so a file's lock goes with the
+# last call that uses it.
+_placing: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
-    A rule remembered from an earlier call is read back first (concurrently, within the
-    limit): an agent with `remove_qos_requirement` may have deleted it. If it is gone, or
-    cannot be read, the rule is created again. `held` counts only rules confirmed or
-    created in this call; files not confirmed or created (failed, or out of time) are listed
-    as failed.
+
+async def _hold_one(run: _Run, file: FileInfo, hold: _Hold) -> None:
+    """Hold one file, under its lock (waiting for it is cut off by the budget): a remembered
+    rule is read back and kept when confirmed, placed again only when the provider said it is
+    gone, and neither when its read-back was unreadable (it may be there: no duplicate)."""
+    lock = _placing.setdefault(file.file_id, asyncio.Lock())
+    try:
+        await run.within(lock.acquire())
+    except TimeoutError:
+        hold.fail(file, "out_of_time")
+        return
+    try:
+        remembered = _rules.get(file.file_id)
+        if remembered is not None:
+            state = await _rule_state(run, file, remembered)
+            if state == CONFIRMED:
+                hold.held[file.file_id] = remembered
+                return
+            if state == UNREADABLE:
+                hold.fail(file, "not_confirmed", remembered)
+                return
+            if _rules.get(file.file_id) == remembered:
+                del _rules[file.file_id]  # the provider says it is gone: forget it
+        if run.out_of_time():
+            hold.fail(file, "out_of_time")
+            return
+        outcome, rule_id = await _place_one(run, file)
+        if outcome == "held" and rule_id is not None:
+            hold.held[file.file_id] = rule_id
+        else:
+            hold.fail(file, outcome)
+    finally:
+        lock.release()
+
+
+async def _place(run: _Run, files: list[FileInfo]) -> _Hold:
+    """Hold every file: a placement rule that is known to exist, kept in this call's result.
+
+    The first file settles which expression form Onedata takes; the others follow it,
+    PLACE_CONCURRENCY at a time. A file not reached in time is "out_of_time".
     """
     hold = _Hold("")
-    cached = [f for f in files if f.file_id in _rules]
-
-    confirmed = await _bounded(
-        CHECK_CONCURRENCY, cached, lambda f: _rule_confirmed(run, f), run.deadline
-    )
-    todo = [f for f in files if f.file_id not in _rules]
-    for f, result in zip(cached, confirmed, strict=True):
-        if result is True:
-            hold.held[f.file_id] = _rules[f.file_id]
-        elif result is _SKIPPED:
-            hold.fail(f, "out_of_time")
+    if files:
+        first, rest = files[0], files[1:]
+        if run.out_of_time():
+            hold.fail(first, "out_of_time")
         else:
-            todo.append(f)
-
-    if todo:
-        # The first rule settles which expression form Onedata takes; the rest follow it.
-        first, rest = todo[0], todo[1:]
-        outcome = await _place_one(run, first) if not run.out_of_time() else _SKIPPED
+            await _hold_one(run, first, hold)
         results = await _bounded(
-            PLACE_CONCURRENCY, rest, lambda f: _place_one(run, f), run.deadline
+            PLACE_CONCURRENCY, rest, lambda f: _hold_one(run, f, hold), run.deadline
         )
-        for f, done in zip([first, *rest], [outcome, *results], strict=True):
-            if done == "held":
-                hold.held[f.file_id] = _rules[f.file_id]
-            else:
-                hold.fail(f, "out_of_time" if done is _SKIPPED else done)
+        for f, result in zip(rest, results, strict=True):
+            if result is _SKIPPED:
+                hold.fail(f, "out_of_time")
     hold.expression = _hold_expression(run.local_id)
     return hold
 
@@ -1844,14 +1888,22 @@ async def _poll_round(run: _Run, pending: list[FileInfo]) -> None:
     await _bounded(CHECK_CONCURRENCY, pending, one, run.deadline)
 
 
+def ensure_timing(deadline_s: float) -> tuple[float, float]:
+    """(budget, grace) of one ensure call: every phase (the provider's id, resolving, placing,
+    waiting) ends within `budget`, the caller's effective budget `min(deadline_s, cap)`; the
+    final read-back of files and holds then takes at most `grace`, ENSURE_GRACE_S scaled down
+    with the cap when the operator lowers it (150 s and 20 s by default: 170 s in all)."""
+    cap = max_wait_s()
+    return min(float(deadline_s), cap), ENSURE_GRACE_S * cap / MAX_WAIT_DEFAULT_S
+
+
 async def ensure_readiness(extent: Sequence[Mapping[str, Any]], deadline_s: int) -> dict[str, Any]:
     """Make the declared data ready at the local provider and hold them there.
 
-    One call waits at most `min(deadline_s, max_wait_s())`, counted from the call's start
-    (resolving and placing use up part of it), and the whole call ends within
-    `max_wait_s() + ENSURE_GRACE_S` (170 s by default), with `max_wait_s()` never above
-    240 s. On one clock:
-    resolve, place, poll, re-confirm, classify, answer.
+    On one clock: the provider's id, resolve, place, poll, all within the caller's effective
+    budget (`ensure_timing`: `min(deadline_s, max_wait_s())`, never above 150 s); then the
+    final pass (re-confirm the files and the holds, classify the rest) within the grace (20 s
+    at the default cap). The answer's `waited_s` is the call's time, measured at return.
     """
     if (
         not isinstance(deadline_s, int)
@@ -1861,38 +1913,38 @@ async def ensure_readiness(extent: Sequence[Mapping[str, Any]], deadline_s: int)
         raise ValueError(f"deadline_s must be an integer from 1 to {MAX_DEADLINE_S}")
     items = _normalise_extent(extent)
     start = _monotonic()
-    max_wait = max_wait_s()
-    hard_end = start + max_wait + ENSURE_GRACE_S
-    work_end = hard_end - CLASSIFY_RESERVE_S  # no new work after this, only the final look
-    wait_end = min(start + min(deadline_s, max_wait), work_end)
+    budget, grace = ensure_timing(deadline_s)
+    work_end = start + budget  # no new work after this, only the final look
+    hard_end = work_end + grace
+
+    def elapsed() -> int:
+        return int(round(_monotonic() - start))
 
     try:
         local_id = await _local_id_within(work_end)
     except TimeoutError:
-        return _config_unavailable(int(round(_monotonic() - start)))
+        return _config_unavailable(elapsed())
     run = _Run(local_id, work_end)
     files, unresolved = await _resolve(run, items)
     hold = await _place(run, files)
 
-    # Wait: poll every file not yet confirmed ready.
-    run.deadline = wait_end
+    # Wait: poll every file not yet confirmed ready, until the budget is used up.
     pending = list(files)
     while pending:
         await _poll_round(run, pending)
         pending = [f for f in pending if f.state != "ready"]
         now = _monotonic()
-        if not pending or now >= wait_end:
+        if not pending or now >= work_end:
             break
-        await _sleep(min(POLL_INTERVAL_S, wait_end - now))
-    waited_s = int(round(_monotonic() - start))
+        await _sleep(min(POLL_INTERVAL_S, work_end - now))
 
     # A file confirmed ready during the wait is not ready for good: read every one of them
     # again in one final pass, and judge what failed it (and what was never confirmed) anew.
     # Every rule counted as held is read again too. This pass never raises: a read that
-    # fails leaves its file unchecked.
-    run.deadline = hard_end - CLASSIFY_RESERVE_S / 2
+    # fails leaves its file unchecked, or its hold not confirmed.
+    run.deadline = work_end + grace / 2
     await _reconfirm(run, [f for f in files if f.state == "ready"])
     await _reconfirm_holds(run, files, hold)
-    run.deadline = hard_end - 1
+    run.deadline = hard_end - grace / 20
     await _assess(run, [f for f in files if f.state is None], raise_errors=False)
-    return _answer(files, unresolved, hold=hold, waited_s=waited_s)
+    return _answer(files, unresolved, hold=hold, waited_s=elapsed())
