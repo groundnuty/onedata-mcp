@@ -17,6 +17,8 @@ from urllib.parse import unquote
 
 import httpx
 
+from test.unit.k2val.whole_ids import SPACE as WHOLE_ID_SPACE
+
 OWNER_HOST = "https://owner.k2val.datahub.test"
 LOCAL_HOST = "https://local.k2val.datahub.test"
 ZONE_HOST = "https://zone.k2val.datahub.test"
@@ -241,7 +243,13 @@ class FakeFed:
             return self._space_transfers(mm[1], q)
         if m == "POST" and (mm := re.fullmatch(r"/spaces/([^/]+)/evaluate_qos_expression", rest)):
             return self._evaluate(mm[1], body)
-        if m == "GET" and (mm := re.fullmatch(r"/spaces/([^/]+)", rest)) and mm[1] in self.roots:
+        # A space by its name, or by the id the whole file ids carry (`whole_ids`): the tools
+        # list a file's space's providers from that id before they schedule (design/12, F3).
+        if (
+            m == "GET"
+            and (mm := re.fullmatch(r"/spaces/([^/]+)", rest))
+            and (mm[1] in self.roots or mm[1] == WHOLE_ID_SPACE)
+        ):
             return self._space(mm[1])
         self.unexpected.append(f"{m} {request.url}")
         return error(404)

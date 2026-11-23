@@ -32,8 +32,10 @@ the transfer's status. What it settles (unit tests use fakes; the swagger gives 
   whether a poll ever showed completed while the blocks did NOT yet cover the file;
 - a second schedule of the same file, while the first runs (printed: Onedata's answer);
 - an unknown target provider fails with the provider hint and copies nothing (printed: the
-  status and Onedata's error, which the unit tests do not pin);
-- the local provider's NAME passed as the id is answered "Pass its id ...".
+  answer; since F3 the tool refuses it before it asks Onedata, so Onedata's own answer to it is
+  no longer exercised here);
+- the local provider's NAME passed as the id is answered "Pass its id ...", before the request
+  and with none of Onedata's text after it (design/12, F3).
 
 The timings are of one transfer on an idle federation. SR1's file size is calibrated on the
 first live run, under panel-like load (design/12, gate 3). Not run in the change that adds this
@@ -407,3 +409,6 @@ async def test_the_local_providers_name_as_the_id_is_answered_with_its_id(
     assert result.is_error is True
     print(f"the local provider's name as the id answered: {text}")
     assert f"Pass its id {local_id!r}, not its name: {local_name!r}" in text, text
+    # F3: nothing of Onedata's follows it (its own text says the space is "not supported by
+    # provider <name>", the opposite of the hint)
+    assert "not supported by provider" not in text, text

@@ -106,6 +106,7 @@ async def test_the_description_follows_the_surface_rules(transfers_mcp: FastMCP)
 async def test_a_schedule_answers_the_transfer_id(
     transfers_mcp: FastMCP, httpx_mock: HTTPXMock
 ) -> None:
+    _the_spaces_are_read_if_asked(httpx_mock)
     httpx_mock.add_response(method="POST", url=f"{BASE}/transfers", json={"transferId": "t1"})
 
     result, text = await _call(transfers_mcp, FILE_ID)
@@ -121,6 +122,7 @@ async def test_the_schedule_answer_says_scheduled_is_not_copied_and_names_no_too
     """F2 (design/12): a model that read only the transfer's status answered "done". The result
     repeats what the description says, where the model reads it at the moment it acts, and
     names no tool, as the description does not: the one that reads the blocks may not be offered."""
+    _the_spaces_are_read_if_asked(httpx_mock)
     httpx_mock.add_response(method="POST", url=f"{BASE}/transfers", json={"transferId": "t1"})
 
     result, text = await _call(transfers_mcp, FILE_ID)
@@ -136,6 +138,40 @@ async def test_the_schedule_answer_says_scheduled_is_not_copied_and_names_no_too
     description = " ".join(tool.description.split())
     assert "judge the copy by those blocks, not by the transfer's status" in description
     assert "not by the transfer's status" in note
+
+
+@pytest.mark.asyncio
+async def test_a_providers_name_is_refused_before_any_transfer_and_without_onedatas_text(
+    transfers_mcp: FastMCP, httpx_mock: HTTPXMock
+) -> None:
+    """F3 (design/12): the tool checks the target against the space's providers. Onedata
+    answers a name with a message that says the space is not supported by that "provider",
+    the opposite of the hint, and a model believed it. The refusal is made before any transfer
+    is requested, and the model reads none of Onedata's text."""
+    _the_spaces_are_read_if_asked(httpx_mock)
+
+    result, text = await _call(transfers_mcp, FILE_ID, "site-a")
+
+    assert result.is_error is True
+    assert f"Pass its id '{TARGET}', not its name: 'site-a' is the name of a provider" in text
+    assert f"site-a (id '{TARGET}')" in text and text.endswith("No replication was scheduled.")
+    assert "not supported by provider" not in text and "Onedata" not in text
+    assert HOST not in text
+    assert [r for r in httpx_mock.get_requests() if r.method == "POST"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_value_that_is_neither_a_name_nor_an_id_is_refused_before_any_transfer(
+    transfers_mcp: FastMCP, httpx_mock: HTTPXMock
+) -> None:
+    _the_spaces_are_read_if_asked(httpx_mock)
+
+    result, text = await _call(transfers_mcp, FILE_ID, "site-z")
+
+    assert result.is_error is True
+    assert "Cannot replicate to 'site-z': no provider with that id supports" in text
+    assert f"site-a (id '{TARGET}')" in text and "Pass its id" not in text
+    assert [r for r in httpx_mock.get_requests() if r.method == "POST"] == []
 
 
 @pytest.mark.asyncio

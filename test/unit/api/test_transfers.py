@@ -602,6 +602,8 @@ async def test_a_provider_name_given_as_the_id_is_answered_with_its_id_first(
     hint = text.split(" [", 1)[0]
     assert "no provider with that id" not in hint and "not a valid provider id" not in hint
     assert "not a provider that supports" not in hint and "No file is known" not in hint
+    # the hint stands alone: nothing of Onedata's after it, which would say the opposite (F3)
+    assert text == hint and "Onedata API request failed" not in text and "status=" not in text
 
 
 @pytest.mark.asyncio
@@ -1124,3 +1126,277 @@ async def test_a_4xx_unsupported_space_on_the_path_lookup_says_so_without_a_miss
     text = str(excinfo.value)
     assert text.startswith("This provider does not support the space of")
     assert "the space may still exist" in text and "does not exist" not in text.split(" [")[0]
+
+
+# --- F3 (design/12): the target is checked against the space's providers before the request ---
+#
+# A model passed the provider's NAME as the id. Onedata refused it, and the hint said "Pass its
+# id", but Onedata's own message followed it and said the space is "not supported by provider
+# <name>": the model believed that and copied to the other provider. With `check_providers` (which
+# the MCP tool turns on) the refusal is made before any transfer is requested and holds none of
+# Onedata's text. The providers' names and ids are synthetic.
+
+LOCAL_ID, OWNER_ID = "pLocal0123456789abcdef", "pOwner0123456789abcdef"
+# what Onedata says to a name given as an id: the opposite of what the hint says
+ONEDATA_SAYS = "Space is not supported by provider vistula-dc."
+
+
+async def _refused(file_arg: str, target: str) -> str:
+    with pytest.raises(ValueError) as excinfo:
+        await transfers.schedule_file_replication(file_arg, target, check_providers=True)
+    return str(excinfo.value)
+
+
+def _scheduled_transfers(httpx_mock: HTTPXMock) -> list[dict]:
+    return [
+        json.loads(r.content)
+        for r in httpx_mock.get_requests()
+        if r.method == "POST" and r.url.path.endswith("/oneprovider/transfers")
+    ]
+
+
+def _lists_the_providers(httpx_mock: HTTPXMock, **kw: object) -> None:
+    httpx_mock.add_response(method="GET", url=f"{BASE}/spaces/{SPACE_ID}", json=PROVIDERS, **kw)
+
+
+def _has_none_of_onedatas_text(text: str) -> None:
+    for fragment in ("[", "status=", "spaceNotSupportedBy", "not supported by provider", "Onedata"):
+        assert fragment not in text, fragment
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("by_path", [False, True])
+async def test_a_providers_name_is_refused_with_its_id_before_any_request_and_no_onedata_text(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, by_path: bool
+) -> None:
+    _set_env(monkeypatch)
+    if by_path:
+        _resolves(httpx_mock, FILE_ID)
+    _lists_the_providers(httpx_mock)
+
+    text = await _refused(PATH if by_path else FILE_ID, "vistula-dc")
+
+    assert text.startswith(
+        f"Pass its id '{LOCAL_ID}', not its name: 'vistula-dc' is the name of a provider that "
+        "supports the space of "
+    )
+    assert f"vistula-dc (id '{LOCAL_ID}')" in text  # the providers are listed, name and id
+    assert f"nordic-marine-dc (id '{OWNER_ID}')" in text
+    assert text.endswith("No replication was scheduled.")
+    _has_none_of_onedatas_text(text)
+    assert HOST not in text
+    assert _scheduled_transfers(httpx_mock) == []  # no transfer was requested
+    # a path is looked up first, then the one listing: nothing else is asked
+    methods = [r.method for r in httpx_mock.get_requests()]
+    assert methods == (["POST", "GET"] if by_path else ["GET"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["pOder0123456789abcdefg", "vistula", "VISTULA-DC"])
+async def test_a_value_that_is_neither_a_name_nor_an_id_is_refused_with_the_providers_listed(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, target: str
+) -> None:
+    _set_env(monkeypatch)
+    _lists_the_providers(httpx_mock)
+
+    text = await _refused(FILE_ID, target)
+
+    assert text.startswith(
+        f"Cannot replicate to '{target}': no provider with that id supports the space of "
+    )
+    assert "and none of them has that name" in text
+    assert f"vistula-dc (id '{LOCAL_ID}')" in text and f"nordic-marine-dc (id '{OWNER_ID}')" in text
+    assert "Pass its id" not in text and "is the name of a provider" not in text
+    assert text.endswith("No replication was scheduled.")
+    _has_none_of_onedatas_text(text)
+    assert _scheduled_transfers(httpx_mock) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("by_path", [False, True])
+async def test_the_id_of_a_provider_of_the_space_is_scheduled_after_one_listing(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, by_path: bool
+) -> None:
+    _set_env(monkeypatch)
+    if by_path:
+        _resolves(httpx_mock, FILE_ID)
+    _lists_the_providers(httpx_mock)
+    httpx_mock.add_response(method="POST", url=TRANSFERS_URL, json={"transferId": "t1"})
+
+    result = await transfers.schedule_file_replication(
+        PATH if by_path else FILE_ID, f" {OWNER_ID} ", check_providers=True
+    )
+
+    assert result == {"transferId": "t1", "note": transfers.SCHEDULED_NOTE}
+    assert _scheduled_transfers(httpx_mock) == [
+        {
+            "type": "replication",
+            "dataSourceType": "file",
+            "fileId": FILE_ID,
+            "replicatingProviderId": OWNER_ID,  # stripped, sent as given
+        }
+    ]
+    listings = [r for r in httpx_mock.get_requests() if r.method == "GET"]
+    assert len(listings) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [500, 403, 404])
+async def test_a_listing_that_cannot_be_read_does_not_block_the_schedule(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, status: int
+) -> None:
+    """As today: the value is sent, and Onedata decides."""
+    _set_env(monkeypatch)
+    httpx_mock.add_response(method="GET", url=f"{BASE}/spaces/{SPACE_ID}", status_code=status)
+    httpx_mock.add_response(method="POST", url=TRANSFERS_URL, json={"transferId": "t1"})
+
+    result = await transfers.schedule_file_replication(FILE_ID, "vistula-dc", check_providers=True)
+
+    assert result["transferId"] == "t1"
+    assert [t["replicatingProviderId"] for t in _scheduled_transfers(httpx_mock)] == ["vistula-dc"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "listing", [{"providers": []}, {"providers": "none"}, ["not", "a", "dict"]]
+)
+async def test_an_empty_or_malformed_listing_does_not_block_the_schedule(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, listing: object
+) -> None:
+    _set_env(monkeypatch)
+    httpx_mock.add_response(method="GET", url=f"{BASE}/spaces/{SPACE_ID}", json=listing)
+    httpx_mock.add_response(method="POST", url=TRANSFERS_URL, json={"transferId": "t1"})
+
+    await transfers.schedule_file_replication(FILE_ID, "vistula-dc", check_providers=True)
+
+    assert [t["replicatingProviderId"] for t in _scheduled_transfers(httpx_mock)] == ["vistula-dc"]
+
+
+@pytest.mark.asyncio
+async def test_a_file_id_whose_space_cannot_be_told_asks_for_no_listing(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """The path resolved to an id that is not of the guid shape: no space to list."""
+    _set_env(monkeypatch)
+    _resolves(httpx_mock, PLAIN_ID)
+    httpx_mock.add_response(method="POST", url=TRANSFERS_URL, json={"transferId": "t1"})
+
+    await transfers.schedule_file_replication(PATH, "vistula-dc", check_providers=True)
+
+    assert [r.method for r in httpx_mock.get_requests()] == ["POST", "POST"]  # lookup, schedule
+
+
+@pytest.mark.asyncio
+async def test_the_check_is_off_unless_asked_for(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    httpx_mock.add_response(method="POST", url=TRANSFERS_URL, json={"transferId": "t1"})
+
+    await transfers.schedule_file_replication(FILE_ID, "vistula-dc")
+
+    assert [r.method for r in httpx_mock.get_requests()] == ["POST"]
+
+
+@pytest.mark.asyncio
+async def test_the_name_refusal_is_redacted_and_matched_on_the_raw_name(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """A provider named like the configured host is still matched by that name, and shown
+    redacted, as in the hint after Onedata's refusal."""
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{BASE}/spaces/{SPACE_ID}",
+        json={
+            "spaceId": SPACE_ID,
+            "providers": [
+                {"providerId": "pHost0123456789abcdef", "providerName": HOST},
+                {"providerId": "pNameless0123456789ab"},
+            ],
+        },
+    )
+    text = await _refused(FILE_ID, HOST)
+    assert text.startswith("Pass its id 'pHost0123456789abcdef', not its name: 'oneprovider'")
+    assert HOST not in text
+
+    # a nameless provider is shown as `(no name)`, which is not a name to match
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{BASE}/spaces/{SPACE_ID}",
+        json={"spaceId": SPACE_ID, "providers": [{"providerId": "pNameless0123456789ab"}]},
+    )
+    text = await _refused(FILE_ID, "(no name)")
+    assert text.startswith("Cannot replicate to '(no name)': no provider with that id supports")
+    assert "(no name) (id 'pNameless0123456789ab')" in text
+
+
+@pytest.mark.asyncio
+async def test_a_long_provider_list_keeps_the_refusal_within_the_bound(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    _set_env(monkeypatch)
+    many = [{"providerId": f"p{i:040d}", "providerName": f"site-{i}" * 20} for i in range(80)]
+    httpx_mock.add_response(
+        method="GET", url=f"{BASE}/spaces/{SPACE_ID}", json={"spaceId": SPACE_ID, "providers": many}
+    )
+
+    text = await _refused(FILE_ID, "site-3" * 20)
+
+    assert text.startswith(f"Pass its id 'p{3:040d}', not its name")
+    assert len(text) == MAX_ERROR_CHARS and text.endswith("...")
+
+
+# --- the contradiction policy: the hint that tells a name from an id stands alone -------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (400, {"error": {"id": "spaceNotSupportedBy", "description": ONEDATA_SAYS}}),
+        (400, {"error": {"id": "badValue", "description": ONEDATA_SAYS}}),
+        (404, {"error": {"id": "notFound", "description": ONEDATA_SAYS}}),
+    ],
+)
+async def test_the_hint_for_a_providers_name_is_not_followed_by_onedatas_message(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, status: int, body: dict
+) -> None:
+    """Reached when the providers could not be listed before the request (the first listing
+    fails here) and could afterwards. Onedata says the space is "not supported by provider
+    vistula-dc", which contradicts "that provider supports the space": none of it is put
+    after the hint."""
+    _set_env(monkeypatch)
+    httpx_mock.add_response(method="GET", url=f"{BASE}/spaces/{SPACE_ID}", status_code=500)
+    _post_error(httpx_mock, status, body)
+    _lists_the_providers(httpx_mock)
+
+    with pytest.raises(OnedataApiError) as excinfo:
+        await transfers.schedule_file_replication(FILE_ID, "vistula-dc", check_providers=True)
+
+    text = str(excinfo.value)
+    assert text.startswith(f"Pass its id '{LOCAL_ID}', not its name: 'vistula-dc'")
+    assert ONEDATA_SAYS not in text
+    _has_none_of_onedatas_text(text)
+    assert excinfo.value.response["status_code"] == status  # the status stays on the error
+
+
+@pytest.mark.asyncio
+async def test_the_other_hints_keep_onedatas_message_after_them(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """They agree with it, or say that Onedata did not say which argument it means, so the
+    message after them cannot contradict them and stays."""
+    _set_env(monkeypatch)
+    _resolves(httpx_mock, FILE_ID)
+    _post_error(
+        httpx_mock,
+        400,
+        {"error": {"id": "spaceNotSupportedBy", "description": "Space is not supported by pOder."}},
+    )
+    _lists_the_providers(httpx_mock)
+
+    text = await _failure(PATH, "pOder")
+
+    assert text.startswith("Cannot replicate to 'pOder': no provider with that id supports")
+    assert "Space is not supported by pOder." in text

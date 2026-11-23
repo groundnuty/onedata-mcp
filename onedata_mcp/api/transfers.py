@@ -177,6 +177,15 @@ async def create_transfer(
 # second replication of a file that is already being copied: no status in the swagger says so,
 # and nothing here pretends otherwise.
 #
+# Before the request, a target is checked against the providers of the file's space
+# (`_refuse_unusable_target`, F3 in design/12): a provider's NAME is refused with its id, and a
+# value that is neither a name nor an id of one of them with the providers listed, both without
+# a word of Onedata's. That is so for the MCP tool only (`check_providers`): when the listing
+# cannot be read the request goes as it would have without the check, and the mapping above
+# stays the fallback. The hint that tells a name from an id stands alone, with none of Onedata's
+# text after it: Onedata reads a name as an id and says the space is "not supported by provider
+# <name>", which contradicts the hint, and a model believed it (`_StandsAlone`).
+#
 # A file given as an id is the one a model copied out of an earlier answer, and a bad copy (a
 # dropped, changed or doubled character) is answered with a 403 or `spaceNotSupportedBy` that
 # says nothing about a copy. So an id that cannot be whole is refused before any request
@@ -212,8 +221,9 @@ def _check_replication_args(file_arg: str, target: str) -> None:
     as a malformed file id). A path must name a space and an entry in it, `/<space>/<name>` at
     least: `/log.dat` is missing its space. `.` and `..` name nothing. A file that is not a
     path must be a whole file id (`_file_id_parts`): a truncated, extended or non-hex value
-    cannot be one. A provider id is opaque, so nothing stricter is checked there: a provider
-    NAME passes here and is answered with its id after Onedata refuses it.
+    cannot be one. A provider id is opaque, so nothing stricter is checked here: whether it is
+    one of the file's space's providers is `_refuse_unusable_target`'s to say, once the file's
+    space is known.
     """
     if not file_arg:
         raise ValueError(f"file_id_or_path is empty: give a file id, or {_PATH_FORM}.")
@@ -341,12 +351,74 @@ def _id_of_name(providers: list[tuple[str | None, str]] | None, target: str) -> 
     return next((pid for name, pid in providers or () if name is not None and name == target), None)
 
 
+class _StandsAlone(str):
+    """A hint that is the whole message: Onedata's own text is not put after it.
+
+    For a hint that Onedata's message can contradict. A provider's name given as the id is
+    answered "Pass its id ..., not its name: ... is the name of a provider that supports the
+    space"; Onedata, which reads the name as an id, says the space is "not supported by provider
+    <name>". A model took the second for the fact and copied to the other provider (design/12,
+    F3). No other hint here has that problem: each either agrees with what Onedata says or says
+    it does not know which argument is meant, so those keep the message after the hint."""
+
+
 def _hinted(hint: str, error: OnedataApiError) -> OnedataApiError:
-    """The hint first, then Onedata's own message; the whole redacted (a configured host, a
-    URL) and bounded, so that no echoed argument, provider name or id carries either past it."""
+    """The hint first, then Onedata's own message (not after a `_StandsAlone` hint); the whole
+    redacted (a configured host, a URL) and bounded, so that no echoed argument, provider name
+    or id carries either past it."""
     config = get_oneprovider_config()
-    message = bound_message(redact_endpoints(f"{hint} [{error}]", config))
+    text = str(hint) if isinstance(hint, _StandsAlone) else f"{hint} [{error}]"
+    message = bound_message(redact_endpoints(text, config))
     return OnedataApiError(message, response=error.response)
+
+
+def _name_given_as_id_hint(
+    pid: str,
+    shown_target: str,
+    shown_file: str,
+    providers: list[tuple[str | None, str]] | None,
+) -> str:
+    """The answer to a target that is a provider's NAME: what to pass, then which providers
+    there are. Used before the request and after Onedata's refusal, so that the two cannot
+    drift apart."""
+    return (
+        f"Pass its id {pid!r}, not its name: {shown_target} is the name of a provider that "
+        f"supports the space of {shown_file}. {_providers_sentence(providers)}"
+    )
+
+
+async def _refuse_unusable_target(file_arg: str, file_id: str, target: str) -> None:
+    """Refuse, before the request, a target that is not the id of a provider supporting the
+    file's space (F3, design/12).
+
+    Onedata answers a provider's NAME with `spaceNotSupportedBy`, whose message says the space
+    is "not supported by provider <name>": a model read that as true and copied to the other
+    provider. So a target that is the NAME of a provider of the space is answered with that
+    provider's id, and one that is neither a name nor an id of such a provider with the
+    providers listed (name and id). Nothing of Onedata's is in either message, and no transfer
+    is requested. A target that is the id of such a provider passes unchanged.
+
+    Best-effort, like the check on a QoS rule's `providerId=` operands: when the space cannot
+    be told from the file id, or its providers cannot be listed, nothing is refused, and the
+    request goes as it would have without the check (the error mapping below stays the
+    fallback). The one added request is the space's `GET /spaces/{sid}`.
+    """
+    parts = _file_id_parts(file_id)
+    if parts is None:
+        return
+    providers = await _providers_of_space(parts[1])
+    if not providers or any(pid == target for _, pid in providers):
+        return
+    shown_file, shown_target = _shown(file_arg), _shown(target)
+    if (pid := _id_of_name(providers, target)) is not None:
+        message = _name_given_as_id_hint(pid, shown_target, shown_file, providers)
+    else:
+        message = (
+            f"Cannot replicate to {shown_target}: no provider with that id supports the space of "
+            f"{shown_file}, and none of them has that name. {_providers_sentence(providers)}"
+        )
+    message += " No replication was scheduled."
+    raise ValueError(bound_message(redact_endpoints(message, get_oneprovider_config())))
 
 
 def _error_parts(error: OnedataApiError) -> tuple[int | None, str | None, str | None, Any]:
@@ -435,8 +507,9 @@ async def _replication_error_hint(
 
     - permission;
     - a target that is the name of one of the space's providers: "Pass its id ...", whatever
-      Onedata said about it (it never says the provider does not support the space), unless
-      Onedata names the file field;
+      Onedata said about it, unless Onedata names the file field, and alone: Onedata's own
+      message, which says the space is not supported by that "provider", contradicts it. (Only
+      reached when `_refuse_unusable_target` could not list the providers before the request.)
     - Onedata says the space is not supported: for a file given as a path, no provider with
       the target's id supports the space (true of a name, too, when the providers could not be
       listed); for a file given as an id it may as well be the id's space, so the id may be
@@ -465,10 +538,8 @@ async def _replication_error_hint(
     # else is; not fetched when Onedata names the file field.
     providers = None if key in _FILE_FIELDS else await _space_providers(file_arg, file_id, error)
     if (pid := _id_of_name(providers, target)) is not None:
-        return (
-            f"Pass its id {pid!r}, not its name: {shown_target} is the name of a provider that "
-            f"supports the space of {shown_file}. {_providers_sentence(providers)}"
-        )
+        # Alone: Onedata's "space is not supported by provider <name>" would contradict it.
+        return _StandsAlone(_name_given_as_id_hint(pid, shown_target, shown_file, providers))
     if error_id == "spaceNotSupportedBy" and not from_path:
         # Onedata says a space is not supported, not whose: the target's, or the one in a file
         # id that was copied wrongly.
@@ -524,6 +595,8 @@ async def _replication_error_hint(
 async def schedule_file_replication(
     file_id_or_path: str,
     target_provider_id: str,
+    *,
+    check_providers: bool = False,
 ) -> dict[str, Any]:
     """Schedule a replication transfer of a file to a target provider.
 
@@ -535,16 +608,22 @@ async def schedule_file_replication(
     Neither argument goes into a URL path: the file id and the provider id travel
     in the JSON body, and a path is percent-encoded whole into the lookup
     (``/lookup-file-id/<path>``). A value that cannot name a file or a provider is
-    refused before any request; a failure the caller can act on (unknown file,
-    a target that does not support the space or is a name, no permission, the
-    path lookup included) is raised with what to do about it, followed by
-    Onedata's own message. Both arguments are stripped of surrounding whitespace
-    first, and the stripped values are sent.
+    refused before any request, and so is, with `check_providers`, a target that is
+    not the id of a provider of the file's space; a failure the caller can act on
+    (unknown file, a target that does not support the space or is a name, no
+    permission, the path lookup included) is raised with what to do about it,
+    followed by Onedata's own message (except after the hint for a provider's
+    name, which Onedata's message contradicts). Both arguments are stripped of
+    surrounding whitespace first, and the stripped values are sent.
 
     Args:
         file_id_or_path: ``/<space>/<path>`` or an opaque file id.
         target_provider_id: provider the data is copied TO
             (``replicatingProviderId``).
+        check_providers: refuse a target that is not the id of a provider supporting the
+            file's space, before any transfer is scheduled (`_refuse_unusable_target`). Off by
+            default: the MCP tool turns it on. The argument checks and the error hints apply
+            either way.
 
     Returns: ``{"transferId": "<id>", "note": SCHEDULED_NOTE}``. The note repeats, where a
     model reads the result, what the tool's description says: scheduled is not copied.
@@ -558,6 +637,8 @@ async def schedule_file_replication(
         if hint is None:
             raise
         raise _hinted(hint, error) from error
+    if check_providers:
+        await _refuse_unusable_target(file_arg, file_id, target)
     try:
         scheduled = await create_transfer(file_id, "replication", replicating_provider_id=target)
     except OnedataApiError as error:
