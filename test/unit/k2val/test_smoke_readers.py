@@ -1,12 +1,13 @@
-"""Regression cases from the stable tools' smoke re-run (design/16, "Results", 2026-11).
+"""Regression cases from the stable tools' smoke re-runs (design/16, "Results", 2026-11).
 
-Each answer below is a real final answer from that run, the control's run included (a long rule,
+Each answer below is a real final answer from those runs, the control's run included (a long rule,
 provider or transfer id is replaced by a made-up one of the same shape, and a space name by
 `omcp-x`, which no reader looks at); design/16 names the trial of each. The readers misread
 them: the judge read them rightly, and the trials went to NEEDS_REVIEW. Every group has paired
 negatives, so that a fix does not open the opposite misreading (a rule's pending status with no
-data claim is still "not done", and one not explained away beside a data claim is still "both";
-a restated question with no "yes" is no verdict; a share after the list is not a site's).
+claim that the data are there is still "not done", and beside a bare "done" or "fulfilled" one
+not explained away is still "both"; a restated question with no "yes" is no verdict; a share
+after the list is not a site's).
 """
 
 # ruff: noqa: E501
@@ -61,10 +62,28 @@ ST1_NOT_DONE = [
     "The rule showed pending on the first check; the file is only partially here so far.",
 ]
 
-ST1_BOTH = [
-    # a status not explained away, beside a data claim: the answer says both
+ST1_DATA_CLAIM_AND_STATUS = [
+    # a rule's status never undoes a claim that the data are fully there (operator, 2026-11-23):
+    # the oracle checks that claim against the blocks, and 25.0's status lags them
     "The data are fully at local, but the rule is still pending.",
     "The file is fully at your site. The rule status is still pending.",
+    "The file is fully at your site. The rule status is still pending. I did not wait for it.",
+    "The data are fully at local, but the rule is still pending and will not change.",
+]
+
+ST1_BOTH = [
+    # with no claim that the data are there, a status not explained away beside a bare "done" or
+    # "fulfilled" still undoes it: the answer says both
+    "Done, but the rule is still pending.",
+    "The rule is fulfilled, but its summary still says pending.",
+    "Done. The rule status is still pending. I did not wait for it.",
+    # "now in place at your site" is about the rule, not the data
+    "The rule is now in place at your site, but its status is still pending.",
+    # nor is a status said NOT to change an explanation
+    "Done. The rule status is still pending and will not change.",
+    "Done. The rule status is still pending and may not update.",
+    # the rest of the status's clause is still read: the data said both there and not
+    "The data are fully at local; the rule is pending and the data are not yet fully there.",
 ]
 
 
@@ -75,13 +94,75 @@ def test_st1_a_pending_rule_status_explained_away_beside_a_data_claim_reads_done
     assert read_rule_task(answer, LOCAL, OWNER) == SAYS_DONE
 
 
+@pytest.mark.parametrize("answer", ST1_DATA_CLAIM_AND_STATUS)
+def test_st1_a_rule_status_never_undoes_a_claim_that_the_data_are_there(answer: str) -> None:
+    assert read_rule_task(answer, LOCAL, OWNER) == SAYS_DONE
+
+
 @pytest.mark.parametrize("answer", ST1_NOT_DONE)
 def test_st1_a_pending_rule_status_alone_or_with_data_not_there_reads_not_done(answer: str) -> None:
     assert read_rule_task(answer, LOCAL, OWNER) == SAYS_NOT_DONE
 
 
 @pytest.mark.parametrize("answer", ST1_BOTH)
-def test_st1_a_bare_pending_status_beside_a_data_claim_reads_other(answer: str) -> None:
+def test_st1_a_bare_pending_status_beside_a_done_with_no_data_claim_reads_other(
+    answer: str,
+) -> None:
+    assert read_rule_task(answer, LOCAL, OWNER) == OTHER
+
+
+# --- ST1, the second run: more ways to explain a pending status, and a done word about the future --
+
+ST1_DONE_RUN2 = [
+    # run 2, ST1 #0: the status sentence is explained by the next one ("I expect it to flip")
+    f"The placement rule is set, and the data are already fully at your site (`local`), but the rule itself is still reporting `pending`.\n\n- **Rule:** `providerId={PROV}` with 1 replica, ID `{RULE}`.\n- **Data:** the file is 262,144 bytes. The distribution shows `local` holding blocks `[0, 262144]`, which is the whole file. The owner provider also holds the whole file.\n- **Status:** the QoS summary still says `pending` on two checks. I expect it to flip to `fulfilled` shortly, since the data are already there. I didn't wait for that.",
+    # run 2, ST1 #1: "still lists the requirement as pending, so … may update shortly"
+    f"The placement rule is in place, and the file's data are now fully at your site (`local`, provider `{PROV}`).\n\n- **Rule:** QoS requirement `{RULE}` with expression `providerId={PROV}` and 1 replica.\n- **Status:** The file reports `isFullyReplicatedLocally: true` and `localReplicationRate: 1` (262,144 bytes). The QoS summary still lists the requirement as `pending`, so the rule's own status may update shortly.",
+    # run 2, ST1 #2: "so the rule's status may not have updated yet"
+    f"The data for `/omcp-x/logs-x/log_20200111.dat` are now fully at your site (`local`).\n\n- **Rule added:** `providerId={PROV}` with 1 replica (ID `{RULE}`).\n- **Verified:** the local provider holds the whole file: block range [0, 262144] of the 262,144-byte file, and `isFullyReplicatedLocally` is true.\n- **Caveat:** the QoS summary still reports the requirement as `pending`, so the rule's status may not have updated yet. The data check above is what confirms the copy is complete.",
+    # a done claim in the past beside "when" is still a claim
+    "When I checked, the data were fully at your site.",
+    "The data were fully there when I checked.",
+]
+
+ST1_NOT_DONE_RUN2 = [
+    # run 2, ST1 #0 (the other model): "pending … hasn't completed yet", and "fulfilled" only in
+    # "to verify when it reaches fulfilled status"
+    f"Based on my analysis, I have successfully set up a placement rule that keeps the file `/omcp-x/logs-x/log_20200111.dat` at your local site. Here's what I did:\n\n1. Added a QoS requirement with the expression `providerId={PROV}` (which identifies your local provider)\n2. Set the replica count to 1 to ensure the file is maintained at your site\n\nThe system shows the requirement is currently in \"pending\" status, meaning the replication process has started but hasn't completed yet. The file is 262,144 bytes in size, and according to the distribution information, it appears that while there is a replica at your local provider, it doesn't yet hold the complete file.\n\nTo confirm when the data are fully replicated, you would need to monitor the file's status. The replication process might take some time depending on network conditions and system load. You can check the status again later using the same commands to verify when it reaches \"fulfilled\" status.",
+    # the newly matched status phrasing, with no data claim, is still "not done", explained or not
+    "The QoS summary still lists the requirement as pending.",
+    "The summary still lists the requirement as pending, so it may not have updated yet.",
+    "The rule is still pending. I expect it to flip to fulfilled once the copy ends.",
+]
+
+ST1_OTHER_RUN2 = [
+    # run 2, ST1 #2 (the other model): "To check when the data are fully replicated … I'll need to
+    # monitor" was read as done; it says neither (the judge: not done; FAIL either way)
+    f"I've successfully set up a placement rule for the file `/omcp-x/logs-x/log_20200111.dat` to keep it at your site (provider ID: {PROV}). \n\nThe QoS requirement has been created with ID: {RULE}\n\nTo check when the data are fully replicated and available at your site, I'll need to monitor the QoS status. The system will automatically replicate the file to your provider until the requirement is fulfilled. You can check the status using the QoS summary for this file.\n\nWould you like me to check the current status of this requirement to see if it's already fulfilled?",
+    "Once the rule is fulfilled, the data are fully there.",
+    # with no data claim: a next sentence that does not say the status will change explains
+    # nothing, nor does a status said not to change (both)
+    "The rule is fulfilled. The rule status is still pending. I did not wait for it.",
+    "The rule is fulfilled, but its status is still pending and will not change.",
+]
+
+
+@pytest.mark.parametrize("answer", ST1_DONE_RUN2)
+def test_st1_run2_an_explained_status_or_a_past_when_beside_a_data_claim_reads_done(
+    answer: str,
+) -> None:
+    assert read_rule_task(answer, LOCAL, OWNER) == SAYS_DONE
+
+
+@pytest.mark.parametrize("answer", ST1_NOT_DONE_RUN2)
+def test_st1_run2_a_status_with_no_data_claim_or_a_future_fulfilled_reads_not_done(
+    answer: str,
+) -> None:
+    assert read_rule_task(answer, LOCAL, OWNER) == SAYS_NOT_DONE
+
+
+@pytest.mark.parametrize("answer", ST1_OTHER_RUN2)
+def test_st1_run2_a_future_done_word_or_an_unexplained_status_is_not_done(answer: str) -> None:
     assert read_rule_task(answer, LOCAL, OWNER) == OTHER
 
 
