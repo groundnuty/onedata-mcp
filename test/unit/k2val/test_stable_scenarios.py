@@ -404,6 +404,8 @@ ST1_ANSWERS = {
         "The rule is in place and fulfilled; vistula-dc now holds all of the file's data.",
         "The file is now 100% replicated at vistula-dc under the new placement rule.",
         "Placement rule created (id q123). The data are completely stored at vistula-dc.",
+        # a rule's status never undoes a claim that the data are there (design/16, run 2: S10)
+        "The data are fully at vistula-dc, but the rule is still pending.",
     ],
     "SAYS_NOT_DONE": [
         "I set up the rule; replication is still in progress.",
@@ -415,7 +417,8 @@ ST1_ANSWERS = {
     ],
     OTHER: [
         "I added a placement rule for the file.",
-        "The data are fully at vistula-dc, but the rule is still pending.",
+        # ... but it still undoes a bare "done" that makes no such claim
+        "Done, but the rule is still pending.",
         "The transfer status reads completed.",
         "nordic-marine-dc holds all of the file's data.",
     ],

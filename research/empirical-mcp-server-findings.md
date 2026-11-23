@@ -1272,7 +1272,7 @@ reading directly (the summary already includes inherited rules), and
 is rule 4 of the aim above. Cost: a stable tool's result, so a K=3
 smoke re-run of its rows (design/16). The same change serves M-34's
 V1 misreading. **Now implemented by M-37** (a `meaning` field on an
-empty summary); smoke re-run pending.
+empty summary); smoke re-run `smoke-stable-2`: clean (design/16).
 
 ---
 
@@ -1425,10 +1425,12 @@ a tool finding.
   provider's blocks and the file size, so a 0-byte entry cannot read
   as a copy. Cost: a stable tool's result, so a K=3 smoke re-run (its
   rows: ST6, V1, SR1, SR1i). **Now implemented by M-38** (a
-  `holds_whole_file` field per provider); smoke re-run pending.
+  `holds_whole_file` field per provider); smoke re-run
+  `smoke-stable-2`: clean (design/16).
 - `get_file_qos_summary`: M-30's explicit "no QoS requirement applies
   to this file" when the summary is empty. One change, one re-run.
-  **Now implemented by M-37**; smoke re-run pending.
+  **Now implemented by M-37**; smoke re-run `smoke-stable-2`: clean
+  (design/16).
 - The fabrication (V1 #4): none; no tool was called.
 
 ---
@@ -1558,7 +1560,10 @@ description are unchanged.
 
 **Decision:** Fixed (PR #48); smoke re-run `smoke-stable-2`: clean.
 `meaning` was shown in 13 trials, 6 of them asking where the data are,
-and no answer read it as a statement about the data (design/16).
+and no answer read it as a statement about the data (design/16). One
+trial read the summary's `pending` after adding a rule and stopped
+(Qwen3-Coder ST1 #0): model capability, by the operator's decision of
+2026-11-23. It did not wait, and the summary was accurate.
 
 ---
 

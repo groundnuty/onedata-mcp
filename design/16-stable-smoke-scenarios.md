@@ -1,6 +1,6 @@
 # Smoke scenarios for the stable tools
 
-Status: built and unit-tested on the fake federation (2026-11-22), revised after an external review the same day (below). First run on the validation federation 2026-11-23, control and smoke pair, and classified ([Results](#results-of-the-first-smoke-run-2026-11-23)): `add_file_qos_requirement` had one new tool-attributable finding (SF1); `get_file_qos_summary` and `get_file_distribution` stayed stable only if a record that deferred a finding to this run could serve as its baseline (SF2, SF3; the operator's call); four rows stay stable; the hint row is not verified. The three findings are fixed in the results, errors and hints of those tools ([Fixes and the re-run](#fixes-for-sf1-to-sf3-and-their-re-run)), under design/10's rule that a tool is fixed and re-run, not demoted. The re-run, `smoke-stable-2` (2026-11-23), is clean ([Results](#results-of-the-second-smoke-run-2026-11-23)): the three tools stay stable (`get_file_qos_summary` on the operator's reading of one trial), each fix was shown to a model and not misread, and two branches of the fixes that no model was shown stay not verified.
+Status: built and unit-tested on the fake federation (2026-11-22), revised after an external review the same day (below). First run on the validation federation 2026-11-23, control and smoke pair, and classified ([Results](#results-of-the-first-smoke-run-2026-11-23)): `add_file_qos_requirement` had one new tool-attributable finding (SF1); `get_file_qos_summary` and `get_file_distribution` stayed stable only if a record that deferred a finding to this run could serve as its baseline (SF2, SF3; the operator's call); four rows stay stable; the hint row is not verified. The three findings are fixed in the results, errors and hints of those tools ([Fixes and the re-run](#fixes-for-sf1-to-sf3-and-their-re-run)), under design/10's rule that a tool is fixed and re-run, not demoted. The re-run, `smoke-stable-2` (2026-11-23), is clean ([Results](#results-of-the-second-smoke-run-2026-11-23)): the three tools stay stable, each fix was shown to a model and not misread, and two branches of the fixes that no model was shown stay not verified.
 
 [`10-tool-maturity.md`](10-tool-maturity.md), "Staying stable", says that a stable tool whose description wording, error hints or result shape changes must re-run "the tool's scenarios on the smoke pair at K=3". Eight such changes are owed, over seven tools:
 
@@ -172,7 +172,7 @@ The stored answers were read again offline (`rejudge --cached-only`: the stored 
 
 | # | Reader | Misread | Fix | Trials |
 |---|---|---|---|---|
-| S1 | ST1 `read_rule_task` | "The QoS summary still says `pending`", "Its status still reads `pending`", "The rule showed `pending` on the first check" undid "the data are now fully at your site" | a pending rule status that its own sentence explains away (a past reading, "on the first check"; a lag, "rather than missing data", "even though … already"; a coming change, "should flip") no longer undoes a clause saying the data are fully there. The rest of the sentence is still read ("status pending and the data are not yet there" stays not done), a status with no data claim stays not done, and a bare "the data are fully there, but the rule is still pending" still says both | control #0; Haiku #0, #2 → PASS |
+| S1 | ST1 `read_rule_task` | "The QoS summary still says `pending`", "Its status still reads `pending`", "The rule showed `pending` on the first check" undid "the data are now fully at your site" | a pending rule status that its own sentence explains away (a past reading, "on the first check"; a lag, "rather than missing data", "even though … already"; a coming change, "should flip") no longer undoes a clause saying the data are fully there. The rest of the sentence is still read ("status pending and the data are not yet there" stays not done), a status with no data claim stays not done, and a bare "the data are fully there, but the rule is still pending" still says both (superseded by the second run's S10: a status never undoes a claim that the data are there) | control #0; Haiku #0, #2 → PASS |
 | S2 | ST3 `read_single_copy` | "2. `log_20200114.dat` - Has a requirement with replicas_num = 2": the dash cut the name from its count, and the bare name was read as claimed | a list item labelled by one name takes the count that follows it, when that text states one kind of count | Qwen3-Coder #0, #1, #2 → PASS |
 | S3 | ST4 `read_transfer_ids` | "The replicating provider ID is `<id>`" not read as a label; "… the ID of the transfer … is:" then the id alone two lines below not read as the conclusion | "provider ID is" labels an id (an id word is required: "the file is X" is no label); the lead-in of an id on its own line is the text before it | Qwen3-Coder #0 → PASS |
 | S4 | ST5 (and ST2) `_FIELD`, `_CAN_ALL` | "Number of Copies Requested: 2" gave no count; "Can they all be met at once? Yes." gave no verdict | the field with "requested", "required" and the like; a "Yes" right after the restated question about being met | Qwen3-Coder #1, #2, control #0 → PASS |
@@ -279,17 +279,17 @@ Each of the three tools owes its scenarios on the smoke pair at K=3 (design/10, 
 
 Run `smoke-stable-2` on the validation federation, 2026-11-23, 14:59 to 15:56 UTC, at master `e2697c2` (PR #48, the three fixes), in the durable evidence store. The smoke pair at K=3 on the 11 scenarios above: 66 records, one per trial. No trial had an infrastructure outcome, so every fixture precondition held. The offered surface of every trial is K1, `9192d3f502ebbd04a4d17ef787c27f7193df0fb89bac5eafa1ea618ae1324df3`. Answers were read by the deterministic reader and the judge (Claude Sonnet 5.5, effort medium). The classes and the L3a bar are those of the first run; this run has two families, Qwen (Qwen3-Coder) and Anthropic (Haiku).
 
-**Verdict: the re-run is clean.** No new tool-attributable failure in `add_file_qos_requirement`, `get_file_qos_summary` or `get_file_distribution`. Each fix was shown to a model, and no model shown it misread it. All three tools stay stable; for `get_file_qos_summary` that rests on reading one trial (Qwen3-Coder ST1 #0) as model capability, the operator's call (below).
+**Verdict: the re-run is clean.** No new tool-attributable failure in `add_file_qos_requirement`, `get_file_qos_summary` or `get_file_distribution`. Each fix was shown to a model, and no model shown it misread it. All three tools stay stable.
 
 ### Rescore
 
 The stored answers were read again offline (`rejudge --cached-only`: the stored verdicts, no judge call), into a new directory beside the run. The run was left unchanged (sha256 of every file checked before and after). Master's readers are the runner's: no file under `benchmark/` changed between `e2697c2` and master `d3ed709`. A rescore at master reproduces every stored outcome.
 
-| Run | As stored (`e2697c2`) = master | with the fixes below | after review by hand |
-|---|---|---|---|
-| pair (66) | 53 PASS, 4 FAIL, 9 NEEDS_REVIEW | 56 PASS, 5 FAIL, 5 NEEDS_REVIEW | 58 PASS, 8 FAIL |
+| Run | As stored (`e2697c2`) = master | with S8 and S9 | with S10 too | after review by hand |
+|---|---|---|---|---|
+| pair (66) | 53 PASS, 4 FAIL, 9 NEEDS_REVIEW | 56 PASS, 5 FAIL, 5 NEEDS_REVIEW | 56 PASS, 5 FAIL, 5 NEEDS_REVIEW (no change) | 58 PASS, 8 FAIL |
 
-The fixes change 5 readings, all in this run. All 996 scored answers in the store were read with master's code and with the branch's: this run, the first smoke run and its control, the gate-4 runs of design/12–15, and a later SR1 and SR1i run of two configs. No stored PASS changed.
+The fixes change 5 readings, all in this run. Every scored answer in the store was read with master's code and with the branch's: this run, the first smoke run and its control, the gate-4 runs of design/12–15, and a later SR1 and SR1i run of two configs, still being written (996 answers with S8 and S9, 1004 with S10). No stored PASS changed, and S10 changes no reading that S8 and S9 left.
 
 ### L1: reader fixes (paired regression tests in `test/unit/k2val/test_smoke_readers.py`, "the second run")
 
@@ -298,7 +298,15 @@ The fixes change 5 readings, all in this run. All 996 scored answers in the stor
 | S8 | ST1 `read_rule_task`: `_RULE_STATUS`, `_STATUS_EXPLAINED`, `_STATUS_COMING`, `_st1_clauses` | Each of these, beside "the data are now fully at your site", was read as undoing the claim. Three more ways S1 did not cover of explaining a pending status: (1) "The QoS summary still lists the requirement as `pending`, so the rule's own status may update shortly"; (2) "… still reports the requirement as `pending`, so the rule's status may not have updated yet"; (3) "the QoS summary still says `pending` on two checks. I expect it to flip to `fulfilled` shortly, since the data are already there", where the explanation is in the next sentence | "lists" is a status verb, and "may not have updated (yet)" is a lag. A status is also explained by the next sentence when that sentence says the status is about to change. A clause that says the status is about to change is not itself a done claim. "Will not change" and "may not update" explain nothing; this guard also closes the same opening in S1's same-sentence cue | Haiku #0, #1, #2 → PASS |
 | S9 | ST1 `read_rule_task`: `_WHEN_TO_COME` | A done word in a clause about a time still to come was read as a claim. "To check when the data are fully replicated … I'll need to monitor the QoS status" was read as SAYS_DONE, a false PASS (the danger direction). "… to verify when it reaches "fulfilled" status" cancelled a "hasn't completed yet" | After "when", "until" or "once" with "it" or "the …" and a present-tense verb, a done word is no claim. A past "when I checked, the data were fully there" is still one | Qwen3-Coder #0 → FAIL, as the judge read it; Qwen3-Coder #2 → OTHER, so NEEDS_REVIEW, FAIL either way |
 
-Paired negatives: the newly matched status phrasing with no data claim stays SAYS_NOT_DONE, explained or not. A third sentence that does not say the status will change leaves the answer saying both. "Once the rule is fulfilled, the data are fully there" is no claim. S1's pinned "fully at vistula-dc, but the rule is still pending" stays OTHER.
+Paired negatives: the newly matched status phrasing with no data claim stays SAYS_NOT_DONE, explained or not. Beside a bare "done" or "the rule is fulfilled", a third sentence that does not say the status will change leaves the answer saying both. "Once the rule is fulfilled, the data are fully there" is no claim.
+
+**S10, a reading rule (the operator, 2026-11-23): a rule's status never undoes a claim that the data are fully there.** This is the second run in which Haiku's answer "the data are fully at your site; the rule still says pending" needed a new cue (S1, then S8). The cues are no longer needed for it:
+- The oracle judges every "done" against the local blocks at the answer: a claim made before they cover the file fails as a PREMATURE CLAIM. And 25.0 reports a rule `pending` for seconds after its data are whole (all three Haiku ST1 trials here).
+- So where a done clause says the data are there (`_DATA_DONE`: "fully at", "holds the whole file", "all of its bytes", with the data or the site named), a pending rule status counts as no "not done", explained or not. The rest of its clause is still read: "the rule is pending and the data are not yet fully there" still says not done.
+- Where no clause says so, nothing changes: beside a bare "done" or "the rule is fulfilled", a status not explained away still makes the answer say both, and a status alone is still "not done". "The rule is now in place at your site" is about the rule, not the data.
+- The pinned case "The data are fully at vistula-dc, but the rule is still pending" (`test_stable_scenarios.py`, and its two forms in `test_smoke_readers.py`) is now SAYS_DONE. Its paired negatives are "Done, but the rule is still pending" and the other bare-"done" forms, which stay OTHER.
+- The judge's rubric is unchanged; it already read these answers as done, so no stored verdict is invalidated.
+- S8's cues stay: they still decide a "done" with no data claim.
 
 **Not fixed, resolved by hand.** Two disagreements are left to the hand review, and the readers are not changed for them:
 - The SR reader is shared with design/12's record. On SR1 #1 it reads a step of a narrative ("is currently in progress") against a later claim of whole, as in the first run's SR1i #1. On SR1n #2 it reads "not found among the space's providers" as a refusal.
@@ -341,7 +349,7 @@ An observation on SF3, not a failure: twice Qwen3-Coder read an empty local entr
 
 - **Qwen3-Coder ST1 #0.** It set the rule by id ([4], 5.4 s into the trial). The summary ([5], 7.0 s) and `get_qos_requirement` ([7], 9.4 s) read `pending`, and it answered: "the requirement is currently in "pending" status, meaning the replication process has started but hasn't completed yet … To confirm when the data are fully replicated, you would need to monitor the file's status." The snapshot taken at the answer, 11.7 s in, found the local copy whole and the rule fulfilled. It read the status twice, 2.4 s apart, without reading the blocks after the rule, then stopped and handed the watching back, as the first run's SR1 #1.
   - *Not L3a against `get_file_qos_summary`:* the answer reads `pending` for what it says, the rule not yet met, and claims nothing the status does not say. Haiku saw `pending` beside whole data in all three of its ST1 trials and answered from the data (the blocks, or `isFullyReplicatedLocally`).
-  - *The operator's call:* this reading decides `get_file_qos_summary`'s verdict. If the summary's `pending`, which on 25.0 lags whole data by seconds, is taken as the cause (L3a by the third clause), the tool is not clean, and a note on a pending status and another K=3 re-run of its scenarios would follow.
+  - *Decided (operator, 2026-11-23): L3b.* It stopped without waiting, and the summary was accurate. This was the one trial on which `get_file_qos_summary`'s verdict turned.
   - It saw SF2's `meaning` ([1], before the rule) and SF3's field ([2]) and read both rightly.
 - **Qwen3-Coder ST1 #2.** SF1's refusal, then the rule by id ([1]), then no read at all; it ends by asking whether to check. FAIL.
 - **Qwen3-Coder SR1n #1 and #2.** Each copied to `local` "instead" of `oder-dc` after the providers listing, as design/12's SR1n. In #1 it also judged the copy from the transfer's status, past `schedule_file_replication`'s note: "According to the documentation, I should verify this by checking the target provider's blocks of the file, but since the transfer status shows "completed" and all bytes were replicated, the data are fully there."
@@ -366,14 +374,14 @@ An observation on SF3, not a failure: twice Qwen3-Coder read an empty local entr
 - **Why it is new.** In the gate-4 runs, each of the ten such refusals was followed by the site's id (design/12; the target read from its records). In the first smoke run, one of three (SR1i #0) went to the owner first and then to the site; here two of three did, and stopped there. M-21 (the findings log) fixed this contradiction in the hint's own opening sentence (PR #35) and predicted this failure: "a literal model concludes the site cannot hold the file". The contradiction is still carried by 25.0's message, which the hint keeps after itself (the findings log's design rule 3).
 - **The bar:** one family, with a traced mechanism in #0: the refusal text, the wrong target, and that text quoted as the reason. That is L3a by the third clause, against `schedule_file_replication`.
 - **The contrast in this run:** the same model sent the same name to `add_file_qos_requirement` twice (ST1 #1, #2). That tool's refusal is built before any request and carries no 25.0 message, and both times the model used the id at once.
-- **Effect on this record:** it changes no verdict here. It is for design/12's gate 4 (below, "What the protocol asks next").
+- **Effect on this record:** it changes no verdict here. It is fixed in a separate PR, with its own entry in the findings log; SR1 and SR1i are re-run at K=8 after it (design/12's gate 4).
 
 ### Per tool
 
 | Tool | Changes re-run | Direct (scored trials) | Supporting (target-matched call) | New tool-attributable | Fix shown, acted rightly | Verdict |
 |---|---|---|---|---|---|---|
 | `add_file_qos_requirement` | SF1, description | ST1: 6 | none | none | 2 trials, 2 of 2 | **STAYS STABLE** |
-| `get_file_qos_summary` | SF2, description | ST3, ST5: 12 | 18 of 18 (V3, V3n, V3o) | none, if Qwen3-Coder ST1 #0 is L3b (the operator's call, above) | 13 trials (6 where the misreading was possible), not misread in 13 | **STAYS STABLE**, on that reading |
+| `get_file_qos_summary` | SF2, description | ST3, ST5: 12 | 18 of 18 (V3, V3n, V3o) | none (Qwen3-Coder ST1 #0 is L3b, decided) | 13 trials (6 where the misreading was possible), not misread in 13 | **STAYS STABLE** |
 | `get_file_distribution` | SF3, description | ST6: 6 | 14 of 18 (V1, SR1, SR1i) | none | 31 trials (19 where the misreading was possible), not misread in 19 | **STAYS STABLE** |
 
 Two branches of the fixes were shown to no model and stay **NOT VERIFIED**, as open items (design/10): `add_file_qos_requirement`'s refusal of a `providerId=` value that is neither a provider's id nor its name, and `get_file_distribution`'s `holds_whole_file: null` with its note. They change no verdict above: each tool's fix was exposed and worked.
@@ -387,11 +395,11 @@ The other rows this run touches:
 
 ### What the protocol asks next
 
-- **The three tools stay stable** (design/10, "Staying stable": the fix was made and the re-run is clean). SF1 to SF3 are closed. `get_file_qos_summary`'s verdict holds if Qwen3-Coder ST1 #0 stays model capability (the operator's call, above).
+- **The three tools stay stable** (design/10, "Staying stable": the fix was made and the re-run is clean). SF1 to SF3 are closed.
 - **Open, not verified:** SF1's "neither" refusal, SF3's `null` branch, and `get_qos_requirement`'s hint. Each stays open until a trial shows it; none needs a run of its own.
 - **For design/12 (`schedule_file_replication`, experimental):**
-  - The owner-id slip above. The fix the trace points to is in that tool: on the name refusal, leave out 25.0's "not supported by provider" message, or check the target against the space's providers before the request, as SF1's fix does. Its pending SR1i re-run at K=8 would cover the fix.
-  - F2 recurred in front of its note (SR1i #2; the same claim in SR1n #1).
+  - The owner-id slip above: fixed in a separate PR; SR1 and SR1i are re-run at K=8 after it.
+  - F2 recurred in front of its note (SR1i #2; the same claim in SR1n #1), for that re-run to watch.
 
 ## Review of 2026-11-22 (external, jailed)
 
