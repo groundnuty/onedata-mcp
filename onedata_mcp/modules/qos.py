@@ -15,6 +15,16 @@ from onedata_mcp.api.qos import (
 )
 
 
+def _no_requirement_meaning(status: Any) -> str:
+    """What a summary with an empty `requirements` says. It names no tool: the one that shows
+    where a file's data are may not be offered alongside this one."""
+    shown = status if isinstance(status, str) and status else "fulfilled"
+    return (
+        "No QoS requirement applies to this file (inherited ones included); "
+        f"'{shown}' here says nothing about where its data are."
+    )
+
+
 def register_module(mcp: FastMCP) -> None:
     """Register Onedata QoS tools with the MCP server."""
 
@@ -57,6 +67,9 @@ def register_module(mcp: FastMCP) -> None:
         """
         summary = await get_file_qos_summary(file_id_or_path)
         flat = summary.get("requirements")
+        if isinstance(flat, dict) and not flat:
+            # SF2 (design/16): a status with nothing behind it was read as "stored here".
+            return {**summary, "meaning": _no_requirement_meaning(summary.get("status"))}
         if not isinstance(flat, dict) or not flat:
             return summary
 
@@ -122,7 +135,9 @@ def register_module(mcp: FastMCP) -> None:
         Replication is asynchronous: poll get_file_qos_summary or
         list_space_transfers to observe materialisation.
         """
-        return await add_qos_requirement(file_id_or_path, expression, replicas_num=replicas_num)
+        return await add_qos_requirement(
+            file_id_or_path, expression, replicas_num=replicas_num, check_providers=True
+        )
 
     @mcp.tool(name="get_qos_requirement", annotations=ToolAnnotations(readOnlyHint=True))
     async def mcp_get_qos_requirement(

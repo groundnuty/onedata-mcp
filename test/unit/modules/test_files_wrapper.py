@@ -434,3 +434,169 @@ async def test_relative_path_with_client_root_still_resolves(
             "get_file_attributes", {"file_id_or_path": "a.nc"}, raise_on_error=False
         )
     assert not result.is_error, result.content[0].text
+
+
+# ---------------------------------------------------------------------------
+# get_file_distribution: `holds_whole_file` per provider (SF3, design/16)
+# ---------------------------------------------------------------------------
+
+SIZE = 262144
+
+
+def _entry(
+    blocks: list | None,
+    size_field: str | None = "virtualSize",
+    size: int | None = SIZE,
+    **extra: object,
+) -> dict:
+    """A provider's entry for a regular file: one storage with the given blocks."""
+    entry: dict = {
+        "success": True,
+        "distributionPerStorageBackend": {
+            "s1": {"success": True, "blocks": blocks, "physicalSize": 0}
+        },
+        **extra,
+    }
+    if size_field is not None:
+        entry[size_field] = size
+    return entry
+
+
+def _distribution(**entries: dict) -> dict:
+    return {"type": "REG", "distributionPerProvider": entries}
+
+
+def _marked(body: dict) -> dict[str, dict]:
+    files_module._add_holds_whole_file(body)
+    return body["distributionPerProvider"]
+
+
+def test_blocks_covering_the_size_are_a_whole_copy() -> None:
+    marked = _marked(
+        _distribution(
+            a=_entry([[0, SIZE]]),
+            b=_entry([[0, 100000], [100000, SIZE - 100000]]),  # adjacent blocks, as one
+            c=_entry([[0, SIZE], [1000, 50]]),  # a block inside another changes nothing
+        )
+    )
+    assert [marked[p]["holds_whole_file"] for p in "abc"] == [True, True, True]
+    assert all("holds_whole_file_note" not in marked[p] for p in "abc")
+
+
+def test_blocks_that_leave_a_gap_are_a_partial_copy() -> None:
+    marked = _marked(
+        _distribution(
+            a=_entry([[0, SIZE]]),
+            b=_entry([[0, SIZE // 2]]),
+            c=_entry([[0, 131072], [196608, 65536]]),  # the third quarter is missing
+        )
+    )
+    assert [marked[p]["holds_whole_file"] for p in "abc"] == [True, False, False]
+
+
+def test_an_entry_with_a_size_and_no_blocks_holds_nothing() -> None:
+    """The entry that was read as a copy: success, the file's size, physicalSize 0, no blocks."""
+    marked = _marked(_distribution(owner=_entry([[0, SIZE]]), local=_entry([])))
+    assert marked["local"]["holds_whole_file"] is False
+    assert marked["local"]["virtualSize"] == SIZE  # the existing fields stay
+    assert marked["local"]["distributionPerStorageBackend"]["s1"]["blocks"] == []
+    assert marked["owner"]["holds_whole_file"] is True
+
+
+@pytest.mark.parametrize(
+    "size_field, size",
+    [("virtualSize", 0), ("logicalSize", 0), ("virtualSize", None), (None, None)],
+)
+def test_a_size_that_is_zero_or_unknown_is_said_not_guessed(
+    size_field: str | None, size: int | None
+) -> None:
+    """Even for a provider with a block: the blocks alone do not say how long the file is."""
+    marked = _marked(
+        _distribution(a=_entry([[0, 10]], size_field, size), b=_entry([], size_field, size))
+    )
+    for provider in "ab":
+        assert marked[provider]["holds_whole_file"] is None
+        assert "size is 0 or not reported" in marked[provider]["holds_whole_file_note"]
+
+
+def test_an_empty_file_with_no_blocks_is_not_called_whole() -> None:
+    marked = _marked(_distribution(a=_entry([], size=0), b=_entry([], size=0)))
+    for provider in "ab":
+        assert marked[provider]["holds_whole_file"] is None
+        assert "size is 0 or not reported" in marked[provider]["holds_whole_file_note"]
+
+
+def test_the_largest_size_any_provider_reports_is_the_files_size() -> None:
+    """A stale, smaller size at one provider must not let its partial replica look whole."""
+    marked = _marked(
+        _distribution(stale=_entry([[0, 1000]], size=1000), current=_entry([[0, SIZE]], size=SIZE))
+    )
+    assert marked["stale"]["holds_whole_file"] is False
+    assert marked["current"]["holds_whole_file"] is True
+
+
+def test_the_older_size_name_is_read_too() -> None:
+    marked = _marked(_distribution(a=_entry([[0, SIZE]], "logicalSize")))
+    assert marked["a"]["holds_whole_file"] is True
+
+
+def test_an_unreadable_storage_is_unknown_unless_what_was_read_covers_the_file() -> None:
+    broken = {"success": False, "error": {"id": "posix"}}
+
+    def with_broken(blocks: list) -> dict:
+        entry = _entry(blocks)
+        entry["distributionPerStorageBackend"]["s2"] = broken
+        return entry
+
+    marked = _marked(_distribution(partial=with_broken([[0, 10]]), whole=with_broken([[0, SIZE]])))
+    assert marked["partial"]["holds_whole_file"] is None
+    assert "could not be read in full" in marked["partial"]["holds_whole_file_note"]
+    assert marked["whole"]["holds_whole_file"] is True  # what was read already covers it
+
+
+def test_malformed_blocks_are_unknown_not_false() -> None:
+    marked = _marked(_distribution(a=_entry([[0, SIZE]]), b=_entry([[0]]), c=_entry([["x", 4]])))
+    assert marked["a"]["holds_whole_file"] is True
+    assert marked["b"]["holds_whole_file"] is None and marked["c"]["holds_whole_file"] is None
+
+
+def test_a_failed_entry_and_a_directory_are_left_as_they_are() -> None:
+    failed = {"success": False, "error": {"id": "posix"}}
+    marked = _marked(_distribution(a=_entry([[0, SIZE]]), gone=dict(failed)))
+    assert marked["gone"] == failed
+    directory = {
+        "type": "DIR",
+        "distributionPerProvider": {
+            "a": {
+                "success": True,
+                "virtualSize": 8,
+                "distributionPerStorageBackend": {"s1": {"success": True, "physicalSize": 6}},
+            }
+        },
+    }
+    assert "holds_whole_file" not in _marked(directory)["a"]
+
+
+def test_no_provider_mapping_is_not_an_error() -> None:
+    for body in ({}, {"type": "REG"}, {"type": "REG", "distributionPerProvider": None}):
+        files_module._add_holds_whole_file(body)  # nothing to mark
+
+
+@pytest.mark.asyncio
+async def test_the_tool_answers_with_the_field_beside_the_existing_ones(
+    monkeypatch: pytest.MonkeyPatch, files_mcp: FastMCP
+) -> None:
+    async def distribution(_: str) -> dict:
+        return _distribution(owner=_entry([[0, SIZE]], physicalSize=SIZE), local=_entry([]))
+
+    async def no_spaces() -> list:
+        return []
+
+    monkeypatch.setattr(files_module, "get_file_distribution", distribution)
+    monkeypatch.setattr("onedata_mcp.api.spaces.list_user_spaces", no_spaces)
+    async with Client(files_mcp) as client:
+        result = await client.call_tool("get_file_distribution", {"file_id_or_path": "/space/f"})
+    per_provider = result.structured_content["distributionPerProvider"]
+    assert per_provider["local"]["holds_whole_file"] is False
+    assert per_provider["local"]["virtualSize"] == SIZE
+    assert per_provider["owner"]["holds_whole_file"] is True

@@ -389,7 +389,9 @@ The rules so far, each learned from findings:
    after the hint.
 4. **Say "empty" explicitly.** A silent empty answer reads as a wrong
    query (M-12) or as something hidden (M-30). When nothing matches,
-   say so in words, and say what was searched.
+   say so in words, and say what was searched. A status with nothing
+   behind it (M-37) and an entry with a size and no blocks (M-38) are
+   the same case: say what they do and do not mean.
 
 The rules are aimed at the probes. The control, Claude Sonnet at
 medium effort, passed every gate-4 trial (design/11–15).
@@ -1114,12 +1116,12 @@ Qwen3-Coder as two families. The operator has since ruled that they
 are one family, so the two-family bar is not met and F2 is not L3a.
 The operator decided to fix it anyway.
 
-**Fix (in progress):** the scheduling result repeats the
-description's instruction in a note: scheduled is not copied, and
-completion is judged by the target's blocks, not the transfer's
-status. The note names no tool. Then SR1 and SR1i are re-run.
+**Fix:** the scheduling result repeats the description's instruction
+in a note: scheduled is not copied, and completion is judged by the
+target's blocks, not the transfer's status. The note names no tool.
+Then SR1 and SR1i are re-run.
 
-**Decision:** Open: fix and re-run pending (design/12).
+**Decision:** Fixed (PR #46), re-run pending (design/12).
 
 ---
 
@@ -1148,11 +1150,10 @@ trials, and Sonnet, Haiku, GLM and DeepSeek always did. design/14
 records F3 as tool-attributable, presumed so "until shown otherwise",
 since the description is what tells a model to page.
 
-**Fix (in progress):** while `isLast` is false, the result itself
-says that more entries follow and how to get them. Then LCp is
-re-run.
+**Fix:** while `isLast` is false, the result itself says that more
+entries follow and how to get them. Then LCp is re-run.
 
-**Decision:** Open: fix and re-run pending (design/14).
+**Decision:** Fixed (PR #46), re-run pending (design/14).
 
 ---
 
@@ -1185,16 +1186,16 @@ after the misleading one and passed (FAi #1); GLM re-copied after the
 accurate one and passed (FAi #4). Recorded as a gate-1 defect, not
 L3a.
 
-**Fix (in progress):** refuse before any request an id that cannot be
-a whole file id (a 25.0 file id is the hex form of `guid#<uuid>#<space
-id>`; here 177 and 179 hex digits do not even decode), and for an id
-whose space the token does not see, say the id may be mis-copied.
-Then FAi and SR1i are re-run on the smoke pair at K=3 (no LCi trial
-passed a mis-copied id, but the same fix applies). No check
-catches all: GLM FAi #7 spliced one id's 8-byte header onto another
-file's payload, and Onedata returned that other file.
+**Fix:** refuse before any request an id that cannot be a whole file
+id (a 25.0 file id is the hex form of `guid#<uuid>#<space id>`; here
+177 and 179 hex digits do not even decode), and for an id whose space
+the token does not see, say the id may be mis-copied. Then FAi and
+SR1i are re-run on the smoke pair at K=3 (no LCi trial passed a
+mis-copied id, but the same fix applies). No check catches all: GLM
+FAi #7 spliced one id's 8-byte header onto another file's payload,
+and Onedata returned that other file.
 
-**Decision:** Open: fix and re-run pending (design/13).
+**Decision:** Fixed (PR #46), re-run pending (design/13).
 
 ---
 
@@ -1265,7 +1266,8 @@ to this file (inherited ones included)". That answers the "hidden"
 reading directly (the summary already includes inherited rules), and
 is rule 4 of the aim above. Cost: a stable tool's result, so a K=3
 smoke re-run of its rows (design/16). The same change serves M-34's
-V1 misreading.
+V1 misreading. **Now implemented by M-37** (a `meaning` field on an
+empty summary); smoke re-run pending.
 
 ---
 
@@ -1417,9 +1419,11 @@ a tool finding.
   conclusion, "holds the whole file: yes/no", computed from that
   provider's blocks and the file size, so a 0-byte entry cannot read
   as a copy. Cost: a stable tool's result, so a K=3 smoke re-run (its
-  rows: ST6, V1, SR1, SR1i).
+  rows: ST6, V1, SR1, SR1i). **Now implemented by M-38** (a
+  `holds_whole_file` field per provider); smoke re-run pending.
 - `get_file_qos_summary`: M-30's explicit "no QoS requirement applies
   to this file" when the summary is empty. One change, one re-run.
+  **Now implemented by M-37**; smoke re-run pending.
 - The fabrication (V1 #4): none; no tool was called.
 
 ---
@@ -1449,6 +1453,145 @@ an id that cannot be whole before any request, say it may be
 mis-copied, and offer the path form. In progress; free (the three
 tools are experimental). Beyond that, none: the tool cannot know the
 id the model meant to copy.
+
+---
+
+## M-36. SF1: a provider's name accepted in `providerId=`
+
+**Surface:** `add_file_qos_requirement` (stable), its `expression`.
+
+**Behaviour:** Qwen3-Coder, ST1 #0, sent `expression
+"providerId=local"` with `replicas_num` 1. `local` is a provider's
+NAME; `providerId=` takes its id. Onedata accepted it and answered
+`{"qosRequirementId": …}`, with no hint. The rule matches no storage,
+so the summary said `"status": "impossible"` and the file never
+arrived (0 of 262144 bytes after the settle). The model blamed the
+site: "Your local site might not support the space that contains this
+file".
+
+**Why this matters:** an accepted rule that can never be met reads as
+a success, then as a site fault. `schedule_file_replication` answers
+the same slip at once ("Pass its id …, not its name", M-21) and the
+models recover; this tool said nothing.
+
+**How it was found:** the stable-tool smoke run (design/16).
+
+**Evidence:** run `smoke-stable-1`.
+- Qwen3-Coder ST1 #0: FAIL, as above.
+- Qwen3-Coder ST1 #1 made the same slip (`providerId=local`,
+  `impossible`), then listed the providers itself and added a rule by
+  id: PASS.
+- Qwen3-Coder SR1i #0, #1, #2 passed the name `local` as
+  `schedule_file_replication`'s target and drew "Pass its id '…', not
+  its name"; each next schedule passed an id. design/12 counts ten
+  gate-4 trials that drew that hint, each followed by a schedule with
+  the id.
+- Haiku and the control listed the providers first and used the id in
+  all their ST1 trials.
+
+design/16 classifies it tool-attributable: one family, with a traced
+mechanism (name, silent acceptance, `impossible`, a wrong diagnosis)
+and the same model correcting the same slip wherever an error named
+it.
+
+**Fix:** before the rule is created, each `providerId=<value>` operand
+is checked against the providers of the file's space (one `GET
+/spaces/{id}`; the space comes from the file id).
+- A value that is a provider's name is refused: "'local' is a
+  provider's name; providerId= takes its id: providerId=<id>", with
+  that id and the space's providers listed.
+- A value that is neither a name nor an id of one is refused with the
+  providers listed.
+- Ids pass unchanged, other operands are not looked at, and an
+  expression with no `providerId=` operand costs no request. If the
+  space or its providers cannot be read, the rule is created as before.
+
+The tool's name, input schema, annotations and description are
+unchanged.
+
+**Decision:** Fixed (this PR); smoke re-run pending (ST1, K=3). The
+refusal is NOT VERIFIED until a re-run trial draws it (design/10).
+
+---
+
+## M-37. SF2: `"fulfilled"` with no requirements read as "stored here"
+
+**Surface:** `get_file_qos_summary` (stable), its result.
+
+**Behaviour:** a file with no QoS requirement is answered
+`{"status": "fulfilled", "requirements": {}}`: the status is vacuous.
+Qwen3-Coder read it as a statement about the data: "The QoS summary
+for each file shows a status of "fulfilled" with no requirements,
+indicating that each file is completely replicated locally" (V1 #2).
+Four of the six files in that trial had 0 local bytes.
+
+**Why this matters:** the answer sounds like a confirmation and is
+false. The description lists the status values but says neither what
+`fulfilled` means with no requirement nor that a status says nothing
+of where the data are.
+
+**How it was found:** the stable-tool smoke run (design/16).
+
+**Evidence:** run `smoke-stable-1`, Qwen3-Coder: V1 #2 (every summary
+`{"status": "fulfilled", "requirements": {}}`), V1 #0 (with M-38), SR1
+#0 ("the data should already be fully present at the local site"),
+SR1i #2 (with F2, M-26). All four FAIL; the V1 answers were false, the
+SR1 and SR1i claims true when made but unread. Earlier: V1 #5 and #7
+in the gate-4 runs (M-34). design/16 classifies it tool-attributable:
+one family, with a complete trace in each trial (the call, the vacuous
+`fulfilled`, an answer that gives it as the reason).
+
+**Fix:** when `requirements` is an empty mapping, the result carries a
+`meaning` field: "No QoS requirement applies to this file (inherited
+ones included); 'fulfilled' here says nothing about where its data
+are." (the status as returned). With requirements nothing is added. It
+names no tool. This is the accommodation candidate of M-30 and M-34,
+now implemented. The tool's name, input schema, annotations and
+description are unchanged.
+
+**Decision:** Fixed (this PR); smoke re-run pending (V1, V3, V3n, V3o,
+ST3, ST5, K=3).
+
+---
+
+## M-38. SF3: an empty provider entry read as holding the file
+
+**Surface:** `get_file_distribution` (stable), its result.
+
+**Behaviour:** the entry of a provider that holds none of the file
+still carries the file's size: `"success": true`, `virtualSize`
+262144, `physicalSize` 0, no blocks. Qwen3-Coder read it as a copy:
+"each file has a successful distribution at the local provider", "the
+correct virtual size matching its physical size at the local provider"
+(V1 #0); "the file is already present at the "local" provider with a
+full physical size of 262144 bytes", which then shaped its copy to
+`owner` (SR1n #0).
+
+**Why this matters:** `success` and the size are present whether or
+not the provider holds a block, so the entry gives no conclusion; a
+reader has to compare the blocks with the size.
+
+**How it was found:** the stable-tool smoke run (design/16).
+
+**Evidence:** run `smoke-stable-1`, Qwen3-Coder: V1 #0 (also M-37) and
+SR1n #0 (which also failed for its write). Both FAIL. Earlier:
+SR1o in the gate-4 runs (M-34). design/16 classifies it
+tool-attributable: one family; in V1 #0 the answer reasons from the
+empty entry's `success` and `virtualSize`.
+
+**Fix:** each readable provider entry of a regular file carries
+`holds_whole_file`, true or false, computed from that provider's
+blocks against the file's size (the largest size any provider
+reports, or a block's end if larger, so that a stale smaller size
+cannot make a partial replica look whole). When no provider reports a
+size above 0, or the provider's blocks could not be read in full, it
+is `null` with a `holds_whole_file_note`: no guess. The existing
+fields stay; a directory's entries and failed entries are left as they
+are. This is the accommodation candidate of M-34, now implemented. The
+tool's name, input schema, annotations and description are unchanged.
+
+**Decision:** Fixed (this PR); smoke re-run pending (V1, SR1, SR1i,
+SR1n, ST6, K=3).
 
 ---
 

@@ -300,10 +300,17 @@ async def _space_providers(
     space_id = await _space_id_for(file_arg, file_id, error)
     if not space_id:
         return None
+    return await _providers_of_space(space_id)
+
+
+async def _providers_of_space(space_id: str) -> list[tuple[str | None, str]] | None:
+    """(name, id) of the providers supporting a space: one `GET /spaces/{sid}`, the id
+    percent-encoded. None when the listing cannot be read or names no provider, so a caller that
+    only checks or explains a value goes on as it would without the listing."""
     config = get_oneprovider_config()
     try:
         response = await request(config, "GET", f"/spaces/{quote(space_id, safe='')}")
-    except Exception:  # noqa: BLE001 - the hint is best-effort; the original error is raised
+    except Exception:  # noqa: BLE001 - best-effort: the caller goes on without the listing
         return None
     body = response["body"]
     providers = body.get("providers") if isinstance(body, dict) else None
