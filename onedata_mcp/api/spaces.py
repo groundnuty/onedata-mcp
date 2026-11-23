@@ -2,7 +2,7 @@ import asyncio
 from typing import Any, Literal, TypedDict
 
 from onedata_mcp.config import get_oneprovider_config, get_onezone_config
-from onedata_mcp.utils import request
+from onedata_mcp.utils import id_segment, request
 
 DatasetState = Literal["attached", "detached"]
 
@@ -79,11 +79,12 @@ async def list_space_datasets(
         raise ValueError("limit must be between 1 and 1000")
 
     space_id = await resolve_space_id_or_name(space_id_or_name)
+    space_segment = id_segment(space_id, "space id")
     config = get_oneprovider_config()
     response = await request(
         config,
         "GET",
-        f"/spaces/{space_id}/datasets",
+        f"/spaces/{space_segment}/datasets",
         params={"state": state, "limit": limit, "offset": offset},
     )
     body = response["body"]
@@ -138,7 +139,7 @@ async def list_user_spaces() -> list[dict[str, Any]]:
 
 async def get_space_details(space_id: str) -> dict[str, Any]:
     config = get_onezone_config()
-    response = await request(config, "GET", f"/spaces/{space_id}")
+    response = await request(config, "GET", f"/spaces/{id_segment(space_id, 'space id')}")
     return response["body"]
 
 
@@ -168,14 +169,16 @@ async def get_space_providers(space_id: str) -> dict[str, Any]:
     `list_space_providers` MCP tool wraps this two-call enrichment.
     """
     config = get_oneprovider_config()
-    response = await request(config, "GET", f"/spaces/{space_id}")
+    response = await request(config, "GET", f"/spaces/{id_segment(space_id, 'space id')}")
     return response["body"]
 
 
 async def get_marketplace_space_details(space_id: str) -> dict[str, Any]:
     """Get details for a space advertised in the marketplace."""
     config = get_onezone_config()
-    response = await request(config, "GET", f"/spaces/marketplace/{space_id}")
+    response = await request(
+        config, "GET", f"/spaces/marketplace/{id_segment(space_id, 'space id')}"
+    )
     return response["body"]
 
 

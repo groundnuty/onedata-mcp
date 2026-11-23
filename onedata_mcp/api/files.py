@@ -15,6 +15,7 @@ from onedata_mcp.utils import (
     OnedataInvalidSpaceError,
     decode_response_body,
     http_failure_message,
+    id_segment,
     redact_endpoints,
     request,
     transport_failure,
@@ -131,12 +132,20 @@ async def get_file_id(path: str) -> str:
 
 # --- A file id in a request path, and errors a caller can act on --------------------------------
 #
-# Used by get_file_attributes, list_children and create_directory (design/13-15). The stable
-# tools that share `_normalize_path_to_file_id` keep their own handling: changing them needs
-# their own gates.
+# Used by get_file_attributes, list_children and create_directory (design/13-15). They keep
+# their own refusals and answers. The stable tools that share `_normalize_path_to_file_id` put
+# their id into the path through `_file_id_segment` (`utils.id_segment`, issue #44): the id is
+# encoded, and an empty id, `.`, `..` or a `/` is refused before any request.
 
 _SHOWN_MAX = 80
 _HOW_TO_NAME_A_FILE = "Give a path, /<space_name>/<path>, or a file id."
+
+
+def _file_id_segment(file_id: str) -> str:
+    """A file id as one percent-encoded path segment (`utils.id_segment`), the refusal saying
+    how to name a file. The id is Onedata's own when a path was resolved first, and a caller's
+    otherwise."""
+    return id_segment(file_id, "file id", hint=_HOW_TO_NAME_A_FILE)
 
 
 def _shown(value: str) -> str:
@@ -677,6 +686,7 @@ async def list_files_recursively(
 ) -> dict[str, Any]:
     config = get_oneprovider_config()
     parent_id = await _normalize_path_to_file_id(parent_id_or_path)
+    parent_segment = _file_id_segment(parent_id)
     requested_attributes = tuple[str, ...](attributes or DEFAULT_FILE_ATTRIBUTE_KEYS)
     _reject_deprecated_attributes(requested_attributes)
     request_body: dict[str, Any] = {"limit": limit}
@@ -693,7 +703,7 @@ async def list_files_recursively(
         response = await request(
             config,
             "GET",
-            f"/data/{parent_id}/files",
+            f"/data/{parent_segment}/files",
             json_body=request_body,
         )
     except OnedataApiError as e:
@@ -718,6 +728,7 @@ async def download_file_with_meta(file_id_or_path: str) -> tuple[bytes, str | No
     """
     config = get_oneprovider_config()
     file_id = await _normalize_path_to_file_id(file_id_or_path)
+    file_segment = _file_id_segment(file_id)  # before the attributes request below
 
     file_attributes = await get_file_attributes(file_id_or_path)
     if file_attributes["type"] == "DIR":
@@ -733,7 +744,7 @@ async def download_file_with_meta(file_id_or_path: str) -> tuple[bytes, str | No
     headers["Accept"] = "*/*"
     headers.pop("Content-Type", None)
 
-    content_path = f"/data/{file_id}/content"
+    content_path = f"/data/{file_segment}/content"
     try:
         async with httpx.AsyncClient(
             base_url=config.base_url, headers=headers, verify=config.verify_ssl
@@ -778,12 +789,13 @@ async def create_file(path: str, content: str, *, create_parents: bool = False) 
         if not relative_path:
             raise ValueError("path must include a file path under the space")
         root_id = await get_file_id(f"/{space_name}")
+        root_segment = _file_id_segment(root_id)
         encoded_path = quote(relative_path, safe="/")
         try:
             response = await request(
                 config,
                 "PUT",
-                f"/data/{root_id}/path/{encoded_path}",
+                f"/data/{root_segment}/path/{encoded_path}",
                 params={"create_parents": True},
                 body=content.encode("utf-8"),
                 additional_headers={"Content-Type": "application/octet-stream"},
@@ -798,12 +810,13 @@ async def create_file(path: str, content: str, *, create_parents: bool = False) 
     parent_path, file_name = path.rsplit("/", 1)
 
     parent_id = await _normalize_path_to_file_id(parent_path)
+    parent_segment = _file_id_segment(parent_id)
 
     try:
         response = await request(
             config,
             "POST",
-            f"/data/{parent_id}/children",
+            f"/data/{parent_segment}/children",
             params={"name": file_name, "type": "REG"},
             body=content.encode("utf-8"),
             additional_headers={"Content-Type": "application/octet-stream"},
@@ -985,7 +998,7 @@ async def create_directory(path: str, *, create_parents: bool = True) -> dict[st
         response = await request(
             config,
             "PUT",
-            f"/data/{quote(root_id, safe='')}/path/{quote(relative, safe='/')}",
+            f"/data/{_file_id_segment(root_id)}/path/{quote(relative, safe='/')}",
             params={"type": "DIR", "create_parents": create_parents},
         )
     except OnedataApiError as e:
@@ -1024,7 +1037,9 @@ def _looks_like_directory_intent(path: str, content: str) -> bool:
 async def delete_file(file_id_or_path: str) -> None:
     config = get_oneprovider_config()
     file_id = await _normalize_path_to_file_id(file_id_or_path)
-    await request(config, "DELETE", f"/data/{file_id}")
+    # Encoded and guarded: an id with a `?` or `#` would otherwise delete the object named by
+    # the part before it (issue #44).
+    await request(config, "DELETE", f"/data/{_file_id_segment(file_id)}")
 
 
 async def get_file_metadata(file_id_or_path: str, metadata_types: list[str]) -> dict[str, Any]:
@@ -1038,6 +1053,7 @@ async def get_file_metadata(file_id_or_path: str, metadata_types: list[str]) -> 
         invalid = ", ".join(invalid_types)
         raise ValueError(f"Unsupported metadata type(s): {invalid}. Supported types: {supported}")
 
+    file_segment = _file_id_segment(file_id)
     result: dict[str, Any] = {}
     for metadata_type in metadata_types:
         try:
@@ -1047,7 +1063,7 @@ async def get_file_metadata(file_id_or_path: str, metadata_types: list[str]) -> 
             response = await request(
                 config,
                 "GET",
-                f"/data/{file_id}/metadata/{metadata_type}",
+                f"/data/{file_segment}/metadata/{metadata_type}",
                 additional_headers=additional_headers,
             )
             result[metadata_type] = response["body"]
@@ -1075,6 +1091,8 @@ async def set_file_metadata(
 ) -> None:
     config = get_oneprovider_config()
     file_id = await _normalize_path_to_file_id(file_id_or_path)
+    file_segment = _file_id_segment(file_id)
+    type_segment = id_segment(metadata_type, "metadata type")
     additional_headers = (
         {"Content-Type": "application/rdf+xml"}
         if metadata_type == "rdf"
@@ -1083,7 +1101,7 @@ async def set_file_metadata(
     return await request(
         config,
         "PUT",
-        f"/data/{file_id}/metadata/{metadata_type}",
+        f"/data/{file_segment}/metadata/{type_segment}",
         body=metadata if isinstance(metadata, bytes) else metadata.encode("utf-8"),
         additional_headers=additional_headers,
     )
@@ -1118,7 +1136,7 @@ async def get_file_distribution(file_id_or_path: str) -> dict[str, Any]:
     """
     config = get_oneprovider_config()
     file_id = await _normalize_path_to_file_id(file_id_or_path)
-    response = await request(config, "GET", f"/data/{file_id}/distribution")
+    response = await request(config, "GET", f"/data/{_file_id_segment(file_id)}/distribution")
     return response["body"]
 
 

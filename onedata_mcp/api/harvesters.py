@@ -3,7 +3,7 @@ import json
 from typing import Any
 
 from onedata_mcp.config import get_onezone_config
-from onedata_mcp.utils import request
+from onedata_mcp.utils import id_segment, request
 
 
 def coerce_harvesters_index_query(query: dict[str, Any] | str) -> dict[str, Any]:
@@ -31,19 +31,27 @@ def coerce_harvesters_index_query(query: dict[str, Any] | str) -> dict[str, Any]
 
 async def get_user_harvester(harvester_id: str) -> dict[str, Any]:
     config = get_onezone_config()
-    response = await request(config, "GET", f"/user/harvesters/{harvester_id}")
+    response = await request(
+        config, "GET", f"/user/harvesters/{id_segment(harvester_id, 'harvester id')}"
+    )
     return response["body"]
 
 
 async def list_harvester_indices(harvester_id: str) -> list[str]:
     config = get_onezone_config()
-    response = await request(config, "GET", f"/harvesters/{harvester_id}/indices")
+    response = await request(
+        config, "GET", f"/harvesters/{id_segment(harvester_id, 'harvester id')}/indices"
+    )
     return response["body"]["indices"]
 
 
 async def get_harvester_index(harvester_id: str, index_id: str) -> dict[str, Any]:
     config = get_onezone_config()
-    response = await request(config, "GET", f"/harvesters/{harvester_id}/indices/{index_id}")
+    harvester_segment = id_segment(harvester_id, "harvester id")
+    index_segment = id_segment(index_id, "index id")
+    response = await request(
+        config, "GET", f"/harvesters/{harvester_segment}/indices/{index_segment}"
+    )
     return response["body"]
 
 
@@ -76,11 +84,13 @@ async def query_harvester_index(
     harvester_id: str, index_id: str, query: dict[str, Any] | str
 ) -> dict[str, Any]:
     config = get_onezone_config()
+    harvester_segment = id_segment(harvester_id, "harvester id")
+    index_segment = id_segment(index_id, "index id")
     body = coerce_harvesters_index_query(query)
     response = await request(
         config,
         "POST",
-        f"/harvesters/{harvester_id}/indices/{index_id}/query",
+        f"/harvesters/{harvester_segment}/indices/{index_segment}/query",
         json_body=body,
     )
     return response["body"]

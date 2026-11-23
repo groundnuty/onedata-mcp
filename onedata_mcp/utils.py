@@ -414,6 +414,48 @@ def _redacted_segment(segment: str, config: OnedataConfig) -> str:
     return segment if redacted == decoded else quote(redacted, safe="<>")
 
 
+# ---------------------------------------------------------------------------
+# An id (or another caller-supplied name) as one segment of a request path
+#
+# A tool's id argument goes into the path of a REST request (`/data/<id>/...`,
+# `/transfers/<id>`). Unencoded, a `?` or `#` in it cuts the request path short, so the call
+# acts on the object named by the part before it (for `delete_file`, the wrong object is
+# deleted); a `/` adds segments; and the HTTP client resolves a `.` or `..` segment (`/data/..`
+# is the API root). Every such value goes through `id_segment`.
+# ---------------------------------------------------------------------------
+
+_ID_SHOWN_MAX = 80
+
+
+def _shown_value(value: str) -> str:
+    """The value as echoed in an error: quoted, and cut short if it is long."""
+    if len(value) <= _ID_SHOWN_MAX:
+        return repr(value)
+    return repr(value[:_ID_SHOWN_MAX]) + "..."
+
+
+def id_segment(value: str, what: str = "id", *, hint: str = "") -> str:
+    """`value` as ONE percent-encoded segment of a request path.
+
+    Refused with a ValueError, before any request: a blank value, `.` or `..` (judged on the
+    stripped value), and anything holding a `/` (an id has none: it is a path, and a path must
+    start with '/'). Everything else is encoded with `quote(value, safe="")` and sent as
+    given, not stripped, so the URL of an ordinary id is the id itself. `what` names the value
+    in the error (`file id`, `transfer id`); `hint` is appended to it, to say what to give.
+    """
+    tail = f" {hint}" if hint else ""
+    if not value.strip():
+        raise ValueError(f"{what} is empty.{tail}")
+    if value.strip() in {".", ".."}:
+        raise ValueError(f"{what} {_shown_value(value)} cannot name an object.{tail}")
+    if "/" in value:
+        raise ValueError(
+            f"{what} {_shown_value(value)} contains '/': an id has none, and a path must "
+            f"start with '/'.{tail}"
+        )
+    return quote(value, safe="")
+
+
 def http_failure_message(
     config: OnedataConfig,
     method: str,

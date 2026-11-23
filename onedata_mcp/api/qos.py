@@ -15,15 +15,15 @@ from __future__ import annotations
 
 import re
 from typing import Any
-from urllib.parse import quote
 
-from onedata_mcp.api.files import _file_id_parts, _normalize_path_to_file_id
+from onedata_mcp.api.files import _file_id_parts, _file_id_segment, _normalize_path_to_file_id
 from onedata_mcp.api.transfers import _providers_of_space, _providers_sentence
 from onedata_mcp.config import OnedataConfig, get_oneprovider_config
 from onedata_mcp.utils import (
     OnedataApiError,
     bound_message,
     http_failure_message,
+    id_segment,
     redact_endpoints,
     request,
 )
@@ -43,7 +43,7 @@ async def get_file_qos_summary(file_id_or_path: str) -> dict[str, Any]:
     """
     config = get_oneprovider_config()
     file_id = await _normalize_path_to_file_id(file_id_or_path)
-    response = await request(config, "GET", f"/data/{file_id}/qos/summary")
+    response = await request(config, "GET", f"/data/{_file_id_segment(file_id)}/qos/summary")
     return response["body"]
 
 
@@ -176,7 +176,9 @@ async def get_qos_requirement(qos_id: str) -> dict[str, Any]:
     qos_id = _clean_qos_id(qos_id)
     config = get_oneprovider_config()
     # Percent-encoded, as in remove_qos_requirement: a `?` or `#` would otherwise cut the path.
-    response = await request(config, "GET", f"/qos_requirements/{quote(qos_id, safe='')}")
+    response = await request(
+        config, "GET", f"/qos_requirements/{id_segment(qos_id, 'QoS requirement id')}"
+    )
     return response["body"]
 
 
@@ -315,7 +317,7 @@ async def remove_qos_requirement(qos_id: str) -> None:
     """
     qos_id = _clean_qos_id(qos_id)
     config = get_oneprovider_config()
-    path = f"/qos_requirements/{quote(qos_id, safe='')}"
+    path = f"/qos_requirements/{id_segment(qos_id, 'QoS requirement id')}"
     try:
         response = await request(config, "DELETE", path)
     except OnedataApiError as error:
