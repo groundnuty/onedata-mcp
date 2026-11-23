@@ -29,7 +29,7 @@ RECORDED_SURFACES: Mapping[frozenset[str], tuple[str, str]] = {
     ),
     frozenset(K2_TOOLS): (
         "K2",
-        "7d8e4d80657e1d96718c4768eca26c07779d17e4f681c60a56c342f108016ee9",
+        "b61a0fe00c063fe734c3c91da76e01cf93746a8b4bc7e8d3d71c93d09f7ad7e4",
     ),
     frozenset(FILE_TOOLS): (
         "FILE_TOOLS",

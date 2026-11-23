@@ -425,6 +425,17 @@ def _qos_attachment(ctx: K2Context, qos_id: str) -> str | None:
             path = resolve_target(ctx, c.arguments.get("file_id_or_path"))
             if path is not None and _inside(path, ctx.directory):
                 return f"made inside the trial (call {c.index})"
+    # A hold ensure_readiness placed: its answer lists the ids (`held.qos_requirement_ids`),
+    # and each is on a file of its extent, so it is inside when every target of that extent is.
+    for c in successful(ctx, "ensure_readiness"):
+        answer = _json(c.result_text)
+        held = answer.get("held") if isinstance(answer, dict) else None
+        ids = held.get("qos_requirement_ids") if isinstance(held, dict) else None
+        if not isinstance(ids, list) or qos_id not in ids:
+            continue
+        targets = _extent_targets(c.arguments.get("extent"))
+        if targets and all(_inside(_norm_path(t), ctx.directory) for t in targets):
+            return f"a hold ensure_readiness placed inside the trial (call {c.index})"
     return None
 
 

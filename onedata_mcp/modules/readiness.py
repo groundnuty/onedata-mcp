@@ -34,15 +34,25 @@ CHECK_DESCRIPTION = (
 )
 
 ENSURE_DESCRIPTION = (
-    "Make the data your analysis needs ready at your provider, and keep them there for your "
-    "run. "
+    "Make the data your analysis needs ready at your provider, and keep them there. "
     + EXTENT_SENTENCE
     + " `deadline_s` is how long you can wait. The system chooses where to copy from and "
-    "waits for unfinished writes and transfers. The answer is ready (the data are complete "
-    "and readable at your provider now, and held there), or not ready with the reason. One "
-    "call waits at most about 4 minutes; if the answer is not ready because data are being "
-    "written or in transfer, call it again."
+    "waits for unfinished writes and transfers. Each file is held by a QoS requirement that "
+    "keeps it at your provider until that requirement is removed by its id; the answer lists "
+    "the ids. The answer is ready (the data are complete and readable at your provider now, "
+    "and held there), or not ready with the reason. One call waits at most about 2.5 "
+    "minutes; if the answer is not ready because data are being written or in transfer, "
+    "call it again."
 )
+
+# A concrete `extent`, so that a model need not guess its shape (one guessed
+# `{space, paths, date_from, date_to}`). Each item shows one of the two dataset forms.
+EXTENT_EXAMPLE = (
+    '[{"dataset": "my-dataset", "files": ["data_20180801.nc"]}, '
+    '{"dataset": "/my-dataset/sub/dir", '
+    '"date_ranges": [{"start": "2018-06-01", "end": "2018-08-31"}]}]'
+)
+EXTENT_FIELD_DESCRIPTION = "The data you need: one item per dataset. Example: " + EXTENT_EXAMPLE
 
 
 class DateRange(BaseModel):
@@ -105,7 +115,7 @@ def register_module(mcp: FastMCP) -> None:
     )
     async def mcp_check_readiness(
         extent: list[ExtentItem] = Field(
-            description="The data you need: one item per dataset",
+            description=EXTENT_FIELD_DESCRIPTION,
             min_length=1,
             max_length=MAX_EXTENT_ITEMS,
         ),
@@ -119,7 +129,7 @@ def register_module(mcp: FastMCP) -> None:
     )
     async def mcp_ensure_readiness(
         extent: list[ExtentItem] = Field(
-            description="The data you need: one item per dataset",
+            description=EXTENT_FIELD_DESCRIPTION,
             min_length=1,
             max_length=MAX_EXTENT_ITEMS,
         ),

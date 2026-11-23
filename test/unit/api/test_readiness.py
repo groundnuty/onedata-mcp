@@ -4,7 +4,7 @@ The pure rules are tested directly. The tools are tested against one stateful fa
 Oneprovider + Onezone behind pytest-httpx, answering in the shapes of Onedata 25.0
 (oneprovider-swagger: data_reg_distribution, recursive_file_list, qos_requirement,
 transfer_status; onezone-swagger: providerdetails). Time runs on a fake clock, so a
-240 s wait takes no real time.
+150 s wait takes no real time.
 """
 
 from __future__ import annotations
@@ -472,6 +472,11 @@ def patch_listing(fed: Fed, change: Callable[[dict], dict]) -> None:
     fed._listing = lambda root_id, body: httpx.Response(  # type: ignore[method-assign]
         200, json=change(json.loads(original(root_id, body).content))
     )
+
+
+def held_summary(result: dict) -> dict:
+    """`held` without its rule ids (tested on their own below)."""
+    return {k: v for k, v in result["held"].items() if k in ("files", "rule")}
 
 
 def extent(**item) -> list[dict]:
@@ -1365,7 +1370,13 @@ async def test_ensure_places_one_rule_per_file_waits_and_turns_ready(
             "and held there."
         ),
         "waited_s": 10,
-        "held": {"files": 3, "rule": HOLD},
+        "held": {
+            "files": 3,
+            "rule": HOLD,
+            "qos_requirement_ids": [  # in the files' path order
+                next(q for q, r in fed.rules.items() if r["fileId"] == f.fid) for f in (a, b, c)
+            ],
+        },
     }
     assert sorted(r["fileId"] for r in fed.rule_bodies()) == sorted([a.fid, b.fid, c.fid])
     assert {json.dumps(r, sort_keys=True) for r in fed.rule_bodies()} == {
@@ -1397,7 +1408,7 @@ async def test_ensure_does_not_place_a_second_rule_for_a_file_it_already_holds(f
     result = await ensure()
 
     assert len(fed.rules) == 3
-    assert result["held"] == {"files": 3, "rule": HOLD}
+    assert held_summary(result) == {"files": 3, "rule": HOLD}
 
 
 @pytest.mark.asyncio
@@ -1413,11 +1424,11 @@ async def test_ensure_returns_not_ready_at_the_wait_cap_with_the_reason(
     result = await ensure(deadline_s=3600)
 
     assert result["ready"] is False
-    assert result["waited_s"] == 240  # the cap, not the 3600 s the agent offered
+    assert result["waited_s"] == 150  # the cap, not the 3600 s the agent offered
     assert result["not_ready"]["being_written"]["files"] == 14
-    assert result["held"] == {"files": 16, "rule": HOLD}
+    assert held_summary(result) == {"files": 16, "rule": HOLD}
     assert result["advice"] == (
-        "Not ready after 240 s: 14 files are still being written at their owner. "
+        "Not ready after 150 s: 14 files are still being written at their owner. "
         "Call again to keep waiting."
     )
     assert clock.elapsed <= readiness.MAX_WAIT_DEFAULT_S + readiness.ENSURE_GRACE_S
@@ -1447,11 +1458,11 @@ async def test_ensure_the_wait_cap_comes_from_the_environment(
 
 
 @pytest.mark.parametrize("raw", ["", "abc", "0", "-5"])
-def test_wait_cap_falls_back_to_240_on_a_bad_value(
+def test_wait_cap_falls_back_to_150_on_a_bad_value(
     monkeypatch: pytest.MonkeyPatch, raw: str
 ) -> None:
     monkeypatch.setenv(readiness.MAX_WAIT_ENV, raw)
-    assert readiness.max_wait_s() == 240
+    assert readiness.max_wait_s() == 150
 
 
 @pytest.mark.parametrize("bad", [0, -1, 86_401, True, 1.5, "60", None])
@@ -1470,7 +1481,7 @@ async def test_ensure_falls_back_to_the_plain_expression_on_a_400(fed: Fed) -> N
     result = await ensure()
 
     assert result["ready"] is True
-    assert result["held"] == {"files": 5, "rule": HOLD_PLAIN}
+    assert held_summary(result) == {"files": 5, "rule": HOLD_PLAIN}
     assert [r["expression"] for r in fed.rule_bodies()] == [HOLD_PLAIN] * 5
     posts = [e for e in fed.requests if e == ("POST", "/api/v3/oneprovider/qos_requirements")]
     assert (
@@ -1511,7 +1522,7 @@ async def test_ensure_reports_hold_failed_and_holds_the_rest(fed: Fed) -> None:
     result = await ensure()
 
     assert result["ready"] is True  # the data are there; they are just not protected
-    assert result["held"] == {"files": 2, "rule": HOLD}
+    assert held_summary(result) == {"files": 2, "rule": HOLD}
     assert result["hold_failed"] == {"files": 1, "examples": [bad.path]}
     assert result["advice"] == (
         "Ready: all declared files are complete and readable at your provider now. "
@@ -1544,7 +1555,7 @@ async def test_ensure_a_failed_hold_is_retried_by_the_next_call(fed: Fed) -> Non
     result = await ensure()
 
     assert "hold_failed" not in result
-    assert result["held"] == {"files": 1, "rule": HOLD}
+    assert held_summary(result) == {"files": 1, "rule": HOLD}
     assert fed.rule_bodies()[0]["fileId"] == f.fid
 
 
@@ -1604,7 +1615,7 @@ async def test_ensure_unresolved_items_are_reported_and_the_rest_is_still_held(f
 
     assert result["ready"] is False
     assert result["unresolved"] == [file_not_found("missing.nc")]
-    assert result["held"] == {"files": 1, "rule": HOLD}
+    assert held_summary(result) == {"files": 1, "rule": HOLD}
     assert result["advice"].startswith("Not ready after 0 s: 1 declared item was not resolved")
 
 
@@ -1615,7 +1626,7 @@ async def test_ensure_nothing_resolved_places_nothing(fed: Fed) -> None:
     result = await readiness.ensure_readiness([{"dataset": "nope"}], 60)
 
     assert result["ready"] is False
-    assert result["held"] == {"files": 0, "rule": HOLD}
+    assert held_summary(result) == {"files": 0, "rule": HOLD}
     assert fed.rules == {}
 
 
@@ -1878,7 +1889,7 @@ async def test_ensure_an_empty_file_is_confirmed_and_stays_ready_through_the_fin
     result = await ensure()
 
     assert result["ready"] is True
-    assert result["held"] == {"files": 2, "rule": HOLD}
+    assert held_summary(result) == {"files": 2, "rule": HOLD}
 
 
 @pytest.mark.asyncio
@@ -2477,7 +2488,7 @@ async def test_ensure_creates_again_a_rule_that_was_removed_since_the_last_call(
 
     result = await ensure()
 
-    assert result["held"] == {"files": 1, "rule": HOLD}
+    assert held_summary(result) == {"files": 1, "rule": HOLD}
     assert [r["fileId"] for r in fed.rules.values()] == [f.fid]  # created again, and really there
 
 
@@ -2490,7 +2501,7 @@ async def test_ensure_does_not_claim_a_hold_it_could_neither_confirm_nor_recreat
 
     result = await ensure()
 
-    assert result["held"] == {"files": 0, "rule": HOLD}
+    assert held_summary(result) == {"files": 0, "rule": HOLD}
     assert result["hold_failed"] == {"files": 1, "examples": [f.path]}
 
 
@@ -2509,7 +2520,7 @@ async def test_ensure_confirms_each_remembered_rule_by_reading_it_and_creates_no
     posts = [p for m, p in fed.requests if m == "POST" and p.endswith("/qos_requirements")]
     assert len(reads) == 6  # each rule read back when placing, and again in the final pass
     assert posts == []
-    assert result["held"] == {"files": 3, "rule": HOLD}
+    assert held_summary(result) == {"files": 3, "rule": HOLD}
 
 
 @pytest.mark.asyncio
@@ -2750,7 +2761,7 @@ async def test_ensure_the_final_pass_confirms_every_held_rule_and_counts_only_th
 
     reads = [p for m, p in fed.requests if m == "GET" and "/qos_requirements/" in p]
     assert len(reads) == 3  # created in this call, then read back in the final pass
-    assert result["held"] == {"files": 3, "rule": HOLD}
+    assert held_summary(result) == {"files": 3, "rule": HOLD}
 
 
 @pytest.mark.asyncio
@@ -2772,7 +2783,7 @@ async def test_ensure_a_rule_that_vanishes_before_the_answer_is_not_counted_as_h
     result = await ensure()
 
     assert result["ready"] is True  # the data are there; they are no longer protected
-    assert result["held"] == {"files": 0, "rule": HOLD}
+    assert held_summary(result) == {"files": 0, "rule": HOLD}
     assert result["hold_failed"] == {"files": 1, "examples": [a.path]}
 
 
@@ -2990,7 +3001,7 @@ async def test_ensure_a_hanging_provider_configuration_read_answers_not_ready_an
     assert time.monotonic() - started < 5
     assert result["ready"] is False
     assert result["advice"].startswith("Not ready after 1 s: provider configuration unavailable")
-    assert result["held"] == {"files": 0, "rule": "providerId=<local provider> & anyStorage"}
+    assert held_summary(result) == {"files": 0, "rule": "providerId=<local provider> & anyStorage"}
     assert fed.rules == {}
 
 
@@ -3239,3 +3250,86 @@ def test_no_answer_text_names_a_tool() -> None:
     texts += [readiness._config_unavailable()["advice"], readiness._config_unavailable(3)["advice"]]
     for text in texts:
         assert not re.search(r"\b\w+_readiness\b|\b[a-z]+_[a-z_]+\(", text), text
+
+
+# ---------------------------------------------------------------------------
+# The operator's decisions (design/18): a call that ends under a common client timeout, and
+# holds that can be released by their ids.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_default_ensure_call_ends_under_a_180_s_client_timeout(
+    fed: Fed, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One wait of at most 150 s, and the whole call within 170 s. (On the fake, requests in
+    flight at a cut-off add their latency to one clock: the slow-server test above allows for
+    that; this one takes none.)"""
+    monkeypatch.setattr(readiness, "POLL_INTERVAL_S", 30.0)
+    for i in range(20):
+        fed.add(f"data_201808{i + 10:02d}.nc", 100, owner="half")
+
+    result = await ensure(deadline_s=86_400)
+
+    assert readiness.MAX_WAIT_DEFAULT_S + readiness.ENSURE_GRACE_S == 170
+    assert result["waited_s"] <= 150
+    assert clock.elapsed <= 170 < 180
+
+
+@pytest.mark.asyncio
+async def test_the_answer_lists_the_ids_of_the_holds_in_path_order(fed: Fed) -> None:
+    for rel in ("c.nc", "a.nc", "b.nc"):
+        fed.add(rel, 100, local="full", owner="full")
+
+    first = await ensure()
+    again = await ensure()  # nothing is created: the remembered rules are read back
+
+    by_file = {rule["fileId"]: qid for qid, rule in fed.rules.items()}
+    want = [by_file[fed.by_rel(rel).fid] for rel in ("a.nc", "b.nc", "c.nc")]
+    assert first["held"]["qos_requirement_ids"] == want
+    assert again["held"]["qos_requirement_ids"] == want
+    assert len(fed.rules) == 3
+    assert "qos_requirement_ids_not_shown" not in first["held"]
+
+
+@pytest.mark.asyncio
+async def test_a_file_whose_hold_failed_has_no_id_in_the_answer(fed: Fed) -> None:
+    fed.add("a.nc", 100, local="full", owner="full")
+    bad = fed.add("b.nc", 100, local="full", owner="full")
+    fed.qos_status = lambda fid, expression: 403 if fid == bad.fid else 201
+
+    result = await ensure()
+
+    (only,) = fed.rules
+    assert result["held"]["qos_requirement_ids"] == [only]
+    assert result["hold_failed"]["examples"] == [bad.path]
+
+
+@pytest.mark.asyncio
+async def test_the_ids_shown_are_capped_and_the_rest_counted(
+    fed: Fed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(readiness, "MAX_HOLD_IDS_SHOWN", 2)
+    for i in range(5):
+        fed.add(f"f{i}.nc", 100, local="full", owner="full")
+
+    result = await ensure()
+
+    assert result["held"]["files"] == 5
+    assert len(result["held"]["qos_requirement_ids"]) == 2
+    assert result["held"]["qos_requirement_ids_not_shown"] == 3
+
+
+@pytest.mark.asyncio
+async def test_a_hold_that_vanished_before_the_answer_is_not_listed(fed: Fed) -> None:
+    fed.add("a.nc", 100, local="full", owner="full")
+    fed.add("b.nc", 100, local="full", owner="full")
+    await ensure()
+    gone = next(iter(fed.rules))
+    real = fed._qos_get
+    fed._qos_get = lambda qid: _error(404, "notFound") if qid == gone else real(qid)  # type: ignore[method-assign]
+
+    result = await ensure()
+
+    assert gone not in result["held"]["qos_requirement_ids"]
+    assert held_summary(result)["files"] == len(result["held"]["qos_requirement_ids"])

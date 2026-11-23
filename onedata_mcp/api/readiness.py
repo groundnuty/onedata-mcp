@@ -58,10 +58,12 @@ logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_S = 5.0
 CHECK_BUDGET_S = 60.0  # check_readiness ends within this
-MAX_WAIT_DEFAULT_S = 240  # one ensure_readiness call waits at most this (env below) ...
-MAX_WAIT_CAP_S = 240  # ... and never more, whatever the env says: the harness bounds a call
+# One ensure_readiness call waits at most this (env below). With the grace, the whole call
+# ends within 170 s, under the ~180 s a common MCP client allows a call (design/18).
+MAX_WAIT_DEFAULT_S = 150
+MAX_WAIT_CAP_S = 240  # never more, whatever the env says: the harness bounds a call at 300 s
 MAX_WAIT_ENV = "ONEDATA_MCP_ENSURE_MAX_WAIT_S"
-ENSURE_GRACE_S = 30.0  # the whole ensure call ends within max wait + this
+ENSURE_GRACE_S = 20.0  # the whole ensure call ends within max wait + this
 CLASSIFY_RESERVE_S = 20.0  # tail of an ensure call kept for the final classification
 MAX_DEADLINE_S = 86_400
 MAX_EXTENT_ITEMS = 20
@@ -74,6 +76,7 @@ PLACE_CONCURRENCY = 8
 MAX_TRANSFERS = 50
 MAX_EXAMPLES = 3
 MAX_UNRESOLVED_SHOWN = 10
+MAX_HOLD_IDS_SHOWN = 100  # ids of the holds an answer lists; the rest are counted
 
 # The fixed expression form is the tag that marks this tool's placement rules.
 HOLD_EXPRESSION = "providerId={provider_id} & anyStorage"
@@ -119,7 +122,7 @@ def reset_state() -> None:
 
 
 def max_wait_s() -> float:
-    """How long one ensure call waits at most: the env value, else 240 s, never above 240 s."""
+    """How long one ensure call waits at most: the env value, else 150 s, never above 240 s."""
     raw = os.environ.get(MAX_WAIT_ENV, "").strip()
     if raw:
         try:
@@ -1225,6 +1228,14 @@ class _Hold:
     def held(self) -> int:
         return len(self.held_ids)
 
+    def ids(self, files: list[FileInfo]) -> list[str]:
+        """The ids of the rules that hold the files, in the files' path order."""
+        return [
+            _rules[f.file_id]
+            for f in sorted(files, key=lambda f: f.path)
+            if f.file_id in self.held_ids and f.file_id in _rules
+        ]
+
 
 def _examples(files: Iterable[FileInfo]) -> list[str]:
     return sorted(f.path for f in files)[:MAX_EXAMPLES]
@@ -1276,7 +1287,16 @@ def _answer(
     )
     if hold is not None:
         answer["waited_s"] = waited_s
-        answer["held"] = {"files": hold.held, "rule": hold.expression}
+        ids = hold.ids(files)
+        # Each id is a QoS requirement that keeps its file here until it is removed: the
+        # answer says which, so the holds can be released (design/18, decision 3).
+        answer["held"] = {
+            "files": hold.held,
+            "rule": hold.expression,
+            "qos_requirement_ids": ids[:MAX_HOLD_IDS_SHOWN],
+        }
+        if len(ids) > MAX_HOLD_IDS_SHOWN:
+            answer["held"]["qos_requirement_ids_not_shown"] = len(ids) - MAX_HOLD_IDS_SHOWN
         if hold.failed:
             answer["hold_failed"] = {"files": len(hold.failed), "examples": _examples(hold.failed)}
     return answer
@@ -1307,7 +1327,11 @@ def _config_unavailable(waited_s: int | None = None) -> dict[str, Any]:
         "be placed or checked. Call again."
     )
     answer["waited_s"] = waited_s
-    answer["held"] = {"files": 0, "rule": HOLD_EXPRESSION.format(provider_id="<local provider>")}
+    answer["held"] = {
+        "files": 0,
+        "rule": HOLD_EXPRESSION.format(provider_id="<local provider>"),
+        "qos_requirement_ids": [],
+    }
     return answer
 
 
@@ -1503,7 +1527,8 @@ async def ensure_readiness(extent: Sequence[Mapping[str, Any]], deadline_s: int)
 
     One call waits at most `min(deadline_s, max_wait_s())`, counted from the call's start
     (resolving and placing use up part of it), and the whole call ends within
-    `max_wait_s() + ENSURE_GRACE_S`, with `max_wait_s()` never above 240 s. On one clock:
+    `max_wait_s() + ENSURE_GRACE_S` (170 s by default), with `max_wait_s()` never above
+    240 s. On one clock:
     resolve, place, poll, re-confirm, classify, answer.
     """
     if (

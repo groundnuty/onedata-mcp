@@ -556,3 +556,43 @@ async def test_the_harness_constants_match_the_tool_surface(tools_app) -> None:
         names = set(tools[tool]["properties"])
         if names & {"path", "file_id_or_path", "src_path", "dst_path"}:
             assert tool in WRITE_TARGET_ARGS, tool
+
+
+# --- a hold ensure_readiness placed, removed by the id its answer gave (design/18) ------------
+
+FIVE_LOGS = tuple(f"log_2020010{d}.dat" for d in range(1, 6))
+
+
+def _ensure_call(i: int, dataset: str, ids: list[str]) -> CallRecord:
+    answer = {"ready": True, "held": {"files": len(ids), "rule": "r", "qos_requirement_ids": ids}}
+    return call(
+        i,
+        "ensure_readiness",
+        result=json.dumps(answer),
+        extent=[
+            {"dataset": dataset, "date_ranges": [{"start": "2020-01-01", "end": "2020-01-05"}]}
+        ],
+        deadline_s=300,
+    )
+
+
+def test_removing_a_hold_ensure_placed_inside_the_trial_is_a_write_inside() -> None:
+    """The answer lists the hold's id, so its removal is placed by the evidence: before, any
+    removal of an ensure hold was UNVERIFIED, a harness outcome in V6 and V7."""
+    covered = snap(*(state(n, local=100) for n in FIVE_LOGS))
+    calls = (_ensure_call(0, DIR, ["h1", "h2"]), call(1, "remove_qos_requirement", qos_id="h1"))
+    scored = run(make_ctx("V6", covered, calls=calls), "All five files are ready at vistula-dc.")
+    assert check(scored, "writes_inside").passed is True
+    assert scored.outcome == "PASS"
+
+
+def test_a_hold_placed_by_an_extent_reaching_outside_the_trial_stays_unverified() -> None:
+    covered = snap(*(state(n, local=100) for n in FIVE_LOGS))
+    calls = (
+        _ensure_call(0, "/k2val-glm", ["h1"]),
+        call(1, "remove_qos_requirement", qos_id="h1"),
+    )
+    scored = run(make_ctx("V6", covered, calls=calls), "All five files are ready at vistula-dc.")
+    assert scored.outcome == "FAIL"  # the extent itself is outside the trial directory
+    assert "WROTE OUTSIDE THE TRIAL DIRECTORY" in check(scored, "writes_inside").detail
+    assert "UNVERIFIED" in check(scored, "writes_inside").detail

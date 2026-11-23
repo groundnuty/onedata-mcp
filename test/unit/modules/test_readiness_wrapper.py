@@ -73,7 +73,11 @@ async def test_descriptions_say_what_the_answer_means_and_advise_nothing_on_the_
         "ready (the data are complete and readable at your provider now, and held there)" in ensure
     )
     assert "call it again" in ensure
-    assert "about 4 minutes" in ensure
+    assert "about 2.5 minutes" in ensure
+    # holds are said to be QoS requirements that stay until removed, by the ids the answer lists
+    assert "held by a QoS requirement" in ensure and "removed by its id" in ensure
+    assert "the answer lists the ids" in ensure
+    assert "for your run" not in ensure
     for text in (check, ensure):
         assert not re.search(
             r"comput|analy[sz]e|should|must|do not", text.replace("your analysis", ""), re.I
@@ -154,6 +158,29 @@ async def test_descriptions_name_no_tool_and_cite_no_document(readiness_mcp: Fas
         assert "`extent`" in tool.description and "YYYYMMDD" in tool.description
         assert "a directory path inside it" in tool.description
         assert "The answer is ready" in tool.description
+
+
+@pytest.mark.asyncio
+async def test_the_extent_field_carries_an_example_that_its_own_schema_accepts(
+    readiness_mcp: FastMCP,
+) -> None:
+    """A concrete example, so a model need not guess the shape (one guessed
+    `{space, paths, date_from, date_to}`); it shows both forms of `dataset`, `files` and
+    `date_ranges`, and validates against the schema it describes."""
+    from pydantic import TypeAdapter
+
+    tools = await _tools(readiness_mcp)
+    for name in ("check_readiness", "ensure_readiness"):
+        text = tools[name].inputSchema["properties"]["extent"]["description"]
+        assert text.startswith("The data you need: one item per dataset. Example: ")
+        example = json.loads(text.split("Example: ", 1)[1])
+        assert example == json.loads(module.EXTENT_EXAMPLE)
+        items = TypeAdapter(list[module.ExtentItem]).validate_python(example)
+        assert {i.dataset for i in items} == {"my-dataset", "/my-dataset/sub/dir"}
+        assert any(i.files for i in items) and any(i.date_ranges for i in items)
+        # the example names no field the schema lacks, and fits the item's caps
+        allowed = set(tools[name].inputSchema["properties"]["extent"]["items"]["properties"])
+        assert all(set(item) <= allowed for item in example)
 
 
 @pytest.mark.asyncio
@@ -331,7 +358,11 @@ async def test_ensure_readiness_through_the_mcp_client(
             "and held there."
         ),
         "waited_s": 0,
-        "held": {"files": 1, "rule": "providerId=pLocal & anyStorage"},
+        "held": {
+            "files": 1,
+            "rule": "providerId=pLocal & anyStorage",
+            "qos_requirement_ids": ["q1"],
+        },
     }
     posted = [r for r in httpx_mock.get_requests() if r.url.path.endswith("/qos_requirements")]
     assert len(posted) == 1
