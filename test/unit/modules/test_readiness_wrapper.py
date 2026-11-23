@@ -485,3 +485,42 @@ async def test_a_host_that_offers_fewer_tools_than_registered_is_believed(
         OFFERED_TOOLS.reset(token)
 
     assert "ensure_readiness" not in result["advice"]
+
+
+# --- External review (design/17, design/18): reproduced first, then fixed --------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"dataset": "my-dataset", "files": None},
+        {"dataset": "my-dataset", "date_ranges": None},
+        {"dataset": "my-dataset", "files": []},
+        {"dataset": "my-dataset", "date_ranges": []},
+    ],
+    ids=["files-null", "date_ranges-null", "files-empty", "date_ranges-empty"],
+)
+@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
+async def test_review_an_explicitly_empty_selector_is_refused_through_the_mcp_client(
+    readiness_mcp: FastMCP, item: dict
+) -> None:
+    """Codex 1, Gemini 4: an explicit `null` was dropped on the way in (it read as left out,
+    the whole dataset), and `[]` too. Both are refused before any request, with a hint."""
+    for tool, extra in (("check_readiness", {}), ("ensure_readiness", {"deadline_s": 60})):
+        async with Client(readiness_mcp) as client:
+            with pytest.raises(ToolError, match=r"extent\[0\]\.(?:files|date_ranges) is"):
+                await client.call_tool(tool, {"extent": [item], **extra})
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
+async def test_review_an_unknown_field_through_the_mcp_client_lists_the_valid_fields(
+    readiness_mcp: FastMCP,
+) -> None:
+    """Gemini 11: the schema's own refusal ("Extra inputs are not permitted") came first and
+    did not say which fields an item has."""
+    item = {"dataset": "x", "paths": ["a.nc"]}
+    async with Client(readiness_mcp) as client:
+        with pytest.raises(ToolError, match=r"its fields are dataset, files, date_ranges"):
+            await client.call_tool("check_readiness", {"extent": [item]})

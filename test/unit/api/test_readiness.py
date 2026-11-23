@@ -3500,3 +3500,161 @@ def test_only_the_offered_tool_is_ever_named() -> None:
     assert named == {"ensure_readiness"}
     # ensure's own answer never points to itself
     assert all("ensure_readiness" not in t for t in texts[len(readiness.REASONS) :])
+
+
+# ---------------------------------------------------------------------------
+# External review (design/17, design/18, "External review"): each BLOCKING finding, reproduced
+# here first, then fixed. Each test names its finding.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "item",
+    [{"files": []}, {"date_ranges": []}, {"files": None}, {"date_ranges": None}],
+    ids=["files-empty", "date_ranges-empty", "files-null", "date_ranges-null"],
+)
+@pytest.mark.asyncio
+@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
+async def test_review_an_explicitly_empty_selector_is_refused_not_read_as_the_whole_dataset(
+    fed: Fed, item: dict
+) -> None:
+    """Codex 1, Gemini 4: `files: []` (an empty search result passed on) held every file."""
+    fed.add("a.nc", 100, owner="full")
+    fed.add("b.nc", 100, owner="full")
+
+    with pytest.raises(ValueError, match=r"is empty|is null"):
+        await readiness.ensure_readiness(extent(**item), 60)
+    assert fed.rules == {}
+    assert fed.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
+async def test_review_a_basename_matching_two_files_is_refused_and_neither_is_held(
+    fed: Fed,
+) -> None:
+    """Codex 1, Gemini 5: a name with no "/" matched every file of that name, at any depth."""
+    current = fed.add("current/log.dat", 100, owner="full")
+    archive = fed.add("archive/log.dat", 100, owner="full")
+
+    result = await ensure(deadline_s=5, files=["log.dat"])
+
+    assert fed.rules == {}
+    assert result["ready"] is False and result["files"] == 0
+    (text,) = result["unresolved"]
+    assert archive.path in text and current.path in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
+async def test_review_a_space_name_equal_to_another_space_id_is_refused_as_ambiguous(
+    fed: Fed,
+) -> None:
+    """Codex 2: the first space whose name OR id matched won; a space named like another's id
+    was never reached, and its caller held the other space's files."""
+    fed.add("a.nc", 100, owner="full")
+    fed.spaces.append({"name": SPACE_ID, "spaceId": "s2", "providers": []})
+
+    result = await readiness.ensure_readiness([{"dataset": SPACE_ID}], 5)
+
+    assert fed.rules == {}
+    (text,) = result["unresolved"]
+    assert SPACE in text and "s2" in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
+async def test_review_a_space_given_by_id_is_not_looked_up_by_a_name_two_spaces_share(
+    fed: Fed,
+) -> None:
+    """Codex 2: a space given by its id was looked up again by its name, which another space
+    may share: the lookup then reaches whichever space the provider takes for that name."""
+    fed.add("a.nc", 100, local="full", owner="full")
+    fed.spaces.append({"name": SPACE, "spaceId": "s2", "providers": []})
+
+    await readiness.check_readiness([{"dataset": SPACE_ID}])
+
+    by_name = f"/api/v3/oneprovider/lookup-file-id/%2F{SPACE}"
+    assert not [p for m, p in fed.requests if m == "POST" and unquote(p) == unquote(by_name)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
+async def test_review_a_rule_read_back_while_the_provider_fails_is_not_placed_twice(
+    fed: Fed,
+) -> None:
+    """Codex 6, Gemini 12: a read-back that failed (a 500) was taken for a rule that is gone,
+    and a second rule was placed beside the first."""
+    fed.add("a.nc", 100, local="full", owner="full")
+    await ensure()
+    (first,) = fed.rules
+    fed.qos_get_override = lambda qid: _error(500, "internalServerError")
+
+    await ensure(deadline_s=5)
+
+    assert list(fed.rules) == [first]
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
+async def test_review_a_read_back_that_names_another_file_does_not_confirm_the_hold(
+    fed: Fed,
+) -> None:
+    """Codex 6: a matching rule id confirmed the hold even when the answer named another file."""
+    f = fed.add("a.nc", 100, local="full", owner="full")
+    readiness._rules[f.fid] = "q-remembered"
+    fed.qos_get_override = lambda qid: httpx.Response(
+        200, json={"qosRequirementId": qid, "fileId": "another-file", "status": "fulfilled"}
+    )
+
+    result = await ensure(deadline_s=5)
+
+    assert result["held"]["files"] == 0
+    assert "q-remembered" not in result["held"]["qos_requirement_ids"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
+async def test_review_two_concurrent_ensures_place_one_hold_and_report_the_same_id(
+    fed: Fed,
+) -> None:
+    """Codex 6: two calls at once both missed the remembered rule, both placed one, and both
+    reported the second id while the first rule stayed."""
+    fed.add("a.nc", 100, local="full", owner="full")
+
+    first, second = await asyncio.gather(ensure(deadline_s=5), ensure(deadline_s=5))
+
+    assert len(fed.rules) == 1
+    (only,) = fed.rules
+    assert first["held"]["qos_requirement_ids"] == second["held"]["qos_requirement_ids"] == [only]
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
+async def test_review_ensure_is_not_ready_when_no_hold_was_placed(fed: Fed) -> None:
+    """Codex 7, Gemini 9: complete and readable here, every hold refused, and the answer
+    began "Ready: ... and held there" with `ready: true`."""
+    fed.add("a.nc", 100, local="full", owner="full")
+    fed.qos_status = lambda fid, expression: 403
+
+    result = await ensure(deadline_s=5)
+
+    assert result["held"]["files"] == 0
+    assert result["ready"] is False
+    assert not result["advice"].startswith("Ready")
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
+async def test_review_the_advice_states_every_reason_not_only_the_largest(fed: Fed) -> None:
+    """Gemini 3: three files at another site and two being written: the advice named the
+    three only, and a model reading it reported the wrong reason."""
+    for d in (1, 3, 5):
+        fed.add(f"log_2020010{d}.dat", 100, owner="full")
+    for d in (2, 4):
+        fed.add(f"log_2020010{d}.dat", 100, owner="half")
+
+    result = await check()
+
+    assert "3 files are complete at another provider" in result["advice"]
+    assert "2 files are still being written" in result["advice"]

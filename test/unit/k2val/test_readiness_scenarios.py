@@ -647,3 +647,243 @@ def test_the_readers_read_the_stored_context_as_in_a_trial() -> None:
 )
 def test_a_ready_claim_is_undone_only_by_what_says_not_ready(sid, answer, label) -> None:
     assert read_answer(sid, answer)[0] == label
+
+
+# --- External review (design/17, design/18): each BLOCKING finding reproduced first -----------
+
+
+def _call(index: int, tool: str, arguments: dict, result: dict | None = None):
+    from benchmark.k2val.recording import CallRecord
+
+    return CallRecord(
+        index=index,
+        tool=tool,
+        arguments=arguments,
+        started_at=float(index),
+        ended_at=float(index) + 1,
+        ok=True,
+        result_text=json.dumps(result or {}),
+    )
+
+
+def _with_calls(sid: str, *calls) -> K2Context:
+    c = _ctx(sid, _snap(set(), set()))
+    c.calls = list(calls)
+    return c
+
+
+@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
+def test_review_an_extent_that_also_selects_by_date_across_the_space_is_not_inside() -> None:
+    """Codex 3, Gemini 1: with `files`, `date_ranges` were ignored: an item rooted at the space
+    named one trial file and a date range over every directory of the space; the scorer saw
+    the trial file only, and took every hold the call listed (and its removal) for inside."""
+    from benchmark.k2val.scoring import _qos_attachment, write_targets
+
+    wide = {
+        "dataset": "sp",
+        "files": [f"{DIR}/log_20200101.dat"],
+        "date_ranges": [{"start": "2020-01-01", "end": "2020-01-05"}],
+    }
+    c = _with_calls(
+        "RE",
+        _call(
+            0,
+            "ensure_readiness",
+            {"extent": [wide], "deadline_s": 60},
+            {"ready": True, "held": {"files": 2, "qos_requirement_ids": ["q-in", "q-out"]}},
+        ),
+    )
+
+    assert any(t["where"] != "inside" for t in write_targets(c)), write_targets(c)
+    assert _qos_attachment(c, "q-out") is None
+
+
+def _ren_at_answer(*, local: bool, held: bool) -> Snapshot:
+    files = {}
+    for n in FIVE:
+        writing = n in ("log_20200102.dat", "log_20200104.dat")
+        files[n] = FileState(
+            n,
+            "id-" + n,
+            size=100,
+            local_bytes=100 if (local and not writing) else 0,
+            owner_bytes=50 if writing else 100,
+            local_covered=local and not writing,
+            owner_covered=not writing,
+            qos_ids=(f"h-{n}",) if held else (),
+            size_field="virtualSize",
+        )
+    return Snapshot(taken_at=1.0, files=files)
+
+
+@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
+def test_review_ren_does_not_pass_when_the_complete_files_were_never_made_ready() -> None:
+    """Codex 4: REn judged the explanation only (federation None): a call whose holds all
+    failed passed with "two are still being written, the other three are here" while the
+    three complete files stayed at the owner."""
+    at = _ren_at_answer(local=False, held=False)
+    c = _ctx("REn", at)
+    answer = "Not ready: two are still being written; the other three are here."
+
+    result = ORACLES["REn"](c, AgentTrace(final_answer=answer))
+
+    assert result.federation_pass is False
+
+
+@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
+def test_review_the_required_call_does_not_credit_a_path_the_tool_does_not_resolve() -> None:
+    """Codex 5: `./` in a declared path resolved to nothing in the tool and to the file in the
+    oracle's own reading of the extent."""
+    dotted = [{"dataset": DIR, "files": [f"./{n}" for n in FIVE]}]
+
+    assert extent_selects(dotted, PATHS) == set()
+    ok, _ = REQUIRED["RC"](_with_calls("RC", _call(0, "check_readiness", {"extent": dotted})))
+    assert ok is False
+
+
+@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
+def test_review_rcp_a_check_of_the_whole_directory_is_not_a_check_of_the_three() -> None:
+    """Codex 5, Gemini 6: RCp credited a check of all five (`want <= selected`); the answer
+    'yes' then came from subtracting the two examples."""
+    whole = _call(0, "check_readiness", {"extent": [{"dataset": DIR}]})
+
+    ok, _ = REQUIRED["RCp"](_with_calls("RCp", whole))
+
+    assert ok is False
+
+
+@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
+def test_review_the_required_call_accepts_files_checked_one_call_each() -> None:
+    """Codex 5: three successful calls, one asked file each, did not count."""
+    calls = [
+        _call(i, "check_readiness", {"extent": [{"dataset": DIR, "files": [n]}]})
+        for i, n in enumerate(ASKED)
+    ]
+    every = [
+        _call(i, "check_readiness", {"extent": [{"dataset": DIR, "files": [n]}]})
+        for i, n in enumerate(FIVE)
+    ]
+
+    assert REQUIRED["RCp"](_with_calls("RCp", *calls))[0] is True
+    assert REQUIRED["RC"](_with_calls("RC", *every))[0] is True
+
+
+@pytest.mark.parametrize(
+    ("sid", "answer", "right"),
+    [
+        # Gemini 2: a time before the phrase was read as a count of files
+        (
+            "REn",
+            "Not ready after 150 s: log_20200102.dat and log_20200104.dat are still being written.",
+            True,
+        ),
+        (
+            "REn",
+            "After waiting 5 minutes, log_20200102.dat and log_20200104.dat are still being "
+            "written.",
+            True,
+        ),
+        # Codex 11: the same, in seconds, with no file named
+        ("RCn", "Not ready: after 150 seconds some files are still being written.", True),
+        # Gemini 2: a count of the READY files before "because" was read as the writing count
+        (
+            "RCn",
+            "No: 3 files are ready because log_20200102.dat and log_20200104.dat are still "
+            "being written.",
+            True,
+        ),
+        # Gemini 2, Codex 11: a false count AFTER the phrase was not read at all
+        ("RCn", "No. Writing is still in progress for all 5 files.", False),
+        ("RCn", "No: there are incomplete writes on all 5 files.", False),
+        ("RCn", "Not ready. Still being written: 4 files.", False),
+        # Codex 11: a false claim about the files that are not being written
+        ("RCn", "No: two are still being written, the other three are missing.", False),
+    ],
+)
+@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
+def test_review_the_writing_reader_binds_counts_to_the_files_they_count(
+    sid: str, answer: str, right: bool
+) -> None:
+    assert is_right(sid, read_answer(sid, answer)) is right, read_answer(sid, answer)
+
+
+def test_review_both_with_the_two_names_is_the_right_count() -> None:
+    """Gemini 2: the deterministic reader already counted "both" as #2 (not a defect there)."""
+    answer = "Not ready: both log_20200102.dat and log_20200104.dat are still being written."
+    assert is_right("RCn", read_answer("RCn", answer)) is True
+
+
+@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
+def test_review_the_rubric_tells_the_judge_that_both_with_two_names_is_two() -> None:
+    """Gemini 2: the deterministic reader counted "both" as #2 and the judge was never told
+    to, so a right answer went to NEEDS_REVIEW."""
+    assert '"both' in ANSWER_SPECS["RCn"].names_what
+
+
+@pytest.mark.parametrize(
+    ("sid", "answer"),
+    [
+        # Gemini 7: the source site in the ready sentence undid the claim
+        (
+            "RE",
+            "Yes, all five log files have been copied from nordic-marine-dc and are now "
+            "complete and readable at vistula-dc.",
+        ),
+        (
+            "RCp",
+            "Yes, the three files are complete and readable at vistula-dc, while the other two "
+            "are only at nordic-marine-dc.",
+        ),
+        # Codex 11: "all five of the files" read as "some of the files"
+        ("RC", "All five of the files are ready here."),
+    ],
+)
+@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
+def test_review_a_ready_claim_is_read_per_clause(sid: str, answer: str) -> None:
+    assert read_answer(sid, answer)[0] == "SAYS_READY"
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
+async def test_review_a_space_and_file_names_as_the_tools_example_shows_is_inside(
+    cfg, api, fed, clock, tmp_path, ready_tools
+) -> None:
+    """Gemini 1: the extent example's own form (a space name and file names) holds the trial's
+    files, and the scorer called it a write outside the trial (`/<space>/<name>`)."""
+
+    async def model(app, brief_text):
+        space = _dir_of(brief_text).split("/")[1]
+        answer = await result_of(
+            app,
+            "ensure_readiness",
+            {"extent": [{"dataset": space, "files": ASKED}], "deadline_s": 60},
+        )
+        assert answer["held"]["files"] == 3, answer
+        return "Done: the three files are now complete and readable at vistula-dc."
+
+    art = await _trial(cfg, api, clock, tmp_path, ready_tools, "REp", model)
+
+    assert "write_outside" not in art.flags, art.oracle_diagnosis
+    assert art.outcome == "PASS", art.oracle_diagnosis
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
+async def test_review_a_space_and_a_date_range_that_hold_only_the_trials_files_are_inside(
+    cfg, api, fed, clock, tmp_path, ready_tools
+) -> None:
+    """Gemini 1: a date range over the space, which held the trial's five files and nothing
+    else, was scored as a write outside the trial (the space's root)."""
+
+    async def model(app, brief_text):
+        space = _dir_of(brief_text).split("/")[1]
+        answer = await result_of(
+            app, "ensure_readiness", {"extent": _by_dates(f"/{space}"), "deadline_s": 60}
+        )
+        assert answer["held"]["files"] == 5, answer
+        return "Done: all five files are now complete and readable at vistula-dc."
+
+    art = await _trial(cfg, api, clock, tmp_path, ready_tools, "RE", model)
+
+    assert "write_outside" not in art.flags, art.oracle_diagnosis
+    assert art.outcome == "PASS", art.oracle_diagnosis
