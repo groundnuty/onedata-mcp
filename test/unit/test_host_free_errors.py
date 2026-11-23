@@ -240,7 +240,16 @@ async def test_rest_span_holds_the_kind_but_not_the_raw_text(
     span = spans[0]
     assert span.status.status_code == telemetry.StatusCode.ERROR
     assert span.status.description == "connection_error"
-    rendered = repr(span.to_json())
+    # What the span carries, without its random trace/span ids and timestamps: a hex id can
+    # contain the port's digits by chance ("0x…8443…"), which made this test flaky.
+    rendered = repr(
+        {
+            "name": span.name,
+            "status": span.status.description,
+            "attributes": dict(span.attributes or {}),
+            "events": [(e.name, dict(e.attributes or {})) for e in span.events],
+        }
+    )
     _assert_host_free(rendered)
     assert "connection_error" in rendered
 
