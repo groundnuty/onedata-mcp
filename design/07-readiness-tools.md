@@ -173,8 +173,12 @@ completed, skipped and aborting transfers do not count.
 > common MCP client's ~180 s; the env may only lower the wait. The answer's
 > `held` also lists the ids of the holds (`qos_requirement_ids`); neither
 > description names the other tool, and check's answer names `ensure_readiness`
-> only where it is offered, beside `ready_files`. The text below is the
-> original spec.
+> only where it is offered, beside `ready_files`. After the external review
+> (design/17, design/18, "External review"): ensure's `ready` also needs every
+> hold confirmed (`data_ready` apart), every phase is bounded by
+> `min(deadline_s, cap)`, `files` is `resolved_files`, and empty selectors, a
+> name several files share and an ambiguous space are refused. The text below
+> is the original spec.
 
 `deadline_s` is an int, 1–86,400: how long the agent is willing to wait in
 total. **One call waits at most `min(deadline_s, MAX_WAIT_S)`, counted from the

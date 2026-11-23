@@ -1647,13 +1647,27 @@ and its tests; design/18, decision 1.
 **Fix:** the `extent` field's description carries a concrete example
 with both dataset forms, `files` and `date_ranges`, and a test checks
 that it validates. An item or a date range with another field is
-refused by name (`additionalProperties: false`; the API: "extent[0]
-has no field 'date_from', 'paths': its fields are dataset, files,
-date_ranges").
+refused by name (`additionalProperties: false`; the API, and through
+an MCP client too: "extent[0] has no field 'date_from', 'paths': its
+fields are dataset, files, date_ranges").
 
-**Decision:** Fixed (this PR, the operator's decision 1). The example
-is NOT VERIFIED until a gate-4 trial shows a model reading it
-(design/17, design/18).
+**The external review (design/17, design/18) found three more ways an
+extent was read wider than declared,** each reproduced by a test first:
+`files: []` or `null` (an empty search result passed on) meant the
+whole dataset; a file name matched every file of that name at any
+depth; and a space segment that was one space's id and another's name
+reached the first space listed. Now an empty or null selector is
+refused in the schema (`minItems: 1`, no null) and the API; a name that
+several files share is refused with their paths; an ambiguous space is
+refused with both candidates, and the chosen space is bound to its id
+(its name used in a path only when no other space has it, the directory
+found checked against the id). The union of `files` and `date_ranges`
+is said in the description.
+
+**Decision:** Fixed (this PR, the operator's decision 1, and the
+operator's decisions after the external review). The example and the
+new refusals are NOT VERIFIED until a gate-4 trial shows a model reading
+them (design/17, design/18).
 
 ---
 
@@ -1682,10 +1696,19 @@ not in this repository. The bound: design/18, decision 2, and the test
 for the final pass 30 → 20 s); the description says "at most about
 2.5 minutes". A longer wait is several calls, as the description and
 the not-ready answer say ("Call again to keep waiting").
-`ONEDATA_MCP_ENSURE_MAX_WAIT_S` may still raise the wait to 240 s.
+`ONEDATA_MCP_ENSURE_MAX_WAIT_S` may lower the wait, never raise it above
+150 s (the operator, 2026-11-23).
 
-**Decision:** Fixed (this PR, the operator's decision 2). Open for the
-operator: whether the env ceiling stays at 240 s (design/18).
+**The external review added a second half:** the caller's `deadline_s`
+bounded the wait only. With `deadline_s` 1, resolving and placing could
+still run to 150 s and the final reads to 170 s, and `waited_s` was
+taken before them. Now every phase (the provider's id, resolving,
+placing, waiting) ends within `min(deadline_s, cap)`; the final
+read-back then takes at most 20 s, scaled down with the cap; `waited_s`
+is measured at return; the description and `deadline_s` say so.
+
+**Decision:** Fixed (this PR, the operator's decision 2 and the
+decisions after the external review; design/18, decisions 2 and 5).
 
 ---
 
@@ -1717,10 +1740,22 @@ The panel places the removal of such a hold inside the trial when the
 call that listed it was (`scoring._qos_attachment`); before, it was an
 unverifiable write, a harness outcome in V6 and V7.
 
-**Decision:** Fixed (this PR, the operator's decision 3). NOT VERIFIED
-until a trial reads the ids. When more than 100 are held, the answer
-says where the others are found ("each file's QoS summary lists its
-requirement ids"), naming no tool. Holds placed by a server process
+**The external review found `ready` claimed without the holds:** with
+every hold refused, the answer still said `ready: true` and "Ready: ...
+and held there". Now `ready` needs every requested hold confirmed for
+the answer; `data_ready` says whether the data alone are, and
+`hold_failed` counts the missing holds by the cause the provider showed
+(refused, rejected, no answer, not confirmed, gone, out of time), with
+the ids of holds that could not be read back. The note for ids beyond
+the first 100 pointed at each file's QoS summary, which lists other
+people's and inherited requirements too; it now says to call again with
+fewer files. The panel places a hold's removal by the call's own record
+of which file each rule is on (`CallRecord.audit`), no longer by the
+call's extent.
+
+**Decision:** Fixed (this PR, the operator's decision 3 and the
+decisions after the external review; design/18, decision 4). NOT
+VERIFIED until a trial reads the ids. Holds placed by a server process
 that has since restarted are not listed: M-45, open.
 
 ---
@@ -1754,8 +1789,25 @@ scores RCn and REn. The shared vocabulary lists no passing label
 first, and a ready sentence about some files beside files still being
 written reads as not ready.
 
-**Decision:** Fixed (this PR, the operator's decision 5). V5's earlier
-results remain no evidence; the readiness tools' gate-4 run re-runs V5.
+**The external review found the readers still lost quantities and
+scope:** a time read as a count ("Not ready after 150 s: ..." gave
+`#150`), a count of the ready files before "because" read as the
+writing count, a count after the phrase not read ("still being written:
+4 files", "for all 5 files"), "all five of the files" read as some, a
+ready sentence that named the source site not read as ready, and "two
+are still being written, the other three are missing" passing in RCn
+(where the three are local). Now times, sizes and tries are dropped
+before counts are read; clauses split on a colon, a dash, "because",
+"since", ", as", and an "and" that joins two clauses; a count after the
+phrase is bound to the files it counts; a ready claim is read per
+clause; and a claim that the other files are not here is read
+(`others:not_ready`) and checked against the state at the answer. The
+rubric says the same, so the judge's reading matches (its hash changed:
+stored verdicts are not reused).
+
+**Decision:** Fixed (this PR, the operator's decision 5 and the
+decisions after the external review). V5's earlier results remain no
+evidence; the readiness tools' gate-4 run re-runs V5.
 
 ---
 
@@ -1789,7 +1841,16 @@ again to keep waiting"). Tests check every description and schema
 text, and the answer with the tool registered, removed, and filtered
 by a host.
 
-**Decision:** Fixed (this PR).
+The external review found the panel's host set `OFFERED_TOOLS` to the
+scenario's allow-list, not to the tools it lists (registered and
+allowed): a name allowed but not registered counted as offered. It now
+sets what it lists. The CLI and Claude legs' server is launched with
+the scenario's set as `ONEDATA_MCP_TOOLS`, so its own list is the
+offered set. **Residual:** a production client that filters the
+server's tools downstream, without telling the server, is not seen.
+
+**Decision:** Fixed (this PR); the residual recorded (design/17,
+gate 2).
 
 ---
 
@@ -1826,7 +1887,25 @@ refused this token access to it"; an id is named as an id; a space
 given by its id is listed under its name; ids go into paths through
 `id_segment`.
 
-**Decision:** Fixed (this PR).
+**The external review found more of the same class**, partly in the
+answer itself: the advice named only the reason with the most files
+(three files elsewhere hid two being written); after a listing that
+stopped early, a declared file on an unread page was "not found" and
+`files: 1, ready_files: 1` looked complete; one refused hold made the
+advice call every hold failure a refusal; truncated examples were not
+marked; a missing space's hint suggested the very segment that was not
+found (`nosuch/sub`: "give a space name (e.g. 'nosuch')"); `/..` was
+answered "give a space name such as '..'"; a provider list of spaces
+that was not a list read as a dataset "not found"; a trailing slash
+failed the lookup. Now the advice names every reason in a fixed order;
+a file not seen on an incomplete listing is unknown, and a name seen
+once there is not taken; the counts are labelled (`resolved_files`,
+`ready_files`, `examples_not_shown`); hold failures are counted by
+cause; the hints list the spaces there are and a real example; a
+malformed list of spaces is an error; one leading and one trailing
+slash are dropped.
+
+**Decision:** Fixed (this PR, and after the external review).
 
 ---
 
@@ -1859,7 +1938,22 @@ hold (the file's QoS summary, then each requirement it lists), so a
 2,000-file extent adds 4,000 reads or more, within the 16 in flight; and a requirement someone else made with the same expression
 would be taken for this tool's own.
 
-**Decision:** Open (the operator, 2026-11-23: not fixed now). Reopen
+**Two more duplicates, found by the external review and fixed:** two
+calls at once on one file both found no remembered rule, both placed
+one, and both reported the second id while the first stayed; and a
+read-back that failed for a moment (a 500, a timeout) was taken for a
+rule that is gone, and a second was placed beside the first. Now a
+file's hold is read back or placed under a per-file lock, each call
+keeps the rule it confirmed in its own result, and only a provider's
+"not there" (a 404, a 4xx `enoent`) places a hold again; an unreadable
+read-back is reported with its id, never followed by a second hold. A
+create request that got no answer may still have made a rule no answer
+lists: the next call places another (the same cost as this finding's
+fix to find it).
+
+**Decision:** the duplicates between concurrent calls and after a failed
+read-back: Fixed (this PR, design/18, decision 6). After a restart: Open
+(the operator, 2026-11-23: not fixed now). Reopen
 the fix if a deployment restarts its server while agents hold data,
 or a trial shows a released hold still keeping its file.
 
