@@ -735,11 +735,12 @@ an id into the path unencoded too (`get_transfer`,
 `get_file_qos_summary`, `get_file_distribution`, `download_file`,
 `delete_file`, the metadata tools and `list_files_recursively`;
 design/12, "Found, not fixed") are fixed by the PR for issue #44. It
-sends every id that goes into a URL path through one helper,
-`id_segment` in `onedata_mcp/utils.py`, which percent-encodes it and
-refuses an empty id, `.`, `..` and a `/` before any request; the space
-and harvester tools use it too. The request for a valid id is
-unchanged, so the fix needs gates 1 and 3 only (design/10).
+sends the id of each of them through one helper, `id_segment` in
+`onedata_mcp/utils.py`, which percent-encodes it and refuses an empty
+id, `.`, `..` and a `/` before any request; the space and harvester
+tools use it too. The file and QoS tools fixed earlier keep their own
+guards. The request for a valid id is unchanged, so the fix needs
+gates 1 and 3 only (design/10).
 
 ---
 
