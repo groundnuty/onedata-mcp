@@ -881,6 +881,9 @@ class _Listing:
     files: list[FileInfo] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)  # why this is not the whole dataset
     root: str = ""  # the dataset's directory, its space named by name (a space id replaced)
+    # False when the listing stopped before its end (time, a refusal, a page it could not read
+    # on, directories it may not list): a file not in `files` may still be there
+    complete: bool = True
 
 
 def _no_time(item: _Item) -> str:
@@ -1123,6 +1126,7 @@ async def _list_dataset(run: _Run, item: _Item) -> _Listing:
             f"dataset '{item.dataset}': listing incomplete, not every page arrived. "
             "Call again, or give a smaller directory."
         )
+    listing.complete = not (incomplete or inaccessible or listing.problems)
     for path in dict.fromkeys(inaccessible):
         listing.problems.append(
             f"directory '{_absolute(root, path)}' in '{item.dataset}' is not listed "
@@ -1148,7 +1152,9 @@ def _same_name(item: _Item, name: str, matches: list[str]) -> str:
     )
 
 
-def select_paths(item: _Item, paths: Sequence[str]) -> tuple[list[str], list[str]]:
+def select_paths(
+    item: _Item, paths: Sequence[str], *, complete: bool = True
+) -> tuple[list[str], list[str]]:
     """The paths of `paths` (every file listed under the item's dataset, absolute, named by the
     space's name) that an item selects, and a text for each thing it declares that selects no
     file or that cannot say which one. Pure: the tool's `_select` and the validation panel's
@@ -1160,6 +1166,10 @@ def select_paths(item: _Item, paths: Sequence[str]) -> tuple[list[str], list[str
       lists them, to be given by path), never all of them;
     - `date_ranges`: the files whose name carries a YYYYMMDD inside one of the ranges;
     - both: the files that either one selects (their union).
+
+    `complete` False: `paths` is a listing that stopped early. A file or range not seen in it is
+    unknown, never "not found"; a name seen once is not taken (another file of that name may be
+    in the rest of the listing); a path seen is taken.
     """
     unresolved: list[str] = []
     if not item.files and not item.ranges:
@@ -1188,7 +1198,19 @@ def select_paths(item: _Item, paths: Sequence[str]) -> tuple[list[str], list[str
             if len(matches) > 1:
                 unresolved.append(_same_name(item, name, matches))
                 continue
-        if not matches and _looks_like_id(name):
+            if matches and not complete:
+                unresolved.append(
+                    f"file '{name}' in '{item.dataset}' is not taken: the listing stopped early, "
+                    "so another file of that name may be in the rest of it. Give it by its path "
+                    "inside the dataset or its absolute path."
+                )
+                continue
+        if not matches and not complete:
+            unresolved.append(
+                f"file '{name}' in '{item.dataset}' is unknown: it is not among the files listed "
+                "before the listing stopped, so whether it is there is not known."
+            )
+        elif not matches and _looks_like_id(name):
             unresolved.append(
                 f"file '{name}' in '{item.dataset}' not found: it looks like a file id, and "
                 "files are given by their exact name or their absolute path."
@@ -1203,7 +1225,12 @@ def select_paths(item: _Item, paths: Sequence[str]) -> tuple[list[str], list[str
     dated = [(p, name_date(p.rsplit("/", 1)[-1])) for p in paths] if item.ranges else []
     for start, end in item.ranges:
         matches = [p for p, day in dated if day is not None and start <= day <= end]
-        if not matches:
+        if not matches and not complete:
+            unresolved.append(
+                f"date range {start.isoformat()}..{end.isoformat()} in '{item.dataset}' is "
+                "unknown: it matched no file among those listed before the listing stopped."
+            )
+        elif not matches:
             unresolved.append(
                 f"date range {start.isoformat()}..{end.isoformat()} in '{item.dataset}' "
                 "matched no file: dates are read from the YYYYMMDD in file names. "
@@ -1213,10 +1240,12 @@ def select_paths(item: _Item, paths: Sequence[str]) -> tuple[list[str], list[str
     return list(chosen), unresolved
 
 
-def _select(item: _Item, files: list[FileInfo], unresolved: list[str]) -> list[FileInfo]:
+def _select(
+    item: _Item, files: list[FileInfo], unresolved: list[str], *, complete: bool = True
+) -> list[FileInfo]:
     """The files an item declares (`select_paths`); what selects nothing goes to `unresolved`."""
     by_path = {f.path: f for f in files}
-    selected, problems = select_paths(item, list(by_path))
+    selected, problems = select_paths(item, list(by_path), complete=complete)
     unresolved.extend(problems)
     return [by_path[path] for path in selected]
 
@@ -1246,7 +1275,7 @@ async def _resolve(run: _Run, items: list[_Item]) -> tuple[list[FileInfo], list[
         if not listing.files and listing.problems:
             continue  # nothing to pick from; the problems are reported above
         named = replace(item, root=listing.root) if listing.root else item
-        for f in _select(named, listing.files, unresolved):
+        for f in _select(named, listing.files, unresolved, complete=listing.complete):
             if f.file_id in resolved:
                 _merge_file(resolved[f.file_id], f)
             else:
@@ -1386,14 +1415,41 @@ def _phrase(reason: str, n: int, *, ensure: bool) -> str:
     return f"the only copies of {_noun(n)} are at a provider that is down."
 
 
-def _hold_failed_sentence(n: int, forbidden: bool) -> str:
-    """Why a hold is missing, as far as the provider said. Only a refusal (403, `forbidden`,
-    `eacces`, `eperm`) is called one; anything else (a timeout, another error, a rule that
-    vanished) may pass, so the next call tries again."""
-    text = f"A hold could not be placed for {_noun(n)}"
-    if forbidden:
-        return f"{text}: the provider refused this token the right to add QoS requirements."
-    return f"{text}; the next call tries again."
+# Why a file's hold is missing, as far as the provider's answers show, in the order the advice
+# names them. Only a refusal (403, `forbidden`, `eacces`, `eperm`) is called one.
+HOLD_CAUSES = ("refused", "rejected", "no_answer", "not_confirmed", "gone", "out_of_time")
+
+
+def _hold_sentence(cause: str, n: int) -> str:
+    files = _noun(n)
+    if cause == "refused":
+        return (
+            f"A hold could not be placed for {files}: the provider refused this token the right "
+            "to add QoS requirements."
+        )
+    if cause == "rejected":
+        return (
+            f"A hold could not be placed for {files}: the provider rejected the request; the "
+            "next call tries again."
+        )
+    if cause == "no_answer":
+        return (
+            f"For {files}, the request to place a hold got no answer in time: a hold may have "
+            "been placed, and is not listed; the next call places one again."
+        )
+    if cause == "not_confirmed":
+        return (
+            f"For {files}, the hold could not be read back to confirm it (its id is under "
+            "hold_failed); the next call reads it again."
+        )
+    if cause == "gone":
+        return (
+            f"For {files}, the hold was removed before this answer; the next call places it again."
+        )
+    return f"For {files}, no hold was placed: the time ran out first; the next call places it."
+
+
+_CAN_WAIT_FOR = ("being_written", "in_transfer", "at_other_site")
 
 
 def _advice(
@@ -1403,67 +1459,92 @@ def _advice(
     unresolved: int,
     unchecked: int,
     waited_s: int | None,
-    hold_failed: int,
-    hold_forbidden: bool = False,
+    data_ready: bool = False,
+    hold_causes: Mapping[str, int] | None = None,
     ensure_offered: bool = False,
 ) -> str:
-    """One or two plain sentences: what the answer means. It names a tool only where that tool
-    is offered (design/10, gate 2): check's answer points to ensure_readiness when the caller
-    says it is offered (`ensure_offered`), for a reason ensure_readiness can act on.
+    """Plain sentences: what the answer means. Every reason a file is not ready is named, in
+    REASONS order, then what was not resolved or checked, then why holds are missing (ensure),
+    in HOLD_CAUSES order. It names a tool only where that tool is offered (design/10, gate 2):
+    check's answer points to ensure_readiness when the caller says it is offered
+    (`ensure_offered`), for files whose reason ensure_readiness can act on.
 
     Never advice on what the agent does with the data.
     """
     ensure = waited_s is not None
     if ready:
         text = "Ready: all declared files are complete and readable at your provider now"
-        if not ensure:
-            return text + "."
-        if hold_failed:
-            return f"{text}. {_hold_failed_sentence(hold_failed, hold_forbidden)}"
-        return text + ", and held there."
+        return text + (", and each is held there." if ensure else ".")
 
+    hold_causes = hold_causes or {}
     sentences: list[str] = []
-    dominant = max(counts, key=lambda r: (counts[r], -REASONS.index(r))) if counts else None
-    if dominant is not None:
-        sentences.append(_phrase(dominant, counts[dominant], ensure=ensure))
+    if data_ready:  # ensure only: the data are, the holds are not
+        missing = sum(hold_causes.values())
+        be = "is" if missing == 1 else "are"
+        sentences.append(
+            "the data are complete and readable at your provider now (data_ready), but "
+            f"{_noun(missing)} {be} not held there."
+        )
+    for reason in REASONS:
+        if counts.get(reason):
+            sentences.append(_phrase(reason, counts[reason], ensure=ensure))
     if unresolved:
         what = "item was" if unresolved == 1 else "items were"
         sentences.append(f"{unresolved} declared {what} not resolved (see unresolved).")
     if unchecked:
         sentences.append(f"{_noun(unchecked)} could not be checked.")
-    if hold_failed:
-        sentences.append(_hold_failed_sentence(hold_failed, hold_forbidden))
-    if ensure and dominant in ("being_written", "in_transfer", "at_other_site"):
+    for cause in HOLD_CAUSES:
+        if hold_causes.get(cause):
+            sentences.append(_hold_sentence(cause, hold_causes[cause]))
+    waitable = sum(counts.get(reason, 0) for reason in _CAN_WAIT_FOR)
+    if ensure and waitable:
         sentences.append("Call again to keep waiting.")
-    elif ensure_offered and dominant in ("being_written", "in_transfer", "at_other_site"):
-        them = "it" if counts[dominant] == 1 else "them"
-        sentences.append(ENSURE_POINTER.format(them=them))
+    elif ensure_offered and waitable:
+        sentences.append(ENSURE_POINTER.format(them="it" if waitable == 1 else "them"))
     lead = f"Not ready after {waited_s} s:" if ensure else "Not ready:"
     return f"{lead} {' '.join(sentences)}"
 
 
 @dataclass
 class _Hold:
-    expression: str
-    held_ids: set[str]  # files whose rule was confirmed to exist, or created
-    failed: list[FileInfo]
-    forbidden: bool = False  # the provider refused to create a rule (403, eacces, ...)
+    """What one ensure call holds: kept in the call's own result, never re-read from what the
+    process remembers (another call may have changed that meanwhile)."""
 
-    @property
-    def held(self) -> int:
-        return len(self.held_ids)
+    expression: str
+    held: dict[str, str] = field(default_factory=dict)  # file id -> the rule confirmed for it
+    failed: dict[str, tuple[FileInfo, str]] = field(default_factory=dict)  # id -> (file, cause)
+    # rules this call could not read back, but may well exist: file id -> rule id
+    unconfirmed: dict[str, str] = field(default_factory=dict)
+
+    def fail(self, file: FileInfo, cause: str, rule_id: str | None = None) -> None:
+        self.held.pop(file.file_id, None)
+        self.failed[file.file_id] = (file, cause)
+        if rule_id is not None:
+            self.unconfirmed[file.file_id] = rule_id
 
     def ids(self, files: list[FileInfo]) -> list[str]:
         """The ids of the rules that hold the files, in the files' path order."""
         return [
-            _rules[f.file_id]
+            self.held[f.file_id]
             for f in sorted(files, key=lambda f: f.path)
-            if f.file_id in self.held_ids and f.file_id in _rules
+            if f.file_id in self.held
         ]
+
+    def causes(self) -> dict[str, int]:
+        found = [cause for _, cause in self.failed.values()]
+        return {cause: found.count(cause) for cause in HOLD_CAUSES if cause in found}
 
 
 def _examples(files: Iterable[FileInfo]) -> list[str]:
     return sorted(f.path for f in files)[:MAX_EXAMPLES]
+
+
+def _with_examples(files: list[FileInfo]) -> dict[str, Any]:
+    """A count and at most MAX_EXAMPLES paths; how many are not shown, when any are not."""
+    out: dict[str, Any] = {"files": len(files), "examples": _examples(files)}
+    if len(files) > MAX_EXAMPLES:
+        out["examples_not_shown"] = len(files) - MAX_EXAMPLES
+    return out
 
 
 def _answer(
@@ -1474,7 +1555,11 @@ def _answer(
     waited_s: int | None = None,
     ensure_offered: bool = False,
 ) -> dict[str, Any]:
-    ready = bool(files) and not unresolved and all(f.state == "ready" for f in files)
+    """The answer of either tool. `resolved_files` counts the files the extent resolved to (not
+    those unresolved), `ready_files` those of them confirmed ready. ensure's `ready` asks more
+    than its `data_ready`: every resolved file also held, its hold confirmed for this answer."""
+    data_ready = bool(files) and not unresolved and all(f.state == "ready" for f in files)
+    ready = data_ready and (hold is None or len(hold.held) == len(files))
     by_reason: dict[str, list[FileInfo]] = {}
     unchecked = 0
     for f in files:
@@ -1483,20 +1568,19 @@ def _answer(
         elif f.state != "ready":
             unchecked += 1
 
-    answer: dict[str, Any] = {
-        "ready": ready,
-        "files": len(files),
-        "bytes": sum(f.size for f in files),
-    }
-    if hold is None:
-        # How many of the files are ready (check_readiness): the examples per reason are at most
-        # three, so the count says how many the answer is about (design/17, decision 5).
-        answer["ready_files"] = sum(f.state == "ready" for f in files)
-    if not ready:
+    answer: dict[str, Any] = {"ready": ready}
+    if hold is not None:
+        answer["data_ready"] = data_ready
+    answer["resolved_files"] = len(files)
+    # How many of them are ready: the examples per reason are at most three, so the count says
+    # how many the answer is about (design/17, decision 5).
+    answer["ready_files"] = sum(f.state == "ready" for f in files)
+    answer["bytes"] = sum(f.size for f in files)
+    if not data_ready:
         answer["bytes_local"] = sum(min(f.local_bytes, f.size) for f in files)
         if by_reason:
             answer["not_ready"] = {
-                reason: {"files": len(by_reason[reason]), "examples": _examples(by_reason[reason])}
+                reason: _with_examples(by_reason[reason])
                 for reason in REASONS
                 if reason in by_reason
             }
@@ -1512,8 +1596,8 @@ def _answer(
         unresolved=len(unresolved),
         unchecked=unchecked,
         waited_s=waited_s,
-        hold_failed=len(hold.failed) if hold else 0,
-        hold_forbidden=bool(hold and hold.forbidden),
+        data_ready=data_ready,
+        hold_causes=hold.causes() if hold else None,
         ensure_offered=ensure_offered and hold is None,
     )
     if hold is not None:
@@ -1522,7 +1606,7 @@ def _answer(
         # Each id is a QoS requirement that keeps its file here until it is removed: the
         # answer says which, so the holds can be released (design/18, decision 3).
         answer["held"] = {
-            "files": hold.held,
+            "files": len(hold.held),
             "rule": hold.expression,
             "qos_requirement_ids": ids[:MAX_HOLD_IDS_SHOWN],
         }
@@ -1530,7 +1614,14 @@ def _answer(
             answer["held"]["qos_requirement_ids_not_shown"] = len(ids) - MAX_HOLD_IDS_SHOWN
             answer["held"]["note"] = HOLD_IDS_ELSEWHERE
         if hold.failed:
-            answer["hold_failed"] = {"files": len(hold.failed), "examples": _examples(hold.failed)}
+            failed = [f for f, _ in hold.failed.values()]
+            answer["hold_failed"] = {**_with_examples(failed), "causes": hold.causes()}
+            if hold.unconfirmed:
+                answer["hold_failed"]["unconfirmed_qos_requirement_ids"] = [
+                    hold.unconfirmed[f.file_id]
+                    for f in sorted(failed, key=lambda f: f.path)
+                    if f.file_id in hold.unconfirmed
+                ][:MAX_HOLD_IDS_SHOWN]
     return answer
 
 
@@ -1541,15 +1632,11 @@ def _answer(
 
 def _config_unavailable(waited_s: int | None = None) -> dict[str, Any]:
     """The answer when the provider's own id could not be read in time: nothing was checked."""
-    answer: dict[str, Any] = {
-        "ready": False,
-        "files": 0,
-        "bytes": 0,
-        "bytes_local": 0,
-        "unresolved": [],
-    }
+    answer: dict[str, Any] = {"ready": False}
+    if waited_s is not None:
+        answer["data_ready"] = False
+    answer.update(resolved_files=0, ready_files=0, bytes=0, bytes_local=0, unresolved=[])
     if waited_s is None:
-        answer["ready_files"] = 0
         answer["advice"] = (
             "Not ready: provider configuration unavailable, so nothing could be checked. "
             "Call again."
@@ -1607,14 +1694,12 @@ def _hold_expression(local_id: str) -> str:
     return (HOLD_EXPRESSION_PLAIN if _hold_plain else HOLD_EXPRESSION).format(provider_id=local_id)
 
 
-_REFUSED = "refused"  # `_place_one`'s answer when the provider refused the token the right
-
-
-async def _place_one(run: _Run, file: FileInfo) -> bool | str:
+async def _place_one(run: _Run, file: FileInfo) -> str:
     """Add the placement rule for a file; falls back to the plain expression on a 400.
 
-    True when the rule was created; `_REFUSED` when the provider refused the token (403,
-    `forbidden`, `eacces`, `eperm`); False otherwise (a timeout, another error, no id)."""
+    "held" when the rule was created (its id remembered); else the cause (HOLD_CAUSES):
+    "refused" (403, `forbidden`, `eacces`, `eperm`), "no_answer" (no answer in time: a rule
+    may have been made), "rejected" (another error, or an answer without an id)."""
     global _hold_plain
     templates = [HOLD_EXPRESSION_PLAIN] if _hold_plain else [HOLD_EXPRESSION, HOLD_EXPRESSION_PLAIN]
     for index, template in enumerate(templates):
@@ -1625,22 +1710,22 @@ async def _place_one(run: _Run, file: FileInfo) -> bool | str:
                 )
             )
         except TimeoutError:
-            return False
+            return "no_answer"
         except OnedataApiError as exc:
             status = exc.response.get("status_code") if exc.response else None
             if _is_forbidden(exc):
-                return _REFUSED
+                return "refused"
             if status == 400 and index + 1 < len(templates):
                 continue  # Onedata rejected the expression form: try the plain one
-            return False
+            return "no_answer" if exc.kind is not None else "rejected"  # transport: unknown
         rule_id = created.get("qosRequirementId") if isinstance(created, dict) else None
         if not isinstance(rule_id, str) or not rule_id:
-            return False
+            return "rejected"
         _rules[file.file_id] = rule_id
         if index == 1:
             _hold_plain = True  # the primary form was rejected, the plain one accepted
-        return True
-    return False
+        return "held"
+    return "rejected"
 
 
 async def _rule_confirmed(run: _Run, file: FileInfo) -> bool:
@@ -1670,14 +1755,13 @@ async def _reconfirm_holds(run: _Run, files: list[FileInfo], hold: _Hold) -> Non
     """Read every rule counted as held once more, for the answer: `held` counts only the
     rules confirmed here. A rule that is gone, unreadable or not read in time is listed with
     the failed ones. Never raises."""
-    held = [f for f in files if f.file_id in hold.held_ids]
+    held = [f for f in files if f.file_id in hold.held]
     results = await _bounded(
         CHECK_CONCURRENCY, held, lambda f: _rule_confirmed(run, f), run.deadline
     )
     for f, ok in zip(held, results, strict=True):
         if ok is not True:
-            hold.held_ids.discard(f.file_id)
-            hold.failed.append(f)
+            hold.fail(f, "not_confirmed", hold.held[f.file_id])
 
 
 async def _place(run: _Run, files: list[FileInfo]) -> _Hold:
@@ -1689,9 +1773,7 @@ async def _place(run: _Run, files: list[FileInfo]) -> _Hold:
     created in this call; files not confirmed or created (failed, or out of time) are listed
     as failed.
     """
-    held: set[str] = set()
-    failed: list[FileInfo] = []
-    refused = False
+    hold = _Hold("")
     cached = [f for f in files if f.file_id in _rules]
 
     confirmed = await _bounded(
@@ -1700,26 +1782,26 @@ async def _place(run: _Run, files: list[FileInfo]) -> _Hold:
     todo = [f for f in files if f.file_id not in _rules]
     for f, result in zip(cached, confirmed, strict=True):
         if result is True:
-            held.add(f.file_id)
+            hold.held[f.file_id] = _rules[f.file_id]
         elif result is _SKIPPED:
-            failed.append(f)
+            hold.fail(f, "out_of_time")
         else:
             todo.append(f)
 
     if todo:
         # The first rule settles which expression form Onedata takes; the rest follow it.
         first, rest = todo[0], todo[1:]
-        outcome = await _place_one(run, first)
+        outcome = await _place_one(run, first) if not run.out_of_time() else _SKIPPED
         results = await _bounded(
             PLACE_CONCURRENCY, rest, lambda f: _place_one(run, f), run.deadline
         )
-        for f, ok in zip([first, *rest], [outcome, *results], strict=True):
-            if ok is True:
-                held.add(f.file_id)
+        for f, done in zip([first, *rest], [outcome, *results], strict=True):
+            if done == "held":
+                hold.held[f.file_id] = _rules[f.file_id]
             else:
-                failed.append(f)
-                refused = refused or ok == _REFUSED
-    return _Hold(_hold_expression(run.local_id), held, failed, refused)
+                hold.fail(f, "out_of_time" if done is _SKIPPED else done)
+    hold.expression = _hold_expression(run.local_id)
+    return hold
 
 
 async def _poll_round(run: _Run, pending: list[FileInfo]) -> None:

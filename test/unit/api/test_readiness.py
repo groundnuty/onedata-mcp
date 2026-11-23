@@ -666,7 +666,7 @@ async def test_check_ready(fed: Fed) -> None:
 
     assert result == {
         "ready": True,
-        "files": 2,
+        "resolved_files": 2,
         "ready_files": 2,
         "bytes": 150,
         "advice": "Ready: all declared files are complete and readable at your provider now.",
@@ -700,7 +700,7 @@ async def test_check_s2_owner_partial_preallocated_is_being_written(fed: Fed) ->
     result = await check()
 
     assert result["ready"] is False
-    assert result["files"] == 15
+    assert result["resolved_files"] == 15
     assert result["not_ready"] == {
         "being_written": {
             "files": 14,
@@ -709,6 +709,7 @@ async def test_check_s2_owner_partial_preallocated_is_being_written(fed: Fed) ->
                 f"/{SPACE}/data_20180811.nc",
                 f"/{SPACE}/data_20180812.nc",
             ],  # at most 3, in path order
+            "examples_not_shown": 11,  # truncation said, not left to be guessed (Codex 13)
         }
     }
     assert result["bytes"] == 1500
@@ -955,7 +956,7 @@ async def test_check_and_ensure_are_not_failed_by_a_onezone_that_refuses_the_tok
     assert list(checked["not_ready"]) == [
         "at_other_site"
     ]  # no exception; the owner taken as online
-    assert checked["files"] == 2
+    assert checked["resolved_files"] == 2
     assert ensured["ready"] is False
     assert ensured["held"]["files"] == 2
     assert "unchecked" not in ensured
@@ -997,7 +998,7 @@ async def test_check_unresolved_dataset(fed: Fed) -> None:
     result = await readiness.check_readiness([{"dataset": "no-such-space"}])
 
     assert result["ready"] is False
-    assert result["files"] == 0
+    assert result["resolved_files"] == 0
     assert len(result["unresolved"]) == 1
     assert result["unresolved"] == [
         "dataset 'no-such-space' not found: your provider supports no space named "
@@ -1027,7 +1028,7 @@ async def test_check_unresolved_file_and_date_range_make_the_extent_not_ready(fe
     )
 
     assert result["ready"] is False
-    assert result["files"] == 1  # a.nc resolved and is ready
+    assert result["resolved_files"] == 1  # a.nc resolved and is ready
     assert "not_ready" not in result
     assert result["unresolved"] == [
         file_not_found("missing.nc"),
@@ -1041,7 +1042,7 @@ async def test_check_an_empty_dataset_is_unresolved_not_vacuously_ready(fed: Fed
     result = await readiness.check_readiness([{"dataset": SPACE}])
 
     assert result["ready"] is False
-    assert result["files"] == 0
+    assert result["resolved_files"] == 0
     assert result["unresolved"] == [no_files()]
 
 
@@ -1052,7 +1053,7 @@ async def test_check_overlapping_datasets_count_each_file_once(fed: Fed) -> None
     result = await readiness.check_readiness([{"dataset": f"/{SPACE}/sub"}, {"dataset": SPACE}])
 
     assert result["ready"] is True
-    assert result["files"] == 1
+    assert result["resolved_files"] == 1
 
 
 @pytest.mark.asyncio
@@ -1065,7 +1066,7 @@ async def test_check_selects_by_date_for_both_name_forms(fed: Fed) -> None:
     result = await check(date_ranges=[{"start": "2018-08-01", "end": "2018-08-31"}])
 
     assert result["ready"] is True
-    assert result["files"] == 2
+    assert result["resolved_files"] == 2
 
 
 @pytest.mark.asyncio
@@ -1075,7 +1076,7 @@ async def test_check_date_range_bounds_are_inclusive(fed: Fed) -> None:
 
     result = await check(date_ranges=[{"start": "2018-08-01", "end": "2018-08-31"}])
 
-    assert result["files"] == 2
+    assert result["resolved_files"] == 2
 
 
 @pytest.mark.asyncio
@@ -1088,7 +1089,7 @@ async def test_check_files_and_date_ranges_are_a_union(fed: Fed) -> None:
         files=["other.nc"], date_ranges=[{"start": "2018-08-01", "end": "2018-08-01"}]
     )
 
-    assert result["files"] == 2
+    assert result["resolved_files"] == 2
 
 
 @pytest.mark.asyncio
@@ -1101,7 +1102,7 @@ async def test_check_files_by_basename_absolute_path_and_relative_path(fed: Fed)
     result = await check(files=["top.nc", f"/{SPACE}/sub/deep.nc", "sub/deeper/x.nc"])
 
     assert result["ready"] is True
-    assert result["files"] == 3
+    assert result["resolved_files"] == 3
 
 
 @pytest.mark.asyncio
@@ -1112,7 +1113,7 @@ async def test_check_a_dataset_given_as_a_directory_path_scopes_the_listing(fed:
     result = await readiness.check_readiness([{"dataset": f"/{SPACE}/sub"}])
 
     assert result["ready"] is True
-    assert result["files"] == 1
+    assert result["resolved_files"] == 1
 
 
 @pytest.mark.asyncio
@@ -1123,7 +1124,7 @@ async def test_check_the_same_file_named_twice_counts_once(fed: Fed) -> None:
         [{"dataset": SPACE, "files": ["a.nc"]}, {"dataset": SPACE}]
     )
 
-    assert result["files"] == 1
+    assert result["resolved_files"] == 1
 
 
 @pytest.mark.asyncio
@@ -1133,7 +1134,7 @@ async def test_check_pages_the_listing_by_directory_id(fed: Fed) -> None:
 
     result = await check(files=["f00000.nc", "f02499.nc"])
 
-    assert result["files"] == 2
+    assert result["resolved_files"] == 2
     assert fed.listing_pages == 3  # 1000 + 1000 + 500
     # one path lookup for the root, not one per page
     assert sum(m == "POST" and "lookup-file-id" in p for m, p in fed.requests) == 1
@@ -1155,7 +1156,7 @@ async def test_check_the_file_limit_is_inclusive(fed: Fed, monkeypatch: pytest.M
     monkeypatch.setattr(readiness, "MAX_FILES", 50)
     for i in range(50):
         fed.add(f"f{i:05d}.nc", 1, local="full", owner="full")
-    assert (await check())["files"] == 50
+    assert (await check())["resolved_files"] == 50
 
     fed.add("one-too-many.nc", 1, local="full", owner="full")
     with pytest.raises(ValueError, match="more than 50 files"):
@@ -1200,7 +1201,7 @@ async def test_check_budget_runs_out_and_the_rest_is_unchecked(fed: Fed, clock: 
     result = await check()
 
     assert result["ready"] is False
-    assert result["files"] == 30
+    assert result["resolved_files"] == 30
     assert result["unchecked"] == 30
     assert result["unresolved"] == []
     assert result["advice"] == "Not ready: 30 files could not be checked."
@@ -1250,7 +1251,7 @@ async def test_check_a_listing_cut_short_by_the_budget_is_reported(
     result = await check()
 
     assert result["unresolved"] == [out_of_time()]
-    assert result["files"] == 1000  # what the first page held
+    assert result["resolved_files"] == 1000  # what the first page held
     assert result["ready"] is False
 
 
@@ -1369,11 +1370,13 @@ async def test_ensure_places_one_rule_per_file_waits_and_turns_ready(
 
     assert result == {
         "ready": True,
-        "files": 3,
+        "data_ready": True,
+        "resolved_files": 3,
+        "ready_files": 3,
         "bytes": 300,
         "advice": (
             "Ready: all declared files are complete and readable at your provider now, "
-            "and held there."
+            "and each is held there."
         ),
         "waited_s": 10,
         "held": {
@@ -1511,7 +1514,11 @@ async def test_ensure_a_non_400_failure_does_not_trigger_the_fallback(fed: Fed) 
 
     result = await ensure()
 
-    assert result["hold_failed"] == {"files": 1, "examples": [f"/{SPACE}/a.nc"]}
+    assert result["hold_failed"] == {
+        "files": 1,
+        "examples": [f"/{SPACE}/a.nc"],
+        "causes": {"refused": 1},
+    }
     assert readiness._hold_plain is False
     assert [e for e in fed.requests if e == ("POST", "/api/v3/oneprovider/qos_requirements")] == [
         ("POST", "/api/v3/oneprovider/qos_requirements")
@@ -1527,13 +1534,19 @@ async def test_ensure_reports_hold_failed_and_holds_the_rest(fed: Fed) -> None:
 
     result = await ensure()
 
-    assert result["ready"] is True  # the data are there; they are just not protected
+    # the data are there, and one file is not held: not ready (Codex 7, Gemini 9), and each
+    # half is said on its own
+    assert (result["ready"], result["data_ready"]) == (False, True)
     assert held_summary(result) == {"files": 2, "rule": HOLD}
-    assert result["hold_failed"] == {"files": 1, "examples": [bad.path]}
+    assert result["hold_failed"] == {
+        "files": 1,
+        "examples": [bad.path],
+        "causes": {"refused": 1},
+    }
     assert result["advice"] == (
-        "Ready: all declared files are complete and readable at your provider now. "
-        "A hold could not be placed for 1 file: the provider refused this token the right "
-        "to add QoS requirements."
+        "Not ready after 0 s: the data are complete and readable at your provider now "
+        "(data_ready), but 1 file is not held there. A hold could not be placed for 1 file: the "
+        "provider refused this token the right to add QoS requirements."
     )
 
 
@@ -1844,7 +1857,7 @@ async def test_check_an_empty_file_is_ready(fed: Fed, logical: int | None) -> No
 
     assert result == {
         "ready": True,
-        "files": 1,
+        "resolved_files": 1,
         "ready_files": 1,
         "bytes": 0,
         "advice": "Ready: all declared files are complete and readable at your provider now.",
@@ -1910,7 +1923,7 @@ async def test_check_a_dataset_without_its_leading_slash_resolves_when_its_first
 
     assert result == {
         "ready": True,
-        "files": 1,
+        "resolved_files": 1,
         "ready_files": 1,
         "bytes": 100,
         "advice": "Ready: all declared files are complete and readable at your provider now.",
@@ -1925,7 +1938,7 @@ async def test_check_a_dataset_without_its_leading_slash_resolves_when_its_first
 async def test_check_a_plain_space_name_still_works(fed: Fed) -> None:
     fed.add("a.nc", 100, local="full", owner="full")
 
-    assert (await readiness.check_readiness([{"dataset": SPACE}]))["files"] == 1
+    assert (await readiness.check_readiness([{"dataset": SPACE}]))["resolved_files"] == 1
 
 
 @pytest.mark.asyncio
@@ -1940,7 +1953,7 @@ async def test_check_a_dataset_without_its_leading_slash_and_no_such_space_says_
     result = await readiness.check_readiness([{"dataset": dataset}])
 
     assert result["ready"] is False
-    assert result["files"] == 0
+    assert result["resolved_files"] == 0
     assert result["unresolved"] == [misspelled(dataset, space)]
     assert not any("lookup-file-id" in p for _, p in fed.requests)
 
@@ -1953,7 +1966,7 @@ async def test_check_a_dataset_without_its_leading_slash_and_no_such_directory_i
 
     result = await readiness.check_readiness([{"dataset": f"{SPACE}/nodir"}])
 
-    assert result["files"] == 0
+    assert result["resolved_files"] == 0
     assert result["unresolved"] == [no_such_directory(f"{SPACE}/nodir")]
 
 
@@ -2011,7 +2024,7 @@ async def test_check_inaccessible_paths_are_unresolved_and_the_extent_is_not_rea
     result = await check()
 
     assert result["ready"] is False
-    assert result["files"] == 1  # what could be listed is still checked
+    assert result["resolved_files"] == 1  # what could be listed is still checked
     assert result["unresolved"] == [
         no_access(f"/{SPACE}/Dir1/Dir3"),
         no_access(f"/{SPACE}/private"),
@@ -2122,7 +2135,7 @@ async def test_check_file_names_are_matched_exactly_as_declared(fed: Fed, name: 
 
     result = await check(files=[name])
 
-    assert result["files"] == 0
+    assert result["resolved_files"] == 0
     assert result["unresolved"] == [file_not_found(name)]
 
 
@@ -2134,7 +2147,7 @@ async def test_check_dataset_names_are_matched_exactly_as_declared(fed: Fed, dat
     result = await readiness.check_readiness([{"dataset": dataset}])
 
     assert result["ready"] is False
-    assert result["files"] == 0
+    assert result["resolved_files"] == 0
     assert result["unresolved"] and result["unresolved"][0].startswith(
         f"dataset '{dataset}' not found"
     )
@@ -2198,7 +2211,7 @@ async def test_check_a_regular_entry_without_a_file_id_makes_the_listing_incompl
     result = await check()
 
     assert result["ready"] is False
-    assert result["files"] == 1
+    assert result["resolved_files"] == 1
     assert result["unresolved"] == [listing_incomplete()]
 
 
@@ -2436,7 +2449,7 @@ async def test_the_caps_are_exactly_20000_names_and_400_ranges(fed: Fed) -> None
         date_ranges=[{"start": "2018-01-01", "end": "2018-01-02"}] * 400,
     )
 
-    assert result["files"] == 1  # accepted, and resolved: the rest is unresolved
+    assert result["resolved_files"] == 1  # accepted, and resolved: the rest is unresolved
     assert result["unresolved"][-1].startswith("... and ")
 
 
@@ -2458,7 +2471,7 @@ async def test_check_an_enoent_or_404_from_the_listing_marks_the_dataset_unresol
     result = await check()
 
     assert result["ready"] is False
-    assert result["files"] == 0
+    assert result["resolved_files"] == 0
     assert result["unresolved"] == [no_such_directory(SPACE)]
 
 
@@ -2519,7 +2532,12 @@ async def test_ensure_does_not_claim_a_hold_it_could_neither_confirm_nor_recreat
     result = await ensure()
 
     assert held_summary(result) == {"files": 0, "rule": HOLD}
-    assert result["hold_failed"] == {"files": 1, "examples": [f.path]}
+    assert result["hold_failed"] == {
+        "files": 1,
+        "examples": [f.path],
+        "causes": {"refused": 1},
+    }
+    assert result["ready"] is False
 
 
 @pytest.mark.asyncio
@@ -2799,9 +2817,11 @@ async def test_ensure_a_rule_that_vanishes_before_the_answer_is_not_counted_as_h
 
     result = await ensure()
 
-    assert result["ready"] is True  # the data are there; they are no longer protected
+    # the data are there, and no longer protected: not ready, the data ready on their own
+    assert (result["ready"], result["data_ready"]) == (False, True)
     assert held_summary(result) == {"files": 0, "rule": HOLD}
-    assert result["hold_failed"] == {"files": 1, "examples": [a.path]}
+    assert result["hold_failed"]["files"] == 1
+    assert result["hold_failed"]["examples"] == [a.path]
 
 
 # --- C. what confirms a rule ------------------------------------------------------------------
@@ -2871,7 +2891,7 @@ async def test_check_a_regular_entry_without_a_path_makes_the_listing_incomplete
 
     result = await check()
 
-    assert result["files"] == 1
+    assert result["resolved_files"] == 1
     assert result["unresolved"] == [listing_incomplete()]
 
 
@@ -2899,7 +2919,7 @@ async def test_check_directory_and_symlink_entries_do_not_trouble_the_listing(fe
     result = await check()
 
     assert result["ready"] is True
-    assert result["files"] == 1
+    assert result["resolved_files"] == 1
 
 
 @pytest.mark.asyncio
@@ -2913,7 +2933,7 @@ async def test_check_an_unknown_file_type_makes_the_listing_incomplete(
 
     result = await check()
 
-    assert result["files"] == 1
+    assert result["resolved_files"] == 1
     assert result["unresolved"] == [listing_incomplete()]
 
 
@@ -2954,7 +2974,7 @@ async def test_check_a_plain_404_from_the_root_lookup_is_no_such_directory(
 
     result = await check()
 
-    assert result["files"] == 0
+    assert result["resolved_files"] == 0
     assert result["unresolved"] == [no_such_directory(SPACE)]
 
 
@@ -2988,7 +3008,7 @@ async def test_check_a_hanging_provider_configuration_read_answers_not_ready(
     assert time.monotonic() - started < 5  # the read alone would take 10 s
     assert result == {
         "ready": False,
-        "files": 0,
+        "resolved_files": 0,
         "ready_files": 0,
         "bytes": 0,
         "bytes_local": 0,
@@ -3032,7 +3052,7 @@ async def test_a_name_or_range_declared_twice_is_looked_for_once(fed: Fed) -> No
         date_ranges=[{"start": "2018-09-01", "end": "2018-09-30"}] * 4,
     )
 
-    assert result["files"] == 1
+    assert result["resolved_files"] == 1
     assert result["unresolved"] == [
         file_not_found("missing.nc"),
         range_matched_nothing("2018-09-01", "2018-09-30"),
@@ -3046,7 +3066,7 @@ async def test_twenty_thousand_repeats_of_one_name_cost_one_lookup(fed: Fed) -> 
     result = await check(files=["a.nc"] * 20_000)
 
     assert result["ready"] is True
-    assert result["files"] == 1
+    assert result["resolved_files"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -3057,20 +3077,22 @@ async def test_twenty_thousand_repeats_of_one_name_cost_one_lookup(fed: Fed) -> 
 def test_no_answer_text_advises_the_agent_on_its_analysis() -> None:
     texts = []
     for ready in (True, False):
-        for waited in (None, 0, 240):
-            for hold_failed in (0, 2):
-                for reason in readiness.REASONS:
-                    for n in (1, 5):
-                        texts.append(
-                            readiness._advice(
-                                ready=ready,
-                                counts={reason: n},
-                                unresolved=n,
-                                unchecked=n,
-                                waited_s=waited,
-                                hold_failed=hold_failed,
+        for waited in (None, 0, 150):
+            for data_ready in (False, True):
+                for causes in ({}, dict.fromkeys(readiness.HOLD_CAUSES, 2)):
+                    for reason in readiness.REASONS:
+                        for n in (1, 5):
+                            texts.append(
+                                readiness._advice(
+                                    ready=ready,
+                                    counts={reason: n},
+                                    unresolved=n,
+                                    unchecked=n,
+                                    waited_s=waited,
+                                    data_ready=data_ready,
+                                    hold_causes=causes,
+                                )
                             )
-                        )
     assert texts
     for text in texts:
         assert not re.search(r"comput|analy|do not|don't|should|must", text, re.IGNORECASE), text
@@ -3147,7 +3169,7 @@ async def test_one_trailing_or_a_missing_leading_slash_names_the_same_directory(
 
     result = await readiness.check_readiness([{"dataset": dataset}])
 
-    assert (result["ready"], result["files"]) == (True, 1), result
+    assert (result["ready"], result["resolved_files"]) == (True, 1), result
 
 
 @pytest.mark.parametrize("dataset", ["/..", "/.", "../x", "/./x"])
@@ -3276,7 +3298,11 @@ async def test_an_id_given_where_a_name_or_path_is_asked_for_is_named_as_an_id(f
             "A hold could not be placed for 1 file: the provider refused this token the right "
             "to add QoS requirements.",
         ),
-        (500, "A hold could not be placed for 1 file; the next call tries again."),
+        (
+            500,
+            "A hold could not be placed for 1 file: the provider rejected the request; the "
+            "next call tries again.",
+        ),
     ],
 )
 @pytest.mark.asyncio
@@ -3302,13 +3328,13 @@ def test_no_answer_text_names_a_tool() -> None:
             unresolved=n,
             unchecked=n,
             waited_s=waited,
-            hold_failed=failed,
-            hold_forbidden=forbidden,
+            data_ready=data_ready,
+            hold_causes={cause: 2} if cause else {},
         )
         for ready in (True, False)
         for waited in (None, 0, 150)
-        for failed in (0, 2)
-        for forbidden in (False, True)
+        for data_ready in (False, True)
+        for cause in (None, *readiness.HOLD_CAUSES)
         for reason in readiness.REASONS
         for n in (1, 5)
     ]
@@ -3481,21 +3507,23 @@ async def test_check_says_how_many_files_are_ready_and_keeps_the_examples(fed: F
 
     result = await check()
 
-    assert result["ready"] is False and result["files"] == 7
+    assert result["ready"] is False and result["resolved_files"] == 7
     assert result["ready_files"] == 3
     assert result["not_ready"]["at_other_site"]["files"] == 4
     assert len(result["not_ready"]["at_other_site"]["examples"]) == 3  # still capped at three
 
 
 @pytest.mark.asyncio
-async def test_a_ready_check_counts_every_file_and_ensure_answers_without_the_count(
+async def test_a_ready_check_and_a_ready_ensure_both_count_the_ready_files(
     fed: Fed,
 ) -> None:
     fed.add("a.nc", 100, local="full", owner="full")
     fed.add("b.nc", 100, local="full", owner="full")
 
     assert (await check())["ready_files"] == 2
-    assert "ready_files" not in await ensure()
+    # ensure says it too (the operator, after the external review: a weak model read "held:
+    # 5" as five ready files)
+    assert (await ensure())["ready_files"] == 2
 
 
 @pytest.mark.parametrize(
@@ -3543,7 +3571,7 @@ def test_only_the_offered_tool_is_ever_named() -> None:
             unresolved=1,
             unchecked=1,
             waited_s=waited,
-            hold_failed=1,
+            hold_causes={"rejected": 1},
             ensure_offered=True,
         )
         for waited in (None, 0, 150)
@@ -3591,7 +3619,7 @@ async def test_review_a_basename_matching_two_files_is_refused_and_neither_is_he
     result = await ensure(deadline_s=5, files=["log.dat"])
 
     assert fed.rules == {}
-    assert result["ready"] is False and result["files"] == 0
+    assert result["ready"] is False and result["resolved_files"] == 0
     (text,) = result["unresolved"]
     assert archive.path in text and current.path in text
 
@@ -3679,7 +3707,6 @@ async def test_review_two_concurrent_ensures_place_one_hold_and_report_the_same_
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
 async def test_review_ensure_is_not_ready_when_no_hold_was_placed(fed: Fed) -> None:
     """Codex 7, Gemini 9: complete and readable here, every hold refused, and the answer
     began "Ready: ... and held there" with `ready: true`."""
@@ -3694,7 +3721,6 @@ async def test_review_ensure_is_not_ready_when_no_hold_was_placed(fed: Fed) -> N
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
 async def test_review_the_advice_states_every_reason_not_only_the_largest(fed: Fed) -> None:
     """Gemini 3: three files at another site and two being written: the advice named the
     three only, and a model reading it reported the wrong reason."""
@@ -3727,7 +3753,7 @@ async def test_a_directory_inside_a_space_whose_name_is_shared_is_not_looked_up_
 
     result = await readiness.ensure_readiness([{"dataset": f"/{SPACE_ID}/sub"}], 5)
 
-    assert fed.rules == {} and result["files"] == 0
+    assert fed.rules == {} and result["resolved_files"] == 0
     assert result["unresolved"] == [
         f"dataset '/{SPACE_ID}/sub': the name of its space, '{SPACE}', is also another space's "
         "name or id at your provider, so no path inside it is looked up by that name. Declare "
@@ -3744,7 +3770,7 @@ async def test_a_space_whose_name_is_shared_is_listed_by_its_own_directory_id(fe
 
     result = await readiness.check_readiness([{"dataset": SPACE_ID, "files": ["sub/a.nc"]}])
 
-    assert (result["ready"], result["files"]) == (True, 1), result
+    assert (result["ready"], result["resolved_files"]) == (True, 1), result
     assert ("GET", "/api/v3/oneprovider/data/root-file-id/files") in fed.requests
 
 
@@ -3758,7 +3784,7 @@ async def test_a_directory_found_in_another_space_is_refused(fed: Fed) -> None:
 
     result = await ensure(deadline_s=5)
 
-    assert fed.rules == {} and result["files"] == 0
+    assert fed.rules == {} and result["resolved_files"] == 0
     assert result["unresolved"] == [
         f"dataset '{SPACE}' resolved to a directory of another space (id 'another-space'), not "
         f"of the space '{SPACE}' (id '{SPACE_ID}'), so nothing there is checked. Declare the "
@@ -3777,3 +3803,82 @@ async def test_the_ambiguous_space_text_names_both_and_how_to_tell_them_apart(fe
         f"space '{SPACE}' (id '{SPACE_ID}') and the space '{SPACE_ID}' (id 's2'). Give "
         f"'{SPACE}' or 's2' instead: each names one space only."
     ]
+
+
+# --- Partial evidence is labelled, never completed (Codex 13) ----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_file_not_on_a_listing_that_stopped_early_is_unknown_not_missing(
+    fed: Fed, clock: Clock
+) -> None:
+    """A listing cut short after one page: a declared file on the unread page was called "not
+    found", and `files: 1, ready_files: 1` looked complete beside `ready: false`."""
+    fed.add("a.nc", 100, local="full", owner="full")
+    fed.add("b.nc", 100, local="full", owner="full")
+    original = fed._listing
+
+    def first_page_then_stuck(root_id: str, body: dict) -> httpx.Response:
+        response = original(root_id, {**body, "limit": 1})
+        clock.now += readiness.CHECK_BUDGET_S  # the next page cannot come in time
+        return response
+
+    fed._listing = first_page_then_stuck  # type: ignore[method-assign]
+
+    result = await check(files=["/my-dataset/a.nc", "b.nc", "c.nc"])
+
+    assert result["ready"] is False
+    # the one file found was found too late to be checked: said so, not counted ready
+    assert (result["resolved_files"], result["ready_files"], result["unchecked"]) == (1, 0, 1)
+    assert out_of_time() in result["unresolved"]
+    for name in ("b.nc", "c.nc"):
+        assert (
+            f"file '{name}' in '{SPACE}' is unknown: it is not among the files listed before the "
+            "listing stopped, so whether it is there is not known."
+        ) in result["unresolved"]
+    assert not any("not found" in text for text in result["unresolved"])
+
+
+@pytest.mark.asyncio
+async def test_a_name_seen_once_on_a_listing_that_stopped_early_is_not_taken(
+    fed: Fed, clock: Clock
+) -> None:
+    """Another file of that name may be on the unread pages: it is asked for by its path."""
+    fed.add("a.nc", 100, local="full", owner="full")
+    fed.add("sub/a.nc", 100, local="full", owner="full")
+    original = fed._listing
+
+    def first_page_then_stuck(root_id: str, body: dict) -> httpx.Response:
+        response = original(root_id, {**body, "limit": 1})
+        clock.now += readiness.CHECK_BUDGET_S + readiness.MAX_WAIT_CAP_S + 60
+        return response
+
+    fed._listing = first_page_then_stuck  # type: ignore[method-assign]
+
+    result = await readiness.ensure_readiness(extent(files=["a.nc"]), 60)
+
+    assert fed.rules == {} and result["resolved_files"] == 0
+    assert (
+        f"file 'a.nc' in '{SPACE}' is not taken: the listing stopped early, so another file of "
+        "that name may be in the rest of it. Give it by its path inside the dataset or its "
+        "absolute path."
+    ) in result["unresolved"]
+
+
+@pytest.mark.asyncio
+async def test_hold_failures_are_counted_by_the_cause_the_provider_showed(fed: Fed) -> None:
+    """One refused hold made the advice say that every failure was a refusal."""
+    refused = fed.add("a.nc", 100, local="full", owner="full")
+    rejected = fed.add("b.nc", 100, local="full", owner="full")
+    fed.add("c.nc", 100, local="full", owner="full")
+    fed.qos_status = lambda fid, expression: {refused.fid: 403, rejected.fid: 500}.get(fid, 201)
+
+    result = await ensure(deadline_s=5)
+
+    assert result["hold_failed"]["causes"] == {"refused": 1, "rejected": 1}
+    assert result["advice"] == (
+        "Not ready after 0 s: the data are complete and readable at your provider now "
+        "(data_ready), but 2 files are not held there. A hold could not be placed for 1 file: "
+        "the provider refused this token the right to add QoS requirements. A hold could not "
+        "be placed for 1 file: the provider rejected the request; the next call tries again."
+    )

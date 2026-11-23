@@ -50,19 +50,28 @@ class RecordingApp:
         self.call_cap_s = call_cap_s
         self._clock = clock
         self.calls: list[CallRecord] = []
+        self._offered: frozenset[str] | None = None
 
     async def list_tools(self) -> list[Any]:
         """The scenario's tools only: a model never sees a tool it may not call."""
         return [t for t in await self._app.list_tools() if t.name in self.allowed]
+
+    async def offered(self) -> frozenset[str]:
+        """The tools the model is offered: those the app registers AND the scenario allows (a
+        name on the allow-list that the app does not register is not offered)."""
+        if self._offered is None:
+            self._offered = frozenset(t.name for t in await self.list_tools())
+        return self._offered
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         record = CallRecord(
             index=len(self.calls), tool=name, arguments=dict(arguments), started_at=self._clock()
         )
         self.calls.append(record)
-        # The tools see what the model was offered, not every tool the app registers: a tool's
-        # text names another tool only when it is offered (`tool_maturity.OFFERED_TOOLS`).
-        offered = OFFERED_TOOLS.set(frozenset(self.allowed))
+        # The tools see what the model was offered, not every tool the app registers nor every
+        # name allowed: a tool's text names another tool only when it is offered
+        # (`tool_maturity.OFFERED_TOOLS`).
+        offered = OFFERED_TOOLS.set(await self.offered())
         try:
             if name not in self.allowed:
                 raise ToolError(f"tool {name!r} is not offered in this scenario")

@@ -69,9 +69,17 @@ async def test_descriptions_say_what_the_answer_means_and_advise_nothing_on_the_
         assert reason in check
     assert check.endswith("Read-only.")
     assert "YYYYMMDD" in check
+    # ready asks both: the data, and every hold (Codex 7, Gemini 9); each is reported apart
     assert (
-        "ready (the data are complete and readable at your provider now, and held there)" in ensure
+        "The answer is ready only when the data are complete and readable at your provider now "
+        "and every file is held there" in ensure
     )
+    assert "data_ready says whether the data alone are" in ensure
+    assert "hold_failed which holds are missing and why" in ensure
+    # with both selectors, their union is meant (the operator, after the external review)
+    for text in (check, ensure):
+        assert "(with both, every file that either selects)" in text
+        assert "by its name such as 'my-dataset' or its id" in text
     assert "call it again" in ensure
     assert "about 2.5 minutes" in ensure
     # holds are said to be QoS requirements that stay until removed, by the ids the answer lists
@@ -302,7 +310,7 @@ async def test_check_readiness_through_the_mcp_client(
 
     assert result.data == {
         "ready": True,
-        "files": 1,
+        "resolved_files": 1,
         "ready_files": 1,
         "bytes": 10,
         "advice": "Ready: all declared files are complete and readable at your provider now.",
@@ -344,11 +352,13 @@ async def test_ensure_readiness_through_the_mcp_client(
 
     assert result.data == {
         "ready": True,
-        "files": 1,
+        "data_ready": True,
+        "resolved_files": 1,
+        "ready_files": 1,
         "bytes": 10,
         "advice": (
             "Ready: all declared files are complete and readable at your provider now, "
-            "and held there."
+            "and each is held there."
         ),
         "waited_s": 0,
         "held": {

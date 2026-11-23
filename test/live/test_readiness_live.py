@@ -105,7 +105,7 @@ async def test_a_file_written_here_is_ready(space: str, probe_file: tuple[str, s
     result = await readiness.check_readiness([{"dataset": space, "files": [name]}])
 
     assert result["ready"] is True, result
-    assert result["files"] == 1
+    assert result["resolved_files"] == 1
 
 
 @pytest.mark.asyncio
@@ -140,7 +140,7 @@ async def test_a_file_that_is_not_there_is_unresolved_and_says_what_to_give(
     result = await readiness.check_readiness([{"dataset": space, "files": [missing]}])
 
     print(f"unresolved: {result['unresolved']!r}")
-    assert result["ready"] is False and result["files"] == 0
+    assert result["ready"] is False and result["resolved_files"] == 0
     assert result["unresolved"] == [
         f"file '{missing}' in '{space}' not found: give the exact file name, or its absolute path."
     ]

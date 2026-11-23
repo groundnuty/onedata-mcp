@@ -43,10 +43,11 @@ ENSURE_DESCRIPTION = (
     + " `deadline_s` is how long you can wait. The system chooses where to copy from and "
     "waits for unfinished writes and transfers. Each file is held by a QoS requirement that "
     "keeps it at your provider until that requirement is removed by its id; the answer lists "
-    "the ids. The answer is ready (the data are complete and readable at your provider now, "
-    "and held there), or not ready with the reason. One call waits at most about 2.5 "
-    "minutes; if the answer is not ready because data are being written or in transfer, "
-    "call it again."
+    "the ids. The answer is ready only when the data are complete and readable at your "
+    "provider now and every file is held there; data_ready says whether the data alone are, "
+    "and hold_failed which holds are missing and why. Otherwise it is not ready, with the "
+    "reason. One call waits at most about 2.5 minutes; if the answer is not ready because data "
+    "are being written or in transfer, call it again."
 )
 
 # A concrete `extent`, so that a model need not guess its shape (one guessed

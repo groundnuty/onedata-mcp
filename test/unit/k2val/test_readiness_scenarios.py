@@ -397,7 +397,7 @@ async def test_rc_a_check_of_the_five_days_then_ready_passes(
 
     art = await _trial(cfg, api, clock, tmp_path, ready_tools, "RC", model)
 
-    assert seen["answer"]["ready"] is True and seen["answer"]["files"] == 5
+    assert seen["answer"]["ready"] is True and seen["answer"]["resolved_files"] == 5
     assert art.outcome == "PASS", art.oracle_diagnosis
     assert art.offered_surface_sha == RECORDED_SURFACES[frozenset(RC_TOOLS)][1]
 
@@ -446,7 +446,7 @@ async def test_rcp_only_a_scoped_extent_answers_right(
 ) -> None:
     async def scoped(app, brief_text):
         answer = await result_of(app, "check_readiness", {"extent": _by_paths(_dir_of(brief_text))})
-        assert answer["ready"] is True and answer["files"] == 3, answer
+        assert answer["ready"] is True and answer["resolved_files"] == 3, answer
         return "Yes: the three files are complete and readable at vistula-dc."
 
     art = await _trial(cfg, api, clock, tmp_path / "scoped", ready_tools, "RCp", scoped)
@@ -886,3 +886,27 @@ async def test_review_a_space_and_a_date_range_that_hold_only_the_trials_files_a
 
     assert "write_outside" not in art.flags, art.oracle_diagnosis
     assert art.outcome == "PASS", art.oracle_diagnosis
+
+
+@pytest.mark.asyncio
+async def test_the_offered_tools_a_tool_sees_are_those_listed_not_the_whole_allow_list() -> None:
+    """Codex 12: OFFERED_TOOLS was set to the allow-list, so a tool allowed but not registered
+    (pruned) counted as offered and could be named."""
+    from benchmark.k2val.recording import RecordingApp
+    from onedata_mcp.tool_maturity import OFFERED_TOOLS
+
+    seen: list[frozenset[str] | None] = []
+
+    class App:
+        async def list_tools(self):
+            return [SimpleNamespace(name="check_readiness")]
+
+        async def call_tool(self, name, arguments):
+            seen.append(OFFERED_TOOLS.get())
+            return {}
+
+    app = RecordingApp(App(), allowed=frozenset({"check_readiness", "ensure_readiness"}))
+    await app.call_tool("check_readiness", {})
+
+    assert seen == [frozenset({"check_readiness"})]
+    assert OFFERED_TOOLS.get() is None  # reset after the call
