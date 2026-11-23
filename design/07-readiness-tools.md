@@ -1,7 +1,9 @@
 # Readiness tools: `check_readiness` and `ensure_readiness`
 
 Status: spec for implementation (2026-11-19). Two new tools at maturity
-`experimental`, origin `ours`. They implement a *readiness guarantee*: the agent
+`experimental`, origin `ours`. Superseded in part by their promotion records
+(design/17, design/18, 2026-11-23): neither tool's description or answer names
+the other; an unknown extent field is refused; one ensure call waits 150 s. They implement a *readiness guarantee*: the agent
 declares the data its analysis needs, and the server says whether they are
 ready, makes them ready, and holds them.
 

@@ -1621,8 +1621,10 @@ data than declared. `check_readiness` answered for the whole dataset;
 **How it was found:** the panel's second wave (the guess); gate 1 of
 the readiness tools' promotion (the drop).
 
-**Evidence:** design/17, gate 1 ("An extent item with a field it does
-not have"); design/18, decision 1.
+**Evidence:** the guess: a second-wave trial whose record is not in
+this repository (the wave's artefacts were not committed). The drop:
+design/17, gate 1 ("An extent item with a field it does not have"),
+and its tests; design/18, decision 1.
 
 **Fix:** the `extent` field's description carries a concrete example
 with both dataset forms, `files` and `date_ranges`, and a test checks
@@ -1653,8 +1655,10 @@ failure, not as "call again".
 
 **How it was found:** the panel's second wave (the jailed CLI legs).
 
-**Evidence:** design/18, decision 2; the tests "a default ensure call
-ends under a 180 s client timeout" (`test/unit/api/test_readiness.py`).
+**Evidence:** the cancelled call: a second-wave trial whose record is
+not in this repository. The bound: design/18, decision 2, and the test
+"a default ensure call ends under a 180 s client timeout"
+(`test/unit/api/test_readiness.py`).
 
 **Fix:** one call waits at most 150 s and ends within 170 s (the grace
 for the final pass 30 → 20 s); the description says "at most about

@@ -61,7 +61,7 @@ The extent's rows are design/17's (unknown fields refused, `.`/`..` components, 
 - **Names no tool that may not be offered alongside it:** it named `check_readiness` ("Takes the same `extent` as check_readiness"), which a set may leave out (`RE_TOOLS` does). **Fixed:** it describes the extent itself. Its answer named itself only, and now names no tool.
 - **Cites no document:** none.
 - **Errors tell the caller how to fix the call:** gate 1.
-- **`make conformance`:** TODO, once for both tools (design/17).
+- **`make conformance`: passed** (design/17: one run for both tools, 2026-11-23, 12 passed, 20 failed, all expected).
 
 ## Gate 3: live check (re-run TODO)
 

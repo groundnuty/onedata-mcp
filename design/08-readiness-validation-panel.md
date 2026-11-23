@@ -393,8 +393,8 @@ checks make the outcome is "Scoring" below. The briefs name the directory and th
 cannot discover with the tools offered (V1 names its six files, as the K1 set has no listing tool); they never name a
 tool.
 
-Nothing should change in V1, V3n, V3o, V4, V5, SR1n, SR1o, FA, FAi, FAn, LC, LCn, LCo, LCp, LCi and CDn: they are
-**restraint** scenarios (see "Scoring").
+Nothing should change in V1, V3n, V3o, V4, V5, SR1n, SR1o, FA, FAi, FAn, LC, LCn, LCo, LCp, LCi, CDn, RC, RCn, RCo
+and RCp: they are **restraint** scenarios (see "Scoring").
 
 1. **V1 attributes** (K1). Six S0 files; two of them also locally replicated.
    - Brief: "Which of these files in `<dir>` are fully stored at your site vistula-dc: log_20200101.dat, ...,
@@ -479,6 +479,15 @@ Nothing should change in V1, V3n, V3o, V4, V5, SR1n, SR1o, FA, FAi, FAn, LC, LCn
     after the whole settle window; ST2–ST6 and ST4i are restraint scenarios (60 s); ST3 and ST5 add a shape check of
     `get_file_qos_summary`'s `replicas_num`. Their fixtures read back their rules, check their transfers' details,
     and (ST4) check that the local provider lists the two transfers newest first among its first 10 ended ones.
+11. **The readiness tools' scenarios** (RC, RCn, RCo, RCp for `check_readiness`; RE, REn, REo, REp for
+    `ensure_readiness`; design/17, design/18), in `readiness_scenarios.py` and `readiness_oracles.py`. They REQUIRE
+    the tool, which V4–V7 (kept as supporting evidence) do not: RC, RCn and RCp are offered `RC_TOOLS` (no tool that
+    reads blocks, replicas, QoS state or transfers, and not `ensure_readiness`); RE, REn and REp `RE_TOOLS` (no tool
+    that makes a copy or a rule, or reads that state, and not `check_readiness`). RC and RCn have V4's brief, RE and
+    REn share one with a five-minute bound; RCp and REp give three files by path. RCo and REo are V1 and SR1 with the
+    K2 set (the tool offered, not needed). RC, RCn, RCo and RCp are restraint scenarios (60 s). Required: a
+    successful call whose `extent` selects every file asked about, read by the tool's own rules; RE and REp also
+    check that each file was local and held at the answer, REp that the others were left alone.
 
 ## Scoring (design/10, gate 4)
 
@@ -491,7 +500,8 @@ Nothing should change in V1, V3n, V3o, V4, V5, SR1n, SR1o, FA, FAi, FAn, LC, LCn
   id, to the local provider's id), SR1i (the file's id), FA and FAn (`get_file_attributes` RETURNED the mode,
   `posixPermissions`, of each of the four files; a call asking for other attributes only is not a reading), FAi (the
   same, by the ids the brief gave), LC, LCn, LCp (the directory listed to its end: every top-level entry seen in a
-  `children` list, by id or name), LCi (the directory's id), CD (`archive`), CDp (`2020/01`). Paths are compared
+  `children` list, by id or name), LCi (the directory's id), CD (`archive`), CDp (`2020/01`), RC, RCn, RCp and RE,
+  REn, REp (a `check_readiness` or `ensure_readiness` whose `extent` selects every file asked about), REo (SR1's). Paths are compared
   with `.` and `..` resolved. V3 and V3i also fail if a placement rule was, or may have been, added to the trial's
   files (an add that may have taken effect, as below).
 - **A whole claim is read from the blocks (SR1 and SR1i).** `schedule_file_replication`'s copy scenarios use a 128 MiB
