@@ -1706,7 +1706,6 @@ async def test_verify2_a_call_cancelled_before_it_ran_keeps_an_empty_record() ->
     assert record.ended_at and record.error == CANCELLED
 
 
-@_XF2
 @pytest.mark.parametrize(
     ("sid", "answer", "check"),
     [
@@ -1741,5 +1740,42 @@ async def test_verify2_a_call_cancelled_before_it_ran_keeps_an_empty_record() ->
     ],
 )
 def test_verify2_the_readers(sid, answer, check) -> None:
+    reading = read_answer(sid, answer)
+    assert check(reading), reading
+
+
+@pytest.mark.parametrize(
+    ("sid", "answer", "check"),
+    [
+        # a try given as a word is no count; the count beside it is
+        ("RCn", "On attempt four, two files are still being written.", lambda r: r[1] == {"#2"}),
+        # "a total of four" counts; "of the four ..., two" takes a part
+        ("RCn", "Of the four files, two are still being written.", lambda r: r[1] == {"#2"}),
+        # an "and" between clauses still splits, between names sharing a verb it does not
+        (
+            "RCn",
+            "log_20200101.dat is ready and log_20200104.dat is still being written.",
+            lambda r: set(r[1]) == {"log_20200104.dat"},
+        ),
+        # readiness at the local site among others, against a copy on its way here
+        (
+            "RC",
+            "The files are complete at nordic-marine-dc and being transferred here.",
+            lambda r: r[0] != "SAYS_READY",
+        ),
+        (
+            "RC",
+            "All five are ready at vistula-dc and at nordic-marine-dc as well.",
+            lambda r: r[0] == "SAYS_READY",
+        ),
+        # the other three said ready here, against ready only at the owner
+        (
+            "V5",
+            "No: two are still being written; the other three are ready here.",
+            lambda r: "others:ready" in r[1],
+        ),
+    ],
+)
+def test_verify2_the_readers_pairs(sid, answer, check) -> None:
     reading = read_answer(sid, answer)
     assert check(reading), reading

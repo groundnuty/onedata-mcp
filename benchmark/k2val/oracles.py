@@ -802,8 +802,16 @@ def _split_and(clause: str) -> list[str]:
     out, start = [], 0
     for m in _AND.finditer(clause):
         # a clause on both sides: a verb on the left, and on the right one before any comma (an
-        # independent predicate, not "two files, a and b, still being written")
-        if _VERB.search(clause[start : m.start()]) and _OWN_VERB.match(clause[m.end() :]):
+        # independent predicate, not "two files, a and b, still being written"); never between
+        # two file names that share one verb ("... that a and b are still being written")
+        coordinated = _NAME_BEFORE.search(clause[: m.start()]) and _NAME_AFTER.match(
+            clause[m.end() :]
+        )
+        if (
+            _VERB.search(clause[start : m.start()])
+            and _OWN_VERB.match(clause[m.end() :])
+            and not coordinated
+        ):
             out.append(clause[start : m.start()])
             start = m.end()
     out.append(clause[start:])
@@ -811,6 +819,11 @@ def _split_and(clause: str) -> list[str]:
 
 
 _OWN_VERB = re.compile(r"[^,;:]*?" + _VERB.pattern, re.I)
+# A file name (or a January day) right before an "and", and right after it.
+_NAME_BEFORE = re.compile(
+    r"(?:log_\d{8}\.dat|\bjan(?:uary)?\.?\s+\d{1,2}(?:st|nd|rd|th)?)[`'\"*\s]*$", re.I
+)
+_NAME_AFTER = re.compile(r"^[`'\"*\s]*(?:log_\d{8}\.dat|jan(?:uary)?\b)", re.I)
 
 
 _ANSWERED_NO = re.compile(r"^\W*\?\W*(?:no|none)\b", re.I)
@@ -957,12 +970,14 @@ _NOT_FILES = re.compile(
     r"[kmgt]i?b)\b"
     # a number naming a try, not counting files: "on attempt 4", "the 4th call", "poll #3"
     r"|\b(?:attempts?|tries|try|rounds?|polls?|calls?|checks?|passes|pass|iterations?|steps?)"
-    r"\s*(?:no\.?|number|#)?\s*\d+\b"
+    r"\s*(?:no\.?|number|#)?\s*" + _NUMBER + r"\b"
     r"|\b\d+(?:st|nd|rd|th)\b"
-    # the whole a part is taken from: "of the five files, some ...", "out of 5"
-    r"|\b(?:of|out of|among)\s+(?:the\s+|all\s+|these\s+|those\s+)?"
+    # the larger group a part is taken from: "of the five files, some ...", "out of 5" (never
+    # "a total of four files", which counts them)
+    r"|\b(?:of|among)\s+(?:the|all|these|those|all\s+the)\s+"
     + _NUMBER
-    + r"\b(?:\s+(?:files?|logs?|requested|declared))*",
+    + r"\b(?:\s+(?:files?|logs?|requested|declared))*"
+    r"|\bout\s+of\s+(?:the\s+)?" + _NUMBER + r"\b(?:\s+(?:files?|logs?))?",
     re.I,
 )
 # A count after the phrase, bound to files: "still being written: 4 files", "in progress for all
@@ -1090,11 +1105,21 @@ def _ready_here(clause: str, other_site: re.Pattern[str], local: str) -> bool:
         re.I,
     )
     for word in _READY_WORD.finditer(clause):
-        for place in here.finditer(clause, word.end(), word.end() + 40):
+        for place in here.finditer(clause, word.end(), word.end() + 60):
             between = clause[word.end() : place.start()]
-            if not other_site.search(between) and not _NEGATION.search(between):
+            # nothing between but other places of the same readiness ("ready at <owner> and at
+            # <local> as well"); never a transfer or anything else ("complete ... and is being
+            # transferred here": the copy here is not complete)
+            if _LOCATIONS.fullmatch(between) and not _NEGATION.search(between):
                 return True
     return False
+
+
+_LOCATIONS = re.compile(
+    r"(?:\s*(?:,|and|as\s+well\s+as)?\s*(?:at|on|in)\s+[\w.\-]+(?:\s+as\s+well)?)*"
+    r"\s*(?:,|and|as\s+well\s+as)?\s*",
+    re.I,
+)
 
 
 def _ready_clauses(text: str, other_site: re.Pattern[str], owner: str, local: str) -> list[str]:
@@ -1154,13 +1179,20 @@ _OTHERS_READY = re.compile(
 )
 
 
-def says_others_ready(text: str) -> bool:
+def says_others_ready(text: str, owner: str, local: str) -> bool:
     """The answer says the files it does not say are being written are here and ready: "the
-    other three are ready here", "the rest are complete"."""
-    return any(
-        not _DENIED_BEFORE.search(text[: m.start()]) and not _NEGATION.search(m.group())
-        for m in _OTHERS_READY.finditer(text)
-    )
+    other three are ready here", "the rest are complete". Not when it puts that readiness at
+    another site ("the other three are ready only at <owner>": true in V5, and no claim about
+    this site)."""
+    other_site = _other_site_regex(owner, local)
+    for m in _OTHERS_READY.finditer(text):
+        if _DENIED_BEFORE.search(text[: m.start()]) or _NEGATION.search(m.group()):
+            continue
+        claim = m.group() + re.split(r"[.;,\n]", text[m.end() :], maxsplit=1)[0]
+        if other_site.search(claim) and not _ready_here(claim, other_site, local):
+            continue  # ready at another site
+        return True
+    return False
 
 
 def says_others_not_ready(text: str, owner: str) -> bool:
@@ -1189,7 +1221,7 @@ def read_check(answer: str, local: str, owner: str) -> tuple[str, frozenset[str]
     writing = says_writing(answer)
     if writing and says_others_not_ready(text, owner):
         said = said | {OTHERS_NOT_READY}
-    if writing and says_others_ready(text):
+    if writing and says_others_ready(text, owner, local):
         said = said | {OTHERS_READY}
     not_ready = _says_not_ready(text)
     verdict = bool(_NOT_READY_VERDICT.search(text) or _OPENS_NO.match(text))
