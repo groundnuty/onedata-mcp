@@ -386,7 +386,11 @@ The rules so far, each learned from findings:
    worked. Name a cause only when the response establishes it (a
    structured error id or errno on a 4xx); otherwise list the
    possible causes and what to check, and keep Onedata's message
-   after the hint.
+   after the hint. A hint must not be followed by provider text that
+   contradicts it (M-46): after "Pass its id …, not its name",
+   Onedata's own message said the space is not supported by that
+   "provider", and a model believed it over the hint. Where the
+   provider's message can contradict the hint, drop it.
 4. **Say "empty" explicitly.** A silent empty answer reads as a wrong
    query (M-12) or as something hidden (M-30). When nothing matches,
    say so in words, and say what was searched. A status with nothing
@@ -1597,6 +1601,79 @@ tool's name, input schema, annotations and description are unchanged.
 
 **Decision:** Fixed (this PR); smoke re-run pending (V1, SR1, SR1i,
 SR1n, ST6, K=3).
+
+---
+
+## M-46. F3: Onedata's message after "Pass its id" said the opposite
+
+**Surface:** `schedule_file_replication` (experimental), its error for
+a provider's name given as `target_provider_id`.
+
+**Behaviour:** Qwen3-Coder passed the provider's NAME, `local`, as
+`target_provider_id`. Onedata refused it. The tool's error opened as
+designed ("Pass its id '…', not its name: 'local' is the name of a
+provider that supports the space of …"), then, as every hint here
+does, appended Onedata's own message. For this slip 25.0's message
+says the space "is not supported by provider "local"": Onedata reads
+the name as an id and finds no such provider. The model believed the
+appended text and copied the file to the other provider instead.
+
+**Why this matters:** the hint was right and the text after it said
+the opposite. A model that has to choose between the tool's diagnosis
+and the provider's own words took the provider's. A hint that is
+followed by its own contradiction steers no better than no hint (M-21
+had the same defect inside the hint; this one is between the hint and
+the message after it). M-21, the name passed as an id, predicted the
+slip.
+
+**How it was found:** the stable-tool smoke run (design/16).
+
+**Evidence:** run `smoke-stable-2`, Qwen3-Coder SR1i #0 and #1. In the
+same run `add_file_qos_requirement`'s equivalent refusal (M-36; built
+before any request, no Onedata text in it) led the same model to the
+right id both times.
+
+**Root cause:** the tool appends Onedata's message to every hint, on
+the assumption that it can only add detail. For a name given as an id
+it cannot: the message describes the name read as an id, and
+contradicts the hint's statement about the provider.
+
+**Fix:** the target is checked against the space's providers before
+anything is scheduled, as M-36 does for `providerId=` operands. One
+`GET /spaces/{id}` (the space comes from the file id; for a path, from
+the id its lookup returns), through the shared `_providers_of_space`.
+The MCP tool turns the check on.
+- A value that is a provider's name is refused before any request:
+  "Pass its id '…', not its name: …", with the space's providers
+  listed, name and id, and "No replication was scheduled." No
+  Onedata text.
+- A value that is neither a name nor an id of one is refused with the
+  providers listed, again with no Onedata text.
+- An id passes unchanged. If the space or its providers cannot be
+  read, the value is sent and the error mapped as before.
+
+**The contradiction policy (chosen: drop).** Where a hint is built
+from an Onedata error about a target name or id, the message after it
+was checked for a contradiction. Only the name hint can have one, and
+it now stands alone, with Onedata's message dropped, not prefixed: a
+prefix such as "Onedata's own words:" would still put the contradicting
+sentence in front of a model that believed it once, and the hint
+already carries what the message could add (the id to use, the
+providers). The name hint is also reached after a send, when the
+providers could not be listed before it and could afterwards. The
+other hints keep the message: they agree with it ("no provider with
+that id supports the space" after `spaceNotSupportedBy`) or say that
+Onedata did not say which argument it means. Only three modules put
+Onedata's message after a hint (`api/transfers.py`, and `api/qos.py`
+and `api/files.py`); the other two are about a QoS requirement id and
+about file ids and paths, and say nothing of a provider.
+
+The tool's name, input schema, annotations and description are
+unchanged (surface hashes unchanged: design/12).
+
+**Decision:** Fixed (this PR); SR1/SR1i K=8 re-run pending (the six-
+config panel; design/12). The refusal is NOT VERIFIED until a re-run
+trial draws it (design/10).
 
 ---
 
