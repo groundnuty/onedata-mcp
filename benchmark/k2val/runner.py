@@ -405,6 +405,7 @@ async def run_trial(
             directory=directory,
             dir_id=fixture.dir_id,
             local_provider_id=await deps.fed.provider_id("local"),
+            space_id=fixture.space_id,
         )
         common["snapshot_after_settle"] = after_settle.to_json()
         common["oracle_context"] = context_to_json(ctx)

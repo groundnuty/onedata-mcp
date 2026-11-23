@@ -521,9 +521,9 @@ class FixtureBuilder:
             await self._wait_local_sees(bf)
 
         role_ids = {"owner": owner_id, "local": local_id}
-        if spec.rules_detail or spec.rules_in_snapshots or spec.space_by_id:
-            fixture.rules_in_snapshots = spec.rules_in_snapshots
-            fixture.space_id = await self.fed.space_id("owner", self.space)
+        # every fixture reads its space's id: the scorer places a recorded write by it
+        fixture.rules_in_snapshots = spec.rules_in_snapshots
+        fixture.space_id = await self.fed.space_id("owner", self.space)
         for fs in spec.files:
             bf = fixture.files[fs.name]
             if fs.kind == "s0_local":

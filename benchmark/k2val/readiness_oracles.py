@@ -10,9 +10,11 @@
   scenarios' federation checks are `scoring.py`'s.
 - the answer READERS and the right readings (`READINESS_READERS`, `READINESS_RIGHT`): the
   shared vocabulary's (`oracles.read_check`), V1's and SR1's.
-- the REQUIRED CALLS (`READINESS_REQUIRED`): a successful call of the tool whose `extent`
-  selects every file asked about, by the tool's own rules (`extent_selects`). REo's is SR1's,
-  which `scoring.py` registers itself.
+- the REQUIRED CALLS (`READINESS_REQUIRED`): successful calls of the tool that, between them,
+  established every file asked about, read per file from each call's own record
+  (`call_resolution`; a call with no record is never read from its arguments: the trial is a
+  harness outcome). REo's is SR1's, which `scoring.py` registers itself. `extent_selects` reads
+  an extent by the tool's own rule (`readiness.select_paths`), for tests and reports.
 
 An unreadable snapshot is never judged: `UnusableSnapshot` (the runner records ORACLE_ERROR).
 This module imports `scoring` only inside functions: `scoring` imports `oracles`, which
@@ -81,64 +83,70 @@ def extent_selects(extent: object, paths: Iterable[str]) -> set[str]:
 _CHECKED = frozenset({"ready", "unreachable", "being_written", "in_transfer", "at_other_site"})
 
 
-def call_selection(ctx: K2Context, call: Any) -> set[str]:
-    """The files one successful call established the state of: from the call's own record
-    (`CallRecord.audit["resolved"]`, the tool's resolution and each file's final state; a file
-    left unchecked does not count), else, for an artefact made before that record, its `extent`
-    read by the tool's rule over the fixture's files (`extent_selects`)."""
+def call_resolution(call: Any) -> list[dict[str, Any]]:
+    """What one call resolved, from its own record (`CallRecord.audit["resolved"]`: each file
+    by its id and its space's id, its final state, and the extent items that selected it).
+    A call with no record at all is a trace from before the record: it is not inferred from its
+    arguments, and the trial cannot be scored (UnverifiableEvidence, a harness outcome). A call
+    that resolved nothing has an empty record."""
+    from benchmark.k2val.scoring import NO_RECORD, UnverifiableEvidence
+
     audit = getattr(call, "audit", None)
-    if isinstance(audit, dict) and isinstance(audit.get("resolved"), list):
-        return {
-            _norm(entry["path"])
-            for entry in audit["resolved"]
-            if isinstance(entry, dict)
-            and isinstance(entry.get("path"), str)
-            and entry.get("state") in _CHECKED
-        }
-    return extent_selects(call.arguments.get("extent"), ctx.run.fixture_paths)
+    if not isinstance(audit, dict):
+        raise UnverifiableEvidence(f"{call.tool} (call {call.index}): {NO_RECORD}")
+    return [e for e in audit.get("resolved") or () if isinstance(e, dict)]
 
 
-def _by_space_id(ctx: K2Context, call: Any) -> bool:
-    """The call's extent gives a dataset by a space segment other than the space's name: by
-    its id (the only other form the tool takes for a space)."""
+def _id_items(ctx: K2Context, call: Any) -> set[int]:
+    """The indexes of the call's extent items that give their dataset by a space segment other
+    than the space's name: by its id (the only other form the tool takes for a space)."""
     try:
         items = _normalise_extent(call.arguments.get("extent"))
     except (ValueError, TypeError):
-        return False
-    return any(item.space != ctx.run.space_name for item in items)
+        return set()
+    return {i for i, item in enumerate(items) if item.space != ctx.run.space_name}
 
 
 def _required(
     tool: str, *, exact: bool = False, by_id: bool = False
 ) -> Callable[[K2Context], tuple[bool, str]]:
     """Successful calls of `tool` that, between them, established the state of every file the
-    brief asks about (`call_selection`). `exact` (RCp, REp, whose brief names three of five
-    files): only a call whose selection is within the files asked about counts, so that the
-    evidence is about those files, not read off a wider call by subtraction. `by_id` (RCi):
-    only a call that gives the dataset by the space's id counts."""
+    brief asks about, read per file (by its id, in the trial's space) from each call's own
+    record (`call_resolution`; a file left unchecked does not count). `exact` (RCp, REp, whose
+    brief names three of five files): only a call whose every selected file, checked or not, is
+    one asked about counts, so the evidence is about those files and not read off a wider call.
+    `by_id` (RCi): only files that an item giving the dataset by the space's id selected."""
 
     def predicate(ctx: K2Context) -> tuple[bool, str]:
         from benchmark.k2val.scoring import successful
 
-        want = {_norm(f"{ctx.directory}/{name}") for name in asked_files(ctx)}
+        by_path = {_norm(p): fid for p, fid in ctx.run.fixture_paths.items()}
+        want = {by_path[_norm(f"{ctx.directory}/{name}")] for name in asked_files(ctx)}
         covered: set[str] = set()
         used: list[int] = []
         for c in successful(ctx, tool):
-            if by_id and not _by_space_id(ctx, c):
+            entries = [
+                e
+                for e in call_resolution(c)
+                if not ctx.space_id or e.get("space_id") == ctx.space_id
+            ]
+            if exact and not {e.get("file_id") for e in entries} <= want:
                 continue
-            selected = call_selection(ctx, c)
-            if not selected or (exact and not selected <= want):
-                continue
-            if selected & want:
-                covered |= selected & want
+            if by_id:
+                id_items = _id_items(ctx, c)
+                entries = [e for e in entries if id_items & set(e.get("items") or ())]
+            checked = {e.get("file_id") for e in entries if e.get("state") in _CHECKED} & want
+            if checked:
+                covered |= checked
                 used.append(c.index)
         if want <= covered:
             return True, f"{tool} established every file asked about (calls {used})"
-        missing = sorted(p.rsplit("/", 1)[-1] for p in want - covered)
+        names = {fid: p.rsplit("/", 1)[-1] for p, fid in by_path.items()}
+        missing = sorted(names.get(f, f) for f in want - covered)
         scope = (
             " in calls scoped to the files asked about"
             if exact
-            else " in calls giving the dataset by the space's id"
+            else " through an item giving the dataset by the space's id"
             if by_id
             else ""
         )

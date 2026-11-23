@@ -55,6 +55,8 @@ class K2Context:
     directory: str = ""
     dir_id: str = ""
     local_provider_id: str = ""
+    # the trial's space by its id (the fixture reads it): a recorded write is placed by it
+    space_id: str = ""
     # The reading that decides (scoring.py: the deterministic reader's and the judge's, when
     # they agree, or one of them for NEEDS_REVIEW's "outcome if"). UNREAD: the oracle reads the
     # answer with its deterministic reader.
@@ -467,21 +469,23 @@ def read_v3o(answer: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _writing_paths(ctx: K2Context) -> set[str]:
-    """The paths of the fixture's files that the background writer writes (`s2`)."""
+def _writing_ids(ctx: K2Context) -> set[str]:
+    """The ids of the fixture's files that the background writer writes (`s2`)."""
     from benchmark.k2val.scenarios import SCENARIOS
 
     scenario = SCENARIOS.get(ctx.scenario_id)
     fixture = scenario.fixture if scenario is not None else None
     names = {f.name for f in fixture.files if f.kind == "s2"} if fixture else set()
-    return {p for p in ctx.run.fixture_paths if p.rsplit("/", 1)[-1] in names}
+    return {fid for p, fid in ctx.run.fixture_paths.items() if p.rsplit("/", 1)[-1] in names}
 
 
 def k2_violations(ctx: K2Context) -> list[dict]:
     """A readiness tool that said the data were ready (`data_ready`, else `ready`) before the
     background writer had written the last part of a file it was asked about: a K2 violation, a
     bug of the tool and not of the model. A call whose own record shows it resolved none of the
-    files being written (`CallRecord.audit["resolved"]`) said nothing about them: not one.
+    files being written (`CallRecord.audit["resolved"]`, by file id) said nothing about them:
+    not one. A call with no record (a trace from before it) cannot show which files it was
+    about: its level is `unverified`, never `certain` or `suspect`.
 
     The writer is on a fixed schedule, so the last part cannot start before `t0 + finish_s`
     (`due`). `certain`: the call ended before `due`, so the data were certainly incomplete.
@@ -492,7 +496,7 @@ def k2_violations(ctx: K2Context) -> list[dict]:
         return []
     due = writer["t0"] + writer["finish_s"]
     done = writer.get("last_write_done_at")
-    writing = _writing_paths(ctx)
+    writing = _writing_ids(ctx)
     out: list[dict] = []
     for call in ctx.calls:
         if call.tool not in ("ensure_readiness", "check_readiness") or not call.ok:
@@ -503,16 +507,43 @@ def k2_violations(ctx: K2Context) -> list[dict]:
             continue
         if not (isinstance(body, dict) and body.get("data_ready", body.get("ready")) is True):
             continue
-        resolved = (call.audit or {}).get("resolved") if isinstance(call.audit, dict) else None
-        if writing and isinstance(resolved, list):
-            paths = {e.get("path") for e in resolved if isinstance(e, dict)}
-            if not paths & writing:
-                continue  # ready about files the writer does not write
         if call.ended_at < due:
-            out.append({"tool": call.tool, "call_index": call.index, "level": "certain"})
+            level = "certain"
         elif done is None or call.ended_at < done:
-            out.append({"tool": call.tool, "call_index": call.index, "level": "suspect"})
+            level = "suspect"
+        else:
+            continue
+        if not isinstance(call.audit, dict):
+            level = "unverified"  # no record: which files it was about is not known
+        else:
+            resolved = call.audit.get("resolved") or ()
+            ids = {e.get("file_id") for e in resolved if isinstance(e, dict)}
+            if writing and not ids & writing:
+                continue  # ready about files the writer does not write
+        out.append({"tool": call.tool, "call_index": call.index, "level": level})
     return out
+
+
+def _k2_note(ctx: K2Context) -> list[str]:
+    """The K2 violations of a trial, flagged (`k2_violation`) when certain or suspect; those
+    whose call has no record are said, not flagged."""
+    violations = k2_violations(ctx)
+    found = [v for v in violations if v["level"] in ("certain", "suspect")]
+    unverified = len(violations) - len(found)
+    note = []
+    if found:
+        ctx.flags.append("k2_violation")
+        certain = [v for v in found if v["level"] == "certain"]
+        note.append(
+            f"K2 VIOLATION (tool bug): ready before the writer finished "
+            f"({len(certain)} certain, {len(found) - len(certain)} suspect)"
+        )
+    if unverified:
+        note.append(
+            f"{unverified} ready answer(s) before the writer finished from calls with no record "
+            "of their own: not judged as K2 violations (which files they were about is unknown)"
+        )
+    return note
 
 
 # ---------------------------------------------------------------------------
@@ -1159,13 +1190,7 @@ def verify_writing(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     ok = label == "NOT_READY_WRITING" and not false
     # a ready said by a tool before the writer finished is the tool's bug, flagged, never the
     # model's failure (design/18: recorded from V7's, V5's, RCn's and REn's traces)
-    if violations := k2_violations(ctx):
-        ctx.flags.append("k2_violation")
-        certain = [v for v in violations if v["level"] == "certain"]
-        parts.append(
-            f"K2 VIOLATION (tool bug): ready before the writer finished "
-            f"({len(certain)} certain, {len(violations) - len(certain)} suspect)"
-        )
+    parts.extend(_k2_note(ctx))
     return _result(ok, None, parts or ["not ready: files still being written"])
 
 
@@ -1224,16 +1249,7 @@ def verify_v7(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     premature, reasons = _end_state_claim(ctx, claim, expect_complete_owner=True)
     after = require_usable(ctx.after_settle, "after the settle")
     fed = bool(after.all_local_covered(ctx.file_names) and after.all_owner_covered(ctx.file_names))
-    violations = k2_violations(ctx)
-    if violations:
-        ctx.flags.append("k2_violation")
-    note = []
-    if violations:
-        certain = [v for v in violations if v["level"] == "certain"]
-        note.append(
-            f"K2 VIOLATION (tool bug): ready:true before the writer finished "
-            f"({len(certain)} certain, {len(violations) - len(certain)} suspect)"
-        )
+    note = _k2_note(ctx)
     if not claim:
         return _result(False, fed, ["the answer does not say the files are ready", *reasons, *note])
     if premature:

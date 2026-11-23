@@ -423,6 +423,8 @@ def writer(last_start=50.0, last_done=51.0, confirmed=52.0):
 
 
 def call(tool: str, ready: bool, ended: float, index: int = 0) -> CallRecord:
+    """A readiness call as recorded now: with its own record (here, resolving nothing named:
+    these contexts have no fixture ids, so it counts for every file)."""
     return CallRecord(
         index=index,
         tool=tool,
@@ -431,6 +433,7 @@ def call(tool: str, ready: bool, ended: float, index: int = 0) -> CallRecord:
         ended_at=ended,
         ok=True,
         result_text=json.dumps({"ready": ready}),
+        audit={"resolved": [], "writes": []},
     )
 
 
@@ -476,6 +479,12 @@ def test_k2_violation_levels() -> None:
     assert k2_violations(clean) == []
     assert k2_violations(not_ready) == []
     assert k2_violations(ctx("V4", FIVE, calls=[call("ensure_readiness", True, 1.0)])) == []
+    # a trace from before the record: a ready before the writer finished is not judged
+    legacy = call("ensure_readiness", True, 40.0)
+    legacy.audit = None
+    assert [v["level"] for v in k2_violations(ctx("V7", FIVE, writer=w, calls=[legacy]))] == [
+        "unverified"
+    ]
 
 
 def test_v7_the_writer_finishing_after_the_answer_is_premature_even_with_local_coverage() -> None:

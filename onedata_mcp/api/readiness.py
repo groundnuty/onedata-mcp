@@ -129,16 +129,27 @@ _monotonic = time.monotonic
 _sleep = asyncio.sleep
 
 # What one call resolved and wrote, for a host that records its calls: the validation panel's
-# harness (`benchmark/k2val/recording.py`, `mcp_http.py`) sets a dict here per call, and its
-# scorer reads where a call's holds went from it (design/18). Model-invisible: never part of an
-# answer. None (production): nothing is recorded.
-#   resolved: [{file_id, path, state}] the files the extent resolved to, with their final state
-#   writes:   [{file_id, path}] every file a hold was requested for, noted BEFORE the request
-#   rules:    [{file_id, path, rule_id, how}] each rule this call created, confirmed, or could
-#             not confirm ("created", "confirmed", "unconfirmed")
+# harness (`benchmark/k2val/recording.py`, `mcp_http.py`) sets a record here per call of a tool
+# in RECORDED_TOOLS, made by `new_call_record` (so a call that resolved and wrote nothing has an
+# EMPTY record, never none: none means a trace from before the record), and its scorer reads from
+# it what a call did (design/18). Model-invisible: never part of an answer. None (production):
+# nothing is recorded. Each entry names its file by the space's id and the file's id (a path is
+# for reading only: two spaces may share a name):
+#   resolved: [{file_id, space_id, path, state, items}] the files the extent resolved to, with
+#             their final state and the indexes of the extent items that selected each
+#   writes:   [{file_id, space_id, path}] every file a hold was requested for, noted BEFORE the
+#             request
+#   rules:    [{file_id, space_id, path, rule_id, how}] each rule this call created, confirmed,
+#             or could not confirm ("created", "confirmed", "unconfirmed")
 CALL_RECORD: ContextVar[dict[str, Any] | None] = ContextVar(
     "onedata_mcp_readiness_call_record", default=None
 )
+RECORDED_TOOLS = frozenset({"check_readiness", "ensure_readiness"})
+
+
+def new_call_record() -> dict[str, Any]:
+    """The record a host sets for one call of a tool in RECORDED_TOOLS, before the call."""
+    return {"resolved": [], "writes": []}
 
 
 def _note(key: str, entry: dict[str, Any]) -> None:
@@ -147,11 +158,15 @@ def _note(key: str, entry: dict[str, Any]) -> None:
         record.setdefault(key, []).append(entry)
 
 
+def _where(file: FileInfo) -> dict[str, Any]:
+    return {"file_id": file.file_id, "space_id": file.space_id, "path": file.path}
+
+
 def _note_resolved(files: list[FileInfo]) -> None:
     record = CALL_RECORD.get()
     if record is not None:
         record["resolved"] = [
-            {"file_id": f.file_id, "path": f.path, "state": f.state} for f in files
+            {**_where(f), "state": f.state, "items": sorted(f.items)} for f in files
         ]
 
 
@@ -429,6 +444,7 @@ class FileInfo:
     local_bytes: int = 0
     dist: Distribution | None = None
     state: str | None = None  # "ready", a reason in REASONS, "unchecked", or None (not looked at)
+    items: set[int] = field(default_factory=set)  # the extent items that selected it
 
     @property
     def basename(self) -> str:
@@ -1295,6 +1311,7 @@ def _merge_file(into: FileInfo, other: FileInfo) -> None:
     into.flag = False if False in flags else (True if flags else None)
     into.origin = into.origin or other.origin
     into.local_bytes = min(into.local_bytes, other.local_bytes)
+    into.items |= other.items
 
 
 async def _resolve(run: _Run, items: list[_Item]) -> tuple[list[FileInfo], list[str]]:
@@ -1302,7 +1319,7 @@ async def _resolve(run: _Run, items: list[_Item]) -> tuple[list[FileInfo], list[
     unresolved: list[str] = []
     resolved: dict[str, FileInfo] = {}
     listings: dict[str, _Listing] = {}
-    for item in items:
+    for index, item in enumerate(items):
         if item.root not in listings:
             listings[item.root] = await _list_dataset(run, item)
             unresolved.extend(listings[item.root].problems)
@@ -1311,6 +1328,7 @@ async def _resolve(run: _Run, items: list[_Item]) -> tuple[list[FileInfo], list[
             continue  # nothing to pick from; the problems are reported above
         named = replace(item, root=listing.root) if listing.root else item
         for f in _select(named, listing.files, unresolved, complete=listing.complete):
+            f.items.add(index)
             if f.file_id in resolved:
                 _merge_file(resolved[f.file_id], f)
             else:
@@ -1739,7 +1757,7 @@ async def _place_one(run: _Run, file: FileInfo) -> tuple[str, str | None]:
     (another error, or an answer without an id)."""
     global _hold_plain
     templates = [HOLD_EXPRESSION_PLAIN] if _hold_plain else [HOLD_EXPRESSION, HOLD_EXPRESSION_PLAIN]
-    _note("writes", {"file_id": file.file_id, "path": file.path})
+    _note("writes", _where(file))
     for index, template in enumerate(templates):
         try:
             created = await run.within(
@@ -1760,10 +1778,7 @@ async def _place_one(run: _Run, file: FileInfo) -> tuple[str, str | None]:
         if not isinstance(rule_id, str) or not rule_id:
             return "rejected", None
         _rules[file.file_id] = rule_id
-        _note(
-            "rules",
-            {"file_id": file.file_id, "path": file.path, "rule_id": rule_id, "how": "created"},
-        )
+        _note("rules", {**_where(file), "rule_id": rule_id, "how": "created"})
         if index == 1:
             _hold_plain = True  # the primary form was rejected, the plain one accepted
         return "held", rule_id
@@ -1841,7 +1856,7 @@ async def _hold_one(run: _Run, file: FileInfo, hold: _Hold) -> None:
             state = await _rule_state(run, file, remembered)
             how = {CONFIRMED: "confirmed", UNREADABLE: "unconfirmed"}.get(state)
             if how is not None:
-                entry = {"file_id": file.file_id, "path": file.path, "rule_id": remembered}
+                entry = {**_where(file), "rule_id": remembered}
                 _note("rules", {**entry, "how": how})
             if state == CONFIRMED:
                 hold.held[file.file_id] = remembered

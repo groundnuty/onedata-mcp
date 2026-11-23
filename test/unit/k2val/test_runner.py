@@ -398,15 +398,37 @@ async def test_v4_and_v5_state_the_not_ready_reasons(cfg, api, fed, clock, tmp_p
 # --- V7 and the writer -----------------------------------------------------------------
 
 
-def ready_tool(ready: bool):
-    return lambda args: {"ready": ready, "files": 5}
+def ready_tool(ready: bool, fed=None):
+    """A canned readiness answer. With `fed`, the call records, as the real tool does
+    (`readiness.CALL_RECORD`), that it resolved every file of the extent's directory."""
+
+    def answer(args):
+        from onedata_mcp.api.readiness import CALL_RECORD
+
+        record = CALL_RECORD.get()
+        if record is not None and fed is not None:
+            directory = args["extent"][0]["dataset"]
+            space = directory.strip("/").split("/")[0]
+            record["resolved"] = [
+                {
+                    "file_id": kid.fid,
+                    "space_id": space,
+                    "path": f"{directory}/{kid.name}",
+                    "state": "ready" if ready else "being_written",
+                    "items": [0],
+                }
+                for kid in fed.kids(fed.find(directory).fid)
+            ]
+        return {"ready": ready, "files": 5}
+
+    return answer
 
 
 @pytest.mark.asyncio
 async def test_v7_ready_claimed_before_the_writer_finished_is_a_k2_violation(
     cfg, api, fed, clock, tmp_path
 ) -> None:
-    app = FakeToolApp({"ensure_readiness": ready_tool(True)})
+    app = FakeToolApp({"ensure_readiness": ready_tool(True, fed)})
 
     def script_for(conf, on_cost):
         async def script(a, brief):

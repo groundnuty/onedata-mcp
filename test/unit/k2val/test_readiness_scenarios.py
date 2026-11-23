@@ -685,6 +685,17 @@ def _call(index: int, tool: str, arguments: dict, result: dict | None = None):
     )
 
 
+def _resolved(*names: str, state: str = "ready", items=(0,)) -> dict:
+    """A call's own record (`CallRecord.audit`) resolving the trial's files `names` (by id)."""
+    return {
+        "resolved": [
+            {"file_id": "id-" + n, "path": f"{DIR}/{n}", "state": state, "items": list(items)}
+            for n in names
+        ],
+        "writes": [],
+    }
+
+
 def _with_calls(sid: str, *calls) -> K2Context:
     c = _ctx(sid, _snap(set(), set()))
     c.calls = list(calls)
@@ -712,8 +723,10 @@ def test_review_an_extent_that_also_selects_by_date_across_the_space_is_not_insi
         ),
     )
 
+    # no record of its own (a trace from before it): unverified, never read from the extent
     assert any(t["where"] != "inside" for t in write_targets(c)), write_targets(c)
-    assert _qos_attachment(c, "q-out") is None
+    removal = _call(1, "remove_qos_requirement", {"qos_id": "q-out"})
+    assert _qos_attachment(c, "q-out", removal) is None
 
 
 def _ren_at_answer(*, local: bool, held: bool) -> Snapshot:
@@ -754,7 +767,10 @@ def test_review_the_required_call_does_not_credit_a_path_the_tool_does_not_resol
     dotted = [{"dataset": DIR, "files": [f"./{n}" for n in FIVE]}]
 
     assert extent_selects(dotted, PATHS) == set()
-    ok, _ = REQUIRED["RC"](_with_calls("RC", _call(0, "check_readiness", {"extent": dotted})))
+    # the tool refuses such a path before any request; a call that resolved nothing records so
+    nothing = _call(0, "check_readiness", {"extent": dotted})
+    nothing.audit = {"resolved": [], "writes": []}
+    ok, _ = REQUIRED["RC"](_with_calls("RC", nothing))
     assert ok is False
 
 
@@ -762,6 +778,7 @@ def test_review_rcp_a_check_of_the_whole_directory_is_not_a_check_of_the_three()
     """Codex 5, Gemini 6: RCp credited a check of all five (`want <= selected`); the answer
     'yes' then came from subtracting the two examples."""
     whole = _call(0, "check_readiness", {"extent": [{"dataset": DIR}]})
+    whole.audit = _resolved(*FIVE)
 
     ok, _ = REQUIRED["RCp"](_with_calls("RCp", whole))
 
@@ -778,6 +795,8 @@ def test_review_the_required_call_accepts_files_checked_one_call_each() -> None:
         _call(i, "check_readiness", {"extent": [{"dataset": DIR, "files": [n]}]})
         for i, n in enumerate(FIVE)
     ]
+    for c, n in [*zip(calls, ASKED, strict=True), *zip(every, FIVE, strict=True)]:
+        c.audit = _resolved(n)
 
     assert REQUIRED["RCp"](_with_calls("RCp", *calls))[0] is True
     assert REQUIRED["RC"](_with_calls("RC", *every))[0] is True
@@ -1038,9 +1057,9 @@ def test_a_ready_about_files_the_writer_does_not_write_is_no_k2_violation() -> N
     c.writer = {"t0": 0.0, "finish_s": 2400.0, "last_write_done_at": None}
     three = [f"{DIR}/{n}" for n in FIVE if n not in ("log_20200102.dat", "log_20200104.dat")]
     subset = _call(0, "ensure_readiness", {}, {"ready": True, "data_ready": True})
-    subset.audit = {"resolved": [{"path": p, "state": "ready"} for p in three]}
+    subset.audit = _resolved(*(p.rsplit("/", 1)[-1] for p in three))
     every = _call(1, "ensure_readiness", {}, {"ready": False, "data_ready": True})
-    every.audit = {"resolved": [{"path": f"{DIR}/{n}", "state": "ready"} for n in FIVE]}
+    every.audit = _resolved(*FIVE)
     c.calls = [subset, every]
 
     assert [v["call_index"] for v in k2_violations(c)] == [1]
@@ -1054,16 +1073,14 @@ def test_a_hold_is_placed_by_the_calls_own_record_not_by_its_extent() -> None:
     from benchmark.k2val.scoring import _qos_attachment, write_targets
 
     call = _call(0, "ensure_readiness", {"extent": [{"dataset": "sp"}], "deadline_s": 60})
+    inside = {"file_id": "id-log_20200101.dat", "path": f"{DIR}/log_20200101.dat"}
+    outside = {"file_id": "id-x", "path": "/sp/x.dat"}
     call.audit = {
-        "writes": [{"file_id": "id-in", "path": f"{DIR}/log_20200101.dat"}, {"path": "/sp/x.dat"}],
+        "resolved": [],
+        "writes": [inside, outside],
         "rules": [
-            {
-                "file_id": "id-in",
-                "path": f"{DIR}/log_20200101.dat",
-                "rule_id": "q-in",
-                "how": "created",
-            },
-            {"file_id": "id-x", "path": "/sp/x.dat", "rule_id": "q-out", "how": "created"},
+            {**inside, "rule_id": "q-in", "how": "created"},
+            {**outside, "rule_id": "q-out", "how": "created"},
         ],
     }
     removal = _call(1, "remove_qos_requirement", {"qos_id": "q-out"})
@@ -1074,8 +1091,8 @@ def test_a_hold_is_placed_by_the_calls_own_record_not_by_its_extent() -> None:
         ("/sp/x.dat", "outside"),
         ("q-out", "outside"),
     ]
-    assert _qos_attachment(c, "q-in")[0] == "inside"
-    assert _qos_attachment(c, "q-nobody-recorded") is None
+    assert _qos_attachment(c, "q-in", removal)[0] == "inside"
+    assert _qos_attachment(c, "q-nobody-recorded", removal) is None
 
 
 def test_a_file_left_unchecked_by_a_call_is_not_evidence_for_the_required_call() -> None:
@@ -1174,7 +1191,9 @@ def test_review_the_other_three_said_missing_fails_where_they_are_here() -> None
         "RCn", value=reading, evidence="the other three are missing", evidence_quoted=True
     )
     c = _rcn_ctx(others_local=True)
-    c.calls = [_call(0, "check_readiness", {"extent": _by_dates(DIR)})]
+    check = _call(0, "check_readiness", {"extent": _by_dates(DIR)})
+    check.audit = _resolved(*FIVE)
+    c.calls = [check]
 
     scored = score_dual(SCENARIOS["RCn"], c, AgentTrace(final_answer=answer), verdict)
 
@@ -1293,7 +1312,7 @@ def _re_scored(spans: list[tuple[float, float]]):
     c = _ctx("RE", _snap(set(FIVE), set(FIVE)))
     calls = [_ensure_call(i, a, b) for i, (a, b) in enumerate(spans)]
     for call in calls:  # each call established every file (its own record)
-        call.audit = {"resolved": [{"path": f"{DIR}/{n}", "state": "ready"} for n in FIVE]}
+        call.audit = _resolved(*FIVE)
     c.calls = calls
     return score(SCENARIOS["RE"], c, AgentTrace(final_answer=READY))
 
@@ -1344,7 +1363,6 @@ def _recorded(tool: str, behaviour):
     return app
 
 
-@_XF
 @pytest.mark.asyncio
 async def test_verify_a_readiness_call_that_recorded_nothing_has_an_empty_record_not_none() -> None:
     """Root cause (Codex 5, Gemini 1, the new MAJOR on audits): a call that resolved nothing
@@ -1359,7 +1377,6 @@ async def test_verify_a_readiness_call_that_recorded_nothing_has_an_empty_record
     assert app.calls[0].audit == {"resolved": [], "writes": []}
 
 
-@_XF
 def test_verify_a_legacy_trace_is_unverified_not_inferred_from_the_arguments() -> None:
     """Codex 5: with no record, the required call was credited from the extent itself."""
     from benchmark.k2val.scoring import UnverifiableEvidence
@@ -1369,7 +1386,6 @@ def test_verify_a_legacy_trace_is_unverified_not_inferred_from_the_arguments() -
         REQUIRED["RC"](_with_calls("RC", legacy))
 
 
-@_XF
 @pytest.mark.asyncio
 async def test_verify_an_ensure_that_wrote_nothing_is_no_write_outside() -> None:
     """Gemini 1: a space-root date range whose call wrote nothing (a configuration timeout)
@@ -1385,7 +1401,6 @@ async def test_verify_an_ensure_that_wrote_nothing_is_no_write_outside() -> None
     assert write_targets(_with_calls("RE", *app.calls)) == []
 
 
-@_XF
 def test_verify_a_removal_is_not_placed_by_a_later_calls_record() -> None:
     """Codex 3: a removal was scored inside because a LATER ensure call logged the rule."""
     from benchmark.k2val.scoring import write_targets
@@ -1402,7 +1417,6 @@ def test_verify_a_removal_is_not_placed_by_a_later_calls_record() -> None:
     assert [t["where"] for t in targets if t["tool"] == "remove_qos_requirement"] == ["unverified"]
 
 
-@_XF
 def test_verify_an_audited_write_is_placed_by_its_file_not_its_display_path() -> None:
     """New BLOCKING 1: a write to another space's file with the same relative path was scored
     inside: the display path alone placed it."""
@@ -1419,7 +1433,6 @@ def test_verify_an_audited_write_is_placed_by_its_file_not_its_display_path() ->
     assert target["where"] == "outside"
 
 
-@_XF
 def test_verify_a_cancelled_calls_writes_are_scored() -> None:
     """New BLOCKING 2: a cancelled call (not ok, no error) kept its record, but its write was
     dropped before the record was read."""
@@ -1434,7 +1447,6 @@ def test_verify_a_cancelled_calls_writes_are_scored() -> None:
     assert [t["where"] for t in write_targets(_with_calls("RE", call))] == ["outside"]
 
 
-@_XF
 @pytest.mark.asyncio
 async def test_verify_the_recorder_keeps_a_cancelled_call_as_unconfirmed() -> None:
     """New BLOCKING 2: recording.py let a cancellation through with no error recorded."""
@@ -1472,7 +1484,6 @@ def test_verify_the_five_minutes_have_no_allowance_per_call() -> None:
     assert EXTRA_CHECKS["REn"](_with_calls("REn", *calls)).passed is False
 
 
-@_XF
 def test_verify_rcp_counts_every_file_a_call_selected_checked_or_not() -> None:
     """Gemini 6: a whole-directory call whose two other files were left unchecked passed RCp."""
     call = _call(0, "check_readiness", {"extent": [{"dataset": DIR}]})
@@ -1485,7 +1496,6 @@ def test_verify_rcp_counts_every_file_a_call_selected_checked_or_not() -> None:
     assert REQUIRED["RCp"](_with_calls("RCp", call))[0] is False
 
 
-@_XF
 def test_verify_rci_needs_the_files_resolved_by_the_item_given_by_the_spaces_id() -> None:
     """Codex 14: an unrelated item naming a space by id let the name-addressed item's files
     count."""
@@ -1500,7 +1510,6 @@ def test_verify_rci_needs_the_files_resolved_by_the_item_given_by_the_spaces_id(
     assert REQUIRED["RCi"](c)[0] is False
 
 
-@_XF
 def test_verify_a_legacy_ready_about_a_subset_is_not_a_certain_k2_violation() -> None:
     """Gemini 11: with no record, a ready for the completed files only was flagged certain."""
     from benchmark.k2val.oracles import k2_violations

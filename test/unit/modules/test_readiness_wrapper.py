@@ -543,6 +543,43 @@ async def test_the_http_recorder_keeps_what_the_tool_recorded_of_its_call(
         await client.call_tool("check_readiness", {"extent": [{"dataset": "my-dataset"}]})
 
     (row,) = [json.loads(line) for line in record.read_text().splitlines()]
-    assert row["audit"]["resolved"] == [
-        {"file_id": "f1", "path": "/my-dataset/data_20180801.nc", "state": "ready"}
+    assert row["audit"] == {
+        "resolved": [
+            {
+                "file_id": "f1",
+                "space_id": "s1",
+                "path": "/my-dataset/data_20180801.nc",
+                "state": "ready",
+                "items": [0],
+            }
+        ],
+        "writes": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_the_http_recorder_keeps_a_cancelled_calls_record_as_unconfirmed(tmp_path) -> None:
+    """The verification round: a cancellation (not an Exception) went through with no error
+    recorded, and the call's writes were dropped from scoring."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from benchmark.k2val.mcp_http import make_recording_middleware
+    from benchmark.k2val.recording import CANCELLED
+
+    record = tmp_path / "calls.jsonl"
+    middleware = make_recording_middleware(record)
+
+    async def cancelled(context):
+        api._note("writes", {"file_id": "f1", "space_id": "s1", "path": "/my-dataset/a.nc"})
+        raise asyncio.CancelledError
+
+    message = SimpleNamespace(name="ensure_readiness", arguments={"extent": [], "deadline_s": 5})
+    with pytest.raises(asyncio.CancelledError):
+        await middleware.on_call_tool(SimpleNamespace(message=message), cancelled)
+
+    (row,) = [json.loads(line) for line in record.read_text().splitlines()]
+    assert (row["ok"], row["error"]) == (False, CANCELLED)
+    assert row["audit"]["writes"] == [
+        {"file_id": "f1", "space_id": "s1", "path": "/my-dataset/a.nc"}
     ]
