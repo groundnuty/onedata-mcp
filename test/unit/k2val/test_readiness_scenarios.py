@@ -264,6 +264,21 @@ def test_right_and_wrong_answers(sid: str, answer: str, right: bool) -> None:
 # --- the oracles on constructed snapshots ------------------------------------------------------
 
 
+HERE = [{"id": "st-local", "providerId": LOCAL_ID}]
+
+
+def _hold(name: str, *, on: str | None = None, matching: list | None = None) -> dict:
+    """A rule as a snapshot records it (`rules_in_snapshots`): on the file itself and keeping a
+    copy at the local provider, unless told otherwise."""
+    return {
+        "fileId": on or "id-" + name,
+        "expression": f"providerId={LOCAL_ID} & anyStorage",
+        "replicasNum": 1,
+        "status": "fulfilled",
+        "matching": HERE if matching is None else matching,
+    }
+
+
 def _state(name: str, *, local: int = 0, qos: tuple[str, ...] = ()) -> FileState:
     return FileState(
         name,
@@ -275,6 +290,7 @@ def _state(name: str, *, local: int = 0, qos: tuple[str, ...] = ()) -> FileState
         owner_covered=True,
         qos_ids=qos,
         size_field="virtualSize",
+        rules={q: _hold(name) for q in qos},
     )
 
 
@@ -300,6 +316,7 @@ def _ctx(sid: str, at: Snapshot, after: Snapshot | None = None) -> K2Context:
         after_settle=after or at,
         baseline_files=base,
         directory=DIR,
+        local_provider_id=LOCAL_ID,
     )
 
 
@@ -541,9 +558,11 @@ async def test_ren_not_ready_because_still_written_passes(
 
     answer = seen["answer"]
     assert answer["ready"] is False and answer["not_ready"]["being_written"]["files"] == 2
+    assert answer["ready_files"] == 3  # the three that could be made ready, said as a count
     assert "Call again to keep waiting." in answer["advice"]
     assert art.outcome == "PASS", art.oracle_diagnosis
-    assert art.oracle_federation_pass is None
+    # judged at the answer (Codex 4): the three made ready and held, the two still written
+    assert art.oracle_federation_pass is True
 
 
 @pytest.mark.asyncio
@@ -672,7 +691,6 @@ def _with_calls(sid: str, *calls) -> K2Context:
     return c
 
 
-@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
 def test_review_an_extent_that_also_selects_by_date_across_the_space_is_not_inside() -> None:
     """Codex 3, Gemini 1: with `files`, `date_ranges` were ignored: an item rooted at the space
     named one trial file and a date range over every directory of the space; the scorer saw
@@ -712,11 +730,11 @@ def _ren_at_answer(*, local: bool, held: bool) -> Snapshot:
             owner_covered=not writing,
             qos_ids=(f"h-{n}",) if held else (),
             size_field="virtualSize",
+            rules={f"h-{n}": _hold(n)} if held else {},
         )
     return Snapshot(taken_at=1.0, files=files)
 
 
-@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
 def test_review_ren_does_not_pass_when_the_complete_files_were_never_made_ready() -> None:
     """Codex 4: REn judged the explanation only (federation None): a call whose holds all
     failed passed with "two are still being written, the other three are here" while the
@@ -740,7 +758,6 @@ def test_review_the_required_call_does_not_credit_a_path_the_tool_does_not_resol
     assert ok is False
 
 
-@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
 def test_review_rcp_a_check_of_the_whole_directory_is_not_a_check_of_the_three() -> None:
     """Codex 5, Gemini 6: RCp credited a check of all five (`want <= selected`); the answer
     'yes' then came from subtracting the two examples."""
@@ -751,7 +768,6 @@ def test_review_rcp_a_check_of_the_whole_directory_is_not_a_check_of_the_three()
     assert ok is False
 
 
-@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
 def test_review_the_required_call_accepts_files_checked_one_call_each() -> None:
     """Codex 5: three successful calls, one asked file each, did not count."""
     calls = [
@@ -843,7 +859,6 @@ def test_review_a_ready_claim_is_read_per_clause(sid: str, answer: str) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
 async def test_review_a_space_and_file_names_as_the_tools_example_shows_is_inside(
     cfg, api, fed, clock, tmp_path, ready_tools
 ) -> None:
@@ -867,7 +882,6 @@ async def test_review_a_space_and_file_names_as_the_tools_example_shows_is_insid
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(strict=True, reason="external review: reproduced here, fixed later")
 async def test_review_a_space_and_a_date_range_that_hold_only_the_trials_files_are_inside(
     cfg, api, fed, clock, tmp_path, ready_tools
 ) -> None:
@@ -910,3 +924,186 @@ async def test_the_offered_tools_a_tool_sees_are_those_listed_not_the_whole_allo
 
     assert seen == [frozenset({"check_readiness"})]
     assert OFFERED_TOOLS.get() is None  # reset after the call
+
+
+# --- What the oracles read at the answer and after the window (Codex 4, 9; Gemini 11) --------
+
+
+def _with_rule(snap: Snapshot, name: str, rule: dict) -> Snapshot:
+    state = snap.files[name]
+    snap.files[name] = replace(state, rules={q: rule for q in state.qos_ids})
+    return snap
+
+
+@pytest.mark.parametrize(
+    ("rule", "why"),
+    [
+        (_hold("log_20200101.dat", on="id-the-directory"), "inherited from a directory"),
+        (
+            _hold("log_20200101.dat", matching=[{"id": "st-owner", "providerId": "pOwner"}]),
+            "keeps the copy at another provider",
+        ),
+    ],
+)
+def test_re_a_new_rule_that_does_not_hold_the_file_here_is_not_a_hold(rule, why) -> None:
+    at = _with_rule(_snap(set(FIVE), set(FIVE)), "log_20200101.dat", rule)
+    c = _ctx("RE", at)
+
+    result = ORACLES["RE"](c, AgentTrace(final_answer=READY))
+
+    assert not result.mcp_pass and "NOT HELD" in result.diagnosis, why
+    assert result.federation_pass is False, why
+
+
+def test_re_a_hold_gone_by_the_end_of_the_window_fails_the_federation() -> None:
+    at = _snap(set(FIVE), set(FIVE))
+    after = _snap(set(FIVE), set(FIVE[1:]))  # the bytes stay; one hold does not
+
+    result = ORACLES["RE"](_ctx("RE", at, after), AgentTrace(final_answer=READY))
+
+    assert result.mcp_pass and result.federation_pass is False
+    assert "after the settle no new requirement on the file holds ['log_20200101.dat']" in (
+        result.diagnosis
+    )
+
+
+def test_re_is_not_judged_without_a_baseline_of_every_file() -> None:
+    from benchmark.k2val.snapshot import UnusableSnapshot
+
+    c = _ctx("RE", _snap(set(FIVE), set(FIVE)))
+    del c.baseline_files["log_20200103.dat"]
+    with pytest.raises(UnusableSnapshot, match="no baseline"):
+        ORACLES["RE"](c, AgentTrace(final_answer=READY))
+
+
+def test_re_waits_out_the_whole_quiet_window() -> None:
+    """Codex 9, Gemini 11: RE's settle could end as soon as the files were local. (The runner
+    already waited the whole window for a scenario that requires its tool; it is now quiet.)"""
+    assert SCENARIOS["RE"].settle == "quiet" and "RE" in REQUIRED
+    for sid in ("RE", "REn", "REp"):
+        assert SCENARIOS[sid].fixture.rules_in_snapshots, sid
+
+
+WRITING_ANSWER = "Not ready: two are still being written; the other three are here."
+
+
+def test_ren_passes_with_the_three_made_ready_and_held_and_the_two_still_written() -> None:
+    result = ORACLES["REn"](
+        _ctx("REn", _ren_at_answer(local=True, held=True)),
+        AgentTrace(final_answer=WRITING_ANSWER),
+    )
+    assert result.mcp_pass and result.federation_pass is True, result.diagnosis
+
+
+def test_ren_the_scenarios_premise_is_checked_at_the_answer() -> None:
+    at = _ren_at_answer(local=True, held=True)
+    at.files["log_20200102.dat"] = replace(at.files["log_20200102.dat"], owner_covered=True)
+
+    result = ORACLES["REn"](_ctx("REn", at), AgentTrace(final_answer=WRITING_ANSWER))
+
+    assert result.federation_pass is False and "THE PREMISE FAILED" in result.diagnosis
+
+
+def _ensure_call(index: int, start: float, end: float, deadline_s: int = 300):
+    arguments = {"extent": [{"dataset": DIR}], "deadline_s": deadline_s}
+    call = _call(index, "ensure_readiness", arguments)
+    call.started_at, call.ended_at = start, end
+    return call
+
+
+@pytest.mark.parametrize(
+    ("spans", "ok"),
+    [
+        ([(0, 170), (180, 350)], True),  # two calls at the cap: 340 s, within 300 + 2 x 20
+        ([(0, 170), (180, 350), (360, 530)], False),  # a third: 510 s, over 300 + 3 x 20
+        ([(0, 170), (100, 270)], True),  # overlapping calls are counted once (270 s)
+        ([(0, 330)], False),  # one call can take no more than 170 s; 330 is over 320
+    ],
+)
+def test_ren_the_five_minutes_are_scored_from_the_recorded_calls(spans, ok) -> None:
+    """Codex 10: an REn agent could wait ten minutes and pass like one that kept to the brief."""
+    from benchmark.k2val.scoring import EXTRA_CHECKS
+
+    c = _with_calls("REn", *[_ensure_call(i, a, b) for i, (a, b) in enumerate(spans)])
+
+    check = EXTRA_CHECKS["REn"](c)
+
+    assert check.passed is ok, check.detail
+    assert ok or check.detail.startswith("WAITED TOO LONG")
+
+
+def test_a_ready_about_files_the_writer_does_not_write_is_no_k2_violation() -> None:
+    """A ready for the three complete files only (an extent of those) is a true answer about
+    them: `verify_writing` records violations from REn's traces now, and must not flag it."""
+    from benchmark.k2val.oracles import k2_violations
+
+    c = _ctx("REn", _ren_at_answer(local=True, held=True))
+    c.writer = {"t0": 0.0, "finish_s": 2400.0, "last_write_done_at": None}
+    three = [f"{DIR}/{n}" for n in FIVE if n not in ("log_20200102.dat", "log_20200104.dat")]
+    subset = _call(0, "ensure_readiness", {}, {"ready": True, "data_ready": True})
+    subset.audit = {"resolved": [{"path": p, "state": "ready"} for p in three]}
+    every = _call(1, "ensure_readiness", {}, {"ready": False, "data_ready": True})
+    every.audit = {"resolved": [{"path": f"{DIR}/{n}", "state": "ready"} for n in FIVE]}
+    c.calls = [subset, every]
+
+    assert [v["call_index"] for v in k2_violations(c)] == [1]
+    ORACLES["REn"](c, AgentTrace(final_answer=WRITING_ANSWER))
+    assert "k2_violation" in c.flags
+
+
+def test_a_hold_is_placed_by_the_calls_own_record_not_by_its_extent() -> None:
+    """Codex 3: the record says which file each hold is on; a rule it puts outside the trial,
+    and that rule's removal, are outside; a rule no record names is unverified."""
+    from benchmark.k2val.scoring import _qos_attachment, write_targets
+
+    call = _call(0, "ensure_readiness", {"extent": [{"dataset": "sp"}], "deadline_s": 60})
+    call.audit = {
+        "writes": [{"file_id": "id-in", "path": f"{DIR}/log_20200101.dat"}, {"path": "/sp/x.dat"}],
+        "rules": [
+            {
+                "file_id": "id-in",
+                "path": f"{DIR}/log_20200101.dat",
+                "rule_id": "q-in",
+                "how": "created",
+            },
+            {"file_id": "id-x", "path": "/sp/x.dat", "rule_id": "q-out", "how": "created"},
+        ],
+    }
+    removal = _call(1, "remove_qos_requirement", {"qos_id": "q-out"})
+    c = _with_calls("V6", call, removal)
+
+    assert [(t["target"], t["where"]) for t in write_targets(c)] == [
+        (f"{DIR}/log_20200101.dat", "inside"),
+        ("/sp/x.dat", "outside"),
+        ("q-out", "outside"),
+    ]
+    assert _qos_attachment(c, "q-in")[0] == "inside"
+    assert _qos_attachment(c, "q-nobody-recorded") is None
+
+
+def test_a_file_left_unchecked_by_a_call_is_not_evidence_for_the_required_call() -> None:
+    call = _call(0, "check_readiness", {"extent": [{"dataset": DIR}]})
+    call.audit = {
+        "resolved": [
+            {"path": f"{DIR}/{n}", "state": "unchecked" if n == FIVE[0] else "ready"} for n in FIVE
+        ]
+    }
+    ok, detail = REQUIRED["RC"](_with_calls("RC", call))
+    assert ok is False and FIVE[0] in detail
+
+
+def test_the_http_recorder_keeps_the_calls_own_record(tmp_path) -> None:
+    """The CLI and Claude legs' server records what the tool noted, as the in-process proxy
+    does; a row without it (an older run) reads as None."""
+    from benchmark.k2val.mcp_http import McpHttpServer
+
+    server = McpHttpServer("k2val.toml", frozenset({"ensure_readiness"}), tmp_path)
+    audit = {"writes": [{"file_id": "f", "path": f"{DIR}/log_20200101.dat"}]}
+    rows = [
+        {"tool": "ensure_readiness", "arguments": {}, "started_at": 1.0, "ok": True}
+        | {"audit": audit},
+        {"tool": "ensure_readiness", "arguments": {}, "started_at": 2.0, "ok": True},
+    ]
+    server.record_path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+    assert [r.audit for r in server.records()] == [audit, None]

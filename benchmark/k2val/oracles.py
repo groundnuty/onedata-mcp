@@ -467,9 +467,21 @@ def read_v3o(answer: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _writing_paths(ctx: K2Context) -> set[str]:
+    """The paths of the fixture's files that the background writer writes (`s2`)."""
+    from benchmark.k2val.scenarios import SCENARIOS
+
+    scenario = SCENARIOS.get(ctx.scenario_id)
+    fixture = scenario.fixture if scenario is not None else None
+    names = {f.name for f in fixture.files if f.kind == "s2"} if fixture else set()
+    return {p for p in ctx.run.fixture_paths if p.rsplit("/", 1)[-1] in names}
+
+
 def k2_violations(ctx: K2Context) -> list[dict]:
-    """A readiness tool that answered `ready: true` before the background writer had written
-    the last part of a file: a K2 violation, a bug of the tool and not of the model.
+    """A readiness tool that said the data were ready (`data_ready`, else `ready`) before the
+    background writer had written the last part of a file it was asked about: a K2 violation, a
+    bug of the tool and not of the model. A call whose own record shows it resolved none of the
+    files being written (`CallRecord.audit["resolved"]`) said nothing about them: not one.
 
     The writer is on a fixed schedule, so the last part cannot start before `t0 + finish_s`
     (`due`). `certain`: the call ended before `due`, so the data were certainly incomplete.
@@ -480,6 +492,7 @@ def k2_violations(ctx: K2Context) -> list[dict]:
         return []
     due = writer["t0"] + writer["finish_s"]
     done = writer.get("last_write_done_at")
+    writing = _writing_paths(ctx)
     out: list[dict] = []
     for call in ctx.calls:
         if call.tool not in ("ensure_readiness", "check_readiness") or not call.ok:
@@ -488,8 +501,13 @@ def k2_violations(ctx: K2Context) -> list[dict]:
             body = json.loads(call.result_text or "")
         except ValueError:
             continue
-        if not (isinstance(body, dict) and body.get("ready") is True):
+        if not (isinstance(body, dict) and body.get("data_ready", body.get("ready")) is True):
             continue
+        resolved = (call.audit or {}).get("resolved") if isinstance(call.audit, dict) else None
+        if writing and isinstance(resolved, list):
+            paths = {e.get("path") for e in resolved if isinstance(e, dict)}
+            if not paths & writing:
+                continue  # ready about files the writer does not write
         if call.ended_at < due:
             out.append({"tool": call.tool, "call_index": call.index, "level": "certain"})
         elif done is None or call.ended_at < done:
@@ -1005,6 +1023,15 @@ def verify_writing(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     false = writing_claim_problems(said, S2_NAMES, len(ctx.file_names) or 5)
     parts.extend(false)
     ok = label == "NOT_READY_WRITING" and not false
+    # a ready said by a tool before the writer finished is the tool's bug, flagged, never the
+    # model's failure (design/18: recorded from V7's, V5's, RCn's and REn's traces)
+    if violations := k2_violations(ctx):
+        ctx.flags.append("k2_violation")
+        certain = [v for v in violations if v["level"] == "certain"]
+        parts.append(
+            f"K2 VIOLATION (tool bug): ready before the writer finished "
+            f"({len(certain)} certain, {len(violations) - len(certain)} suspect)"
+        )
     return _result(ok, None, parts or ["not ready: files still being written"])
 
 

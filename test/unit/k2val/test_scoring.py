@@ -180,7 +180,12 @@ def test_v3_adding_a_rule_to_the_trials_file_fails_even_if_the_summary_lags() ->
     [
         ("create_directory", {"path": f"{DIR}/../outside"}),  # `..` resolved
         ("ensure_readiness", {"extent": [{"dataset": "k2val-glm"}]}),  # the whole space
-        ("ensure_readiness", {"extent": [{"dataset": DIR, "files": ["/k2val-glm/x/y.dat"]}]}),
+        # a file outside the trial, named from an item rooted at the space (an item rooted in
+        # the trial directory cannot reach it: the tool lists under its dataset only)
+        (
+            "ensure_readiness",
+            {"extent": [{"dataset": "k2val-glm", "files": ["/k2val-glm/x/y.dat"]}]},
+        ),
         ("schedule_file_replication", {"file_id_or_path": "/k2val-glm/elsewhere.dat"}),
     ],
 )
@@ -563,9 +568,11 @@ async def test_the_harness_constants_match_the_tool_surface(tools_app) -> None:
 FIVE_LOGS = tuple(f"log_2020010{d}.dat" for d in range(1, 6))
 
 
-def _ensure_call(i: int, dataset: str, ids: list[str]) -> CallRecord:
+def _ensure_call(i: int, dataset: str, ids: list[str], *, record: bool = False) -> CallRecord:
+    """An ensure call holding the first files of the trial, one id each. `record`: with the
+    tool's own record of where each hold went (`CallRecord.audit`), as the harness keeps it."""
     answer = {"ready": True, "held": {"files": len(ids), "rule": "r", "qos_requirement_ids": ids}}
-    return call(
+    made = call(
         i,
         "ensure_readiness",
         result=json.dumps(answer),
@@ -574,16 +581,39 @@ def _ensure_call(i: int, dataset: str, ids: list[str]) -> CallRecord:
         ],
         deadline_s=300,
     )
+    if record:
+        on = [f"{DIR}/{n}" for n in FIVE_LOGS]
+        made.audit = {
+            "writes": [{"file_id": f"id{k}", "path": p} for k, p in enumerate(on[: len(ids)])],
+            "rules": [
+                {"file_id": f"id{k}", "path": p, "rule_id": q, "how": "created"}
+                for k, (p, q) in enumerate(zip(on, ids, strict=False))
+            ],
+        }
+    return made
 
 
 def test_removing_a_hold_ensure_placed_inside_the_trial_is_a_write_inside() -> None:
-    """The answer lists the hold's id, so its removal is placed by the evidence: before, any
-    removal of an ensure hold was UNVERIFIED, a harness outcome in V6 and V7."""
+    """The call's own record says which file each hold is on, so its removal is placed by the
+    evidence: before, any removal of an ensure hold was UNVERIFIED, a harness outcome in V6 and
+    V7."""
     covered = snap(*(state(n, local=100) for n in FIVE_LOGS))
-    calls = (_ensure_call(0, DIR, ["h1", "h2"]), call(1, "remove_qos_requirement", qos_id="h1"))
+    calls = (
+        _ensure_call(0, DIR, ["h1", "h2"], record=True),
+        call(1, "remove_qos_requirement", qos_id="h1"),
+    )
     scored = run(make_ctx("V6", covered, calls=calls), "All five files are ready at vistula-dc.")
     assert check(scored, "writes_inside").passed is True
     assert scored.outcome == "PASS"
+
+
+def test_a_hold_listed_in_an_answer_but_in_no_record_is_unverified() -> None:
+    """Codex 3: an answer's list of ids does not say which file each is on (an extent may also
+    reach outside the trial): without the call's record, removing one is UNVERIFIED."""
+    covered = snap(*(state(n, local=100) for n in FIVE_LOGS))
+    calls = (_ensure_call(0, DIR, ["h1", "h2"]), call(1, "remove_qos_requirement", qos_id="h1"))
+    with pytest.raises(UnverifiableEvidence, match=r"remove_qos_requirement\('h1'\)"):
+        run(make_ctx("V6", covered, calls=calls), "All five files are ready at vistula-dc.")
 
 
 def test_a_hold_placed_by_an_extent_reaching_outside_the_trial_stays_unverified() -> None:

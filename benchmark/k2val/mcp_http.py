@@ -44,6 +44,7 @@ def make_recording_middleware(path: Path):
     from fastmcp.server.middleware import Middleware
 
     from benchmark.llm_adapters.openai_compat import _result_to_text
+    from onedata_mcp.api.readiness import CALL_RECORD
 
     class RecordingMiddleware(Middleware):
         async def on_call_tool(self, context, call_next):
@@ -56,6 +57,8 @@ def make_recording_middleware(path: Path):
                 "result_text": None,
                 "error": None,
             }
+            audit: dict = {}  # what a readiness tool records of its own call (recording.py)
+            recording = CALL_RECORD.set(audit)
             try:
                 result = await call_next(context)
                 row["ok"] = True
@@ -65,6 +68,8 @@ def make_recording_middleware(path: Path):
                 row["error"] = str(e)
                 raise
             finally:
+                CALL_RECORD.reset(recording)
+                row["audit"] = audit or None
                 row["ended_at"] = time.time()
                 with path.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
@@ -223,6 +228,7 @@ class McpHttpServer:
                     result_text=row.get("result_text"),
                     error=row.get("error"),
                     source="mcp",
+                    audit=row.get("audit"),
                 )
             )
         return out

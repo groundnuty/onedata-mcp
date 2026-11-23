@@ -36,6 +36,7 @@ import re
 import time
 import weakref
 from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import Any
@@ -126,6 +127,33 @@ REASONS = ("unreachable", "being_written", "in_transfer", "at_other_site")
 # One clock and one sleeper, so tests can run a whole wait on a fake clock.
 _monotonic = time.monotonic
 _sleep = asyncio.sleep
+
+# What one call resolved and wrote, for a host that records its calls: the validation panel's
+# harness (`benchmark/k2val/recording.py`, `mcp_http.py`) sets a dict here per call, and its
+# scorer reads where a call's holds went from it (design/18). Model-invisible: never part of an
+# answer. None (production): nothing is recorded.
+#   resolved: [{file_id, path, state}] the files the extent resolved to, with their final state
+#   writes:   [{file_id, path}] every file a hold was requested for, noted BEFORE the request
+#   rules:    [{file_id, path, rule_id, how}] each rule this call created, confirmed, or could
+#             not confirm ("created", "confirmed", "unconfirmed")
+CALL_RECORD: ContextVar[dict[str, Any] | None] = ContextVar(
+    "onedata_mcp_readiness_call_record", default=None
+)
+
+
+def _note(key: str, entry: dict[str, Any]) -> None:
+    record = CALL_RECORD.get()
+    if record is not None:
+        record.setdefault(key, []).append(entry)
+
+
+def _note_resolved(files: list[FileInfo]) -> None:
+    record = CALL_RECORD.get()
+    if record is not None:
+        record["resolved"] = [
+            {"file_id": f.file_id, "path": f.path, "state": f.state} for f in files
+        ]
+
 
 # Process-level state (reset by `reset_state`, which tests call).
 _local_provider_id: str | None = None
@@ -1678,6 +1706,7 @@ async def check_readiness(
     run = _Run(local_id, deadline)
     files, unresolved = await _resolve(run, items)
     await _assess(run, files)
+    _note_resolved(files)
     return _answer(files, unresolved, ensure_offered=ensure_offered)
 
 
@@ -1710,6 +1739,7 @@ async def _place_one(run: _Run, file: FileInfo) -> tuple[str, str | None]:
     (another error, or an answer without an id)."""
     global _hold_plain
     templates = [HOLD_EXPRESSION_PLAIN] if _hold_plain else [HOLD_EXPRESSION, HOLD_EXPRESSION_PLAIN]
+    _note("writes", {"file_id": file.file_id, "path": file.path})
     for index, template in enumerate(templates):
         try:
             created = await run.within(
@@ -1730,6 +1760,10 @@ async def _place_one(run: _Run, file: FileInfo) -> tuple[str, str | None]:
         if not isinstance(rule_id, str) or not rule_id:
             return "rejected", None
         _rules[file.file_id] = rule_id
+        _note(
+            "rules",
+            {"file_id": file.file_id, "path": file.path, "rule_id": rule_id, "how": "created"},
+        )
         if index == 1:
             _hold_plain = True  # the primary form was rejected, the plain one accepted
         return "held", rule_id
@@ -1805,6 +1839,10 @@ async def _hold_one(run: _Run, file: FileInfo, hold: _Hold) -> None:
         remembered = _rules.get(file.file_id)
         if remembered is not None:
             state = await _rule_state(run, file, remembered)
+            how = {CONFIRMED: "confirmed", UNREADABLE: "unconfirmed"}.get(state)
+            if how is not None:
+                entry = {"file_id": file.file_id, "path": file.path, "rule_id": remembered}
+                _note("rules", {**entry, "how": how})
             if state == CONFIRMED:
                 hold.held[file.file_id] = remembered
                 return
@@ -1926,6 +1964,7 @@ async def ensure_readiness(extent: Sequence[Mapping[str, Any]], deadline_s: int)
         return _config_unavailable(elapsed())
     run = _Run(local_id, work_end)
     files, unresolved = await _resolve(run, items)
+    _note_resolved(files)  # kept even if the call fails later
     hold = await _place(run, files)
 
     # Wait: poll every file not yet confirmed ready, until the budget is used up.
@@ -1947,4 +1986,5 @@ async def ensure_readiness(extent: Sequence[Mapping[str, Any]], deadline_s: int)
     await _reconfirm_holds(run, files, hold)
     run.deadline = hard_end - grace / 20
     await _assess(run, [f for f in files if f.state is None], raise_errors=False)
+    _note_resolved(files)
     return _answer(files, unresolved, hold=hold, waited_s=elapsed())

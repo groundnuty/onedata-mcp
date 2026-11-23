@@ -223,9 +223,11 @@ _ENSURE_REQUIRED = (
     "Required: a successful ensure_readiness whose extent selects every file asked about."
 )
 _END_STATE = (
-    " At the answer, every file asked about is covered by the local blocks and carries a QoS "
-    "requirement it did not have at the start (the hold); a ready said before is a PREMATURE "
-    "CLAIM. The federation axis: every file asked about covered after the window."
+    " At the answer, every file asked about is covered by the local blocks and held there: a "
+    "QoS requirement it did not have at the start, put on the file itself (not inherited) and "
+    "keeping a copy at your provider, read from the rule and the storages its expression "
+    "matches (the hold); a ready said before is a PREMATURE CLAIM. The federation axis: the "
+    "same, read again after the whole 60 s quiet window."
 )
 
 RE = ReadinessScenario(
@@ -236,10 +238,10 @@ RE = ReadinessScenario(
     answer="yes: all five are now complete and readable at vistula-dc (and held there)",
     rules="Pass when the answer reads SAYS_READY. " + _ENSURE_REQUIRED + _END_STATE,
     brief=BRIEF_ENSURE,
-    fixture=FixtureSpec(_files()),
+    # the snapshots read each rule on a file: whether it is on the file and keeps a copy here
+    fixture=FixtureSpec(_files(), rules_in_snapshots=True),
     tools=RE_TOOLS,
     excluded_tools=RE_EXCLUDED,
-    settle="local_covered",
 )
 REN = ReadinessScenario(
     id="REn",
@@ -250,13 +252,22 @@ REN = ReadinessScenario(
     "be made complete within the five minutes (the other three can be, and are)",
     rules=(
         "Pass when the answer reads NOT_READY_WRITING, with what it says of the files being "
-        "written true (V5's rule). A ready is a wrong answer. " + _ENSURE_REQUIRED + " The "
-        "federation axis is not judged (None): the writes go on. Writes stay inside the trial "
-        "(the shared check)."
+        "written true (V5's rule) and what it says of the other three true. A ready is a wrong "
+        "answer. "
+        + _ENSURE_REQUIRED
+        + " The federation axis, read at the answer (the writes go on, so not after a window): "
+        "the three complete files covered by the local blocks and held there (as RE's), and "
+        "the two being written still incomplete at their owner. The wait: at most the brief's "
+        "five minutes inside ensure_readiness calls (from their recorded start and end, calls "
+        "that overlap counted once), plus 20 s a call for its final read-back, which the tool "
+        "takes beyond any deadline_s; more fails (WAITED TOO LONG). Writes stay inside the "
+        "trial (the shared check)."
     ),
     brief=BRIEF_ENSURE,
     fixture=FixtureSpec(
-        _files(d20200102="s2", d20200104="s2"), writer_finish_s=WRITER_AFTER_THE_TRIAL_S
+        _files(d20200102="s2", d20200104="s2"),
+        writer_finish_s=WRITER_AFTER_THE_TRIAL_S,
+        rules_in_snapshots=True,
     ),
     tools=RE_TOOLS,
     excluded_tools=RE_EXCLUDED,
@@ -288,7 +299,7 @@ REP = ReadinessScenario(
     + " The two files not asked about keep their start state (no local blocks, no rule) at the "
     "answer and after the window.",
     brief=BRIEF_ENSURE_FILES,
-    fixture=FixtureSpec(_files()),
+    fixture=FixtureSpec(_files(), rules_in_snapshots=True),
     tools=RE_TOOLS,
     excluded_tools=RE_EXCLUDED,
     asked=_names(ASKED),

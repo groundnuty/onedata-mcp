@@ -17,6 +17,7 @@ from typing import Any
 from fastmcp.exceptions import ToolError
 
 from benchmark.llm_adapters.openai_compat import _result_to_text
+from onedata_mcp.api.readiness import CALL_RECORD
 from onedata_mcp.tool_maturity import OFFERED_TOOLS
 
 
@@ -31,6 +32,10 @@ class CallRecord:
     result_text: str | None = None
     error: str | None = None
     source: str = "mcp"  # "mcp" or "builtin" (CLI legs report both)
+    # What the readiness tools recorded of their own call (`readiness.CALL_RECORD`: the files
+    # resolved, the holds requested and the rules made), model-invisible; None for any other
+    # tool, and in artefacts made before it existed (the scorer then reads the arguments).
+    audit: dict | None = None
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -72,6 +77,8 @@ class RecordingApp:
         # name allowed: a tool's text names another tool only when it is offered
         # (`tool_maturity.OFFERED_TOOLS`).
         offered = OFFERED_TOOLS.set(await self.offered())
+        audit: dict = {}
+        recording = CALL_RECORD.set(audit)
         try:
             if name not in self.allowed:
                 raise ToolError(f"tool {name!r} is not offered in this scenario")
@@ -89,5 +96,7 @@ class RecordingApp:
             record.result_text = record.result_text or None
             raise
         finally:
+            CALL_RECORD.reset(recording)
             OFFERED_TOOLS.reset(offered)
+            record.audit = audit or None
             record.ended_at = self._clock()

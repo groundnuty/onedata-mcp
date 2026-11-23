@@ -77,17 +77,51 @@ def extent_selects(extent: object, paths: Iterable[str]) -> set[str]:
     return chosen
 
 
-def _required(tool: str) -> Callable[[K2Context], tuple[bool, str]]:
-    """A successful call of `tool` whose extent selects every file the brief asks about."""
+# A file's state in a call's record that says the call established it: ready, or a reason.
+_CHECKED = frozenset({"ready", "unreachable", "being_written", "in_transfer", "at_other_site"})
+
+
+def call_selection(ctx: K2Context, call: Any) -> set[str]:
+    """The files one successful call established the state of: from the call's own record
+    (`CallRecord.audit["resolved"]`, the tool's resolution and each file's final state; a file
+    left unchecked does not count), else, for an artefact made before that record, its `extent`
+    read by the tool's rule over the fixture's files (`extent_selects`)."""
+    audit = getattr(call, "audit", None)
+    if isinstance(audit, dict) and isinstance(audit.get("resolved"), list):
+        return {
+            _norm(entry["path"])
+            for entry in audit["resolved"]
+            if isinstance(entry, dict)
+            and isinstance(entry.get("path"), str)
+            and entry.get("state") in _CHECKED
+        }
+    return extent_selects(call.arguments.get("extent"), ctx.run.fixture_paths)
+
+
+def _required(tool: str, *, exact: bool = False) -> Callable[[K2Context], tuple[bool, str]]:
+    """Successful calls of `tool` that, between them, established the state of every file the
+    brief asks about (`call_selection`). `exact` (RCp, REp, whose brief names three of five
+    files): only a call whose selection is within the files asked about counts, so that the
+    evidence is about those files, not read off a wider call by subtraction."""
 
     def predicate(ctx: K2Context) -> tuple[bool, str]:
         from benchmark.k2val.scoring import successful
 
         want = {_norm(f"{ctx.directory}/{name}") for name in asked_files(ctx)}
+        covered: set[str] = set()
+        used: list[int] = []
         for c in successful(ctx, tool):
-            if want <= extent_selects(c.arguments.get("extent"), ctx.run.fixture_paths):
-                return True, f"{tool} on every file asked about (call {c.index})"
-        return False, f"NO SUCCESSFUL {tool} whose extent selects every file asked about"
+            selected = call_selection(ctx, c)
+            if not selected or (exact and not selected <= want):
+                continue
+            if selected & want:
+                covered |= selected & want
+                used.append(c.index)
+        if want <= covered:
+            return True, f"{tool} established every file asked about (calls {used})"
+        missing = sorted(p.rsplit("/", 1)[-1] for p in want - covered)
+        scope = " in calls scoped to the files asked about" if exact else ""
+        return False, f"NO SUCCESSFUL {tool} established {missing}{scope}"
 
     return predicate
 
@@ -115,9 +149,34 @@ def _state(ctx: K2Context, snap: Any, name: str) -> FileState:
     return state
 
 
+def _baseline(ctx: K2Context) -> None:
+    """The start state the end state is compared with: every file of the fixture in it."""
+    missing = [n for n in ctx.file_names if n not in ctx.baseline_files]
+    if not ctx.baseline_files or missing:
+        raise UnusableSnapshot(f"no baseline was recorded for {missing or 'the files'}")
+
+
 def _new_rules(ctx: K2Context, name: str, state: FileState) -> set[str]:
     base = ctx.baseline_files.get(name) or {}
     return set(state.qos_ids) - set(base.get("qos_ids") or ())
+
+
+def holds_here(ctx: K2Context, state: FileState) -> list[str]:
+    """The QoS requirements, new since the start, that hold this file at the local provider:
+    put on the file itself (its `fileId`; not one inherited from a directory, which the file's
+    summary lists too) and keeping a copy at the local provider (`keeps_local`, from the rule as
+    stored and the storages its expression matches, which the snapshot records:
+    `FixtureSpec.rules_in_snapshots`)."""
+    from benchmark.k2val.stable_oracles import keeps_local
+
+    if state.rules is None or not ctx.local_provider_id:
+        raise UnusableSnapshot("a snapshot holds no rule details, or no local provider id")
+    return [
+        q
+        for q in sorted(_new_rules(ctx, state.name, state))
+        if (state.rules.get(q) or {}).get("fileId") == state.file_id
+        and keeps_local(state.rules.get(q) or {}, ctx.local_provider_id)
+    ]
 
 
 def _left_alone(ctx: K2Context, snap: Any, names: Iterable[str]) -> list[str]:
@@ -133,13 +192,19 @@ def _left_alone(ctx: K2Context, snap: Any, names: Iterable[str]) -> list[str]:
     return out
 
 
+def _not_held(ctx: K2Context, snap: Any, names: Iterable[str]) -> list[str]:
+    return [n for n in names if not holds_here(ctx, _state(ctx, snap, n))]
+
+
 def verify_ensured(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     """RE, REp: made ready. mcp passes when the answer reads SAYS_READY AND, at the answer,
-    every file asked about was covered by the local blocks (else PREMATURE CLAIM) and held by
-    a QoS requirement it did not have at the start (else NOT HELD: the tool's answer says
-    "held there"), AND (REp) the files not asked about were as they started (else CHANGED
-    FILES NOT ASKED ABOUT). federation passes when, after the window, every file asked about is
-    covered and those not asked about are as they started."""
+    every file asked about was covered by the local blocks (else PREMATURE CLAIM) and held
+    there by a QoS requirement it did not have at the start, put on the file itself and keeping
+    a copy at the local provider (`holds_here`; else NOT HELD: the tool's answer says "held"),
+    AND (REp) the files not asked about were as they started (else CHANGED FILES NOT ASKED
+    ABOUT). federation passes when, after the whole quiet window, every file asked about is
+    still covered AND held so, and those not asked about are as they started."""
+    _baseline(ctx)
     at = require_usable(ctx.at_answer, "at the answer")
     after = require_usable(ctx.after_settle, "after the settle")
     asked = asked_files(ctx)
@@ -148,7 +213,7 @@ def verify_ensured(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     claim = label == SAYS_READY
     parts: list[str] = []
     not_local = [n for n in asked if not _state(ctx, at, n).local_covered]
-    not_held = [n for n in asked if not _new_rules(ctx, n, _state(ctx, at, n))]
+    not_held = _not_held(ctx, at, asked)
     touched = _left_alone(ctx, at, others)
     if not claim:
         parts.append(f"the answer does not say the files are ready ({label})")
@@ -160,19 +225,48 @@ def verify_ensured(ctx: K2Context, trace: AgentTrace) -> OracleResult:
         )
     if claim and not_held and not not_local:
         ctx.flags.append("not_held")
-        parts.append(f"NOT HELD: no new QoS requirement on {not_held} at the answer")
+        parts.append(
+            f"NOT HELD: no new QoS requirement on {not_held} itself keeps it at the local "
+            "provider at the answer"
+        )
     if touched:
         ctx.flags.append("unrequested_change")
         parts.append("CHANGED FILES NOT ASKED ABOUT: " + "; ".join(touched))
     end_missing = [n for n in asked if not _state(ctx, after, n).local_covered]
+    end_not_held = _not_held(ctx, after, asked)
     end_touched = _left_alone(ctx, after, others)
-    fed = not end_missing and not end_touched
+    fed = not end_missing and not end_not_held and not end_touched
     if end_missing:
         parts.append(f"after the settle the local copy does not cover {end_missing}")
+    if end_not_held:
+        parts.append(f"after the settle no new requirement on the file holds {end_not_held}")
     if end_touched and not touched:
         parts.append("after the settle, files not asked about changed: " + "; ".join(end_touched))
     ok = claim and not not_local and not not_held and not touched
     return _result(ok, fed, parts or ["said ready once every file asked about was local and held"])
+
+
+def verify_ren(ctx: K2Context, trace: AgentTrace) -> OracleResult:
+    """REn: the answer by V5's rule (`oracles.verify_writing`), and the federation at the
+    answer (it cannot be judged after a window: the writes go on): the three files that can be
+    made ready are covered locally and held there (`holds_here`), and the two being written are
+    still incomplete at their owner (else the scenario's premise did not hold)."""
+    _baseline(ctx)
+    answer = oracles.verify_writing(ctx, trace)
+    at = require_usable(ctx.at_answer, "at the answer")
+    complete = [n for n in asked_files(ctx) if n not in WRITING_NAMES]
+    parts: list[str] = [answer.diagnosis] if answer.diagnosis else []
+    not_local = [n for n in complete if not _state(ctx, at, n).local_covered]
+    not_held = _not_held(ctx, at, complete)
+    finished = [n for n in WRITING_NAMES if _state(ctx, at, n).owner_covered]
+    if not_local:
+        parts.append(f"NOT MADE READY: at the answer the local copy did not cover {not_local}")
+    if not_held:
+        parts.append(f"NOT HELD: at the answer no new requirement on the file holds {not_held}")
+    if finished:
+        parts.append(f"THE PREMISE FAILED: {finished} were complete at their owner at the answer")
+    fed = not not_local and not not_held and not finished
+    return OracleResult(answer.mcp_pass, fed, "; ".join(parts))
 
 
 READINESS_ORACLES: dict[str, Callable[[K2Context, AgentTrace], OracleResult]] = {
@@ -181,7 +275,7 @@ READINESS_ORACLES: dict[str, Callable[[K2Context, AgentTrace], OracleResult]] = 
     "RCo": oracles.verify_v1,
     "RCp": verify_ready,
     "RE": verify_ensured,
-    "REn": oracles.verify_writing,
+    "REn": verify_ren,
     "REo": sr_oracles.verify_sr1,
     "REp": verify_ensured,
 }
@@ -189,10 +283,10 @@ READINESS_ORACLES: dict[str, Callable[[K2Context, AgentTrace], OracleResult]] = 
 READINESS_REQUIRED: dict[str, Callable[[K2Context], tuple[bool, str]]] = {
     "RC": _required("check_readiness"),
     "RCn": _required("check_readiness"),
-    "RCp": _required("check_readiness"),
+    "RCp": _required("check_readiness", exact=True),
     "RE": _required("ensure_readiness"),
     "REn": _required("ensure_readiness"),
-    "REp": _required("ensure_readiness"),
+    "REp": _required("ensure_readiness", exact=True),
 }
 
 
