@@ -1,6 +1,6 @@
 # Smoke scenarios for the stable tools
 
-Status: built and unit-tested on the fake federation (2026-11-22), revised after an external review the same day (below). First run on the validation federation 2026-11-23, control and smoke pair, and classified ([Results](#results-of-the-first-smoke-run-2026-11-23)): six of the eight rows stay stable, `add_file_qos_requirement` is at risk (one new tool-attributable finding), and the hint row is not verified.
+Status: built and unit-tested on the fake federation (2026-11-22), revised after an external review the same day (below). First run on the validation federation 2026-11-23, control and smoke pair, and classified ([Results](#results-of-the-first-smoke-run-2026-11-23)): `add_file_qos_requirement` is at risk (one new tool-attributable finding); `get_file_qos_summary` and `get_file_distribution` stay stable only if a record that deferred a finding to this run may serve as its baseline (the operator's call); four rows stay stable; the hint row is not verified.
 
 [`10-tool-maturity.md`](10-tool-maturity.md), "Staying stable", says that a stable tool whose description wording, error hints or result shape changes must re-run "the tool's scenarios on the smoke pair at K=3". Eight such changes are owed, over seven tools:
 
@@ -201,16 +201,16 @@ The SR readers' miss on "Once bytesReplicated equals …, the data are fully the
 | Tool | Change | Direct (scored trials, pair) | Supporting (target-matched call) | Tool-attributable findings | Verdict |
 |---|---|---|---|---|---|
 | `add_file_qos_requirement` | description: `expression` | ST1: 6 | none | **SF1, new** | **AT RISK** |
-| `get_file_distribution` | description | ST6: 6 | 11 of 18 (V1, SR1, SR1i) | a known misreading recurs (below) | **STAYS STABLE** |
-| `get_file_qos_summary` | description | ST3, ST5: 12 | 18 of 18 (V3, V3n, V3o) | a known misreading recurs (below) | **STAYS STABLE** |
-| `get_file_qos_summary` | result: `replicas_num` | ST3, ST5: 12; shape check applied in 12 (control 2), failed in 0 | none | none | **STAYS STABLE** |
+| `get_file_distribution` | description | ST6: 6 | 11 of 18 (V1, SR1, SR1i) | SF3, known only by a record that deferred it to this run | **STAYS STABLE by the letter of rule 2 only**; AT RISK if that record cannot be its baseline |
+| `get_file_qos_summary` | description | ST3, ST5: 12 | 18 of 18 (V3, V3n, V3o) | SF2, known only by a record that deferred it to this run | **STAYS STABLE by the letter of rule 2 only**; AT RISK if that record cannot be its baseline |
+| `get_file_qos_summary` | result: `replicas_num` | ST3, ST5: 12; shape check applied in 12 (control 2), failed in 0 | none | none | verified; the tool's verdict is the row above |
 | `get_qos_requirement` | error hints | ST2: 6, all pass | 0 of 12 (ST3, ST5) | none | **NOT VERIFIED**: no exposure |
 | `get_transfer` | description | ST4, ST4i: 12 | none | F2 (design/12) recurs, known | **STAYS STABLE** |
 | `list_space_providers` | description | ST7: 6 | 19 of 24 (SR1, SR1i, SR1n, ST1) | none | **STAYS STABLE** |
 | `list_space_transfers` | description | ST4: 6 | none | none | **STAYS STABLE** |
 
 - **The hint row.** No trial of either run was shown `get_qos_requirement`'s id-guard hint: the run made 10 calls of the tool (9 by the pair, 1 by the control), all with a real rule id, all successful. So its wording stays **not verified**, and design/10's "Transition" stays open for it, as the rule above says.
-- **Known, by the letter of rule 2.** The three recurring misreadings below are known because a validation record of 2026-11-22 (design/12, design/13) documents the same tool and cause. Those records ran at the same surface (K1 `9192d3f5…`) a day before this one, and the PPAM K=8 run had no Qwen3-Coder; so they show the misreadings are not new to this run, not that they predate the rewording. That is a decision for the operator (below).
+- **"Known" and the records that deferred to this run.** SF2 and SF3 are known by the letter of rule 2: a validation record documents each, same tool and cause (design/13 and design/12, 2026-11-22). But both records logged them "for its smoke re-run (design/16)", that is, for this run to judge, and both ran at the same surface as this run (K1 `9192d3f5…`); the PPAM K=8 run had no Qwen3-Coder. Taking them as the baseline is circular: the re-run they deferred to would never judge the finding. If a deferring record cannot be the baseline, SF2 and SF3 are new and both tools are AT RISK. That is the operator's decision (below). F2 is not in this position: design/12 classified it itself (L3a) and did not defer it, though its own bar now rests on the traced-mechanism clause (one family).
 
 ### Classification of every non-pass
 
@@ -221,12 +221,13 @@ The SR readers' miss on "Once bytesReplicated equals …, the data are fully the
   - *The evidence bar:* one family (Haiku and the control listed the providers first and used the id in all their ST1 trials), so the third clause: one model with a traced mechanism. The trace runs name → silent acceptance → `impossible` → a wrong diagnosis, and the in-run contrast shows the same model correcting the same slip at once wherever a tool's error text named it. That is design/10's "a wrong argument the schema or error text could have prevented". It is not F2's shape (an instruction not followed): here the argument was taken without a word.
   - *New:* no earlier record has a provider name as a `providerId` value of a QoS expression. M-8 (the empirical findings) and PPAM A5 concern operand keys that do not exist (`cloud=EU`), not this.
   - *Context:* the reworded `expression` text is the one this case is about (ST1, above). The federation's provider names, `local` and `owner`, read like keywords and may invite the slip; a site-like name (`providerId=vistula-dc`) is the same mistake.
-- **Known, logged in their records, recurring here (not new):**
-  - **`get_file_qos_summary`: `"status": "fulfilled"` with no requirements read as "fully stored here".** Qwen3-Coder V1 #2 ([0]–[5]: "The QoS summary for each file shows a status of "fulfilled" with no requirements, indicating that each file is completely replicated locally"), V1 #0 ([7]–[12]), SR1 #0 ([5]: "the data should already be fully present at the local site"), SR1i #2 ([4]). Known: design/13, "Results", V1, Qwen3-Coder #5 and #7 (logged there as L3b, for this re-run). The V1 answers were false (four of the six files had 0 local bytes); the SR1 and SR1i claims were true when made but unread.
-  - **`get_file_distribution`: the 0-byte entry of the local provider read as a full copy.** Qwen3-Coder V1 #0 ([6]: "Each file has the correct virtual size matching its physical size at the local provider"; `physicalSize` 0) and SR1n #0 ([2]: "the file is already present at the "local" provider with a full physical size of 262144 bytes"). Known: design/12, "Results", SR1o, Qwen3-Coder #0–#2, #4–#7.
-  - **F2, completion claimed off the transfer's status (logged against `get_transfer`).** Qwen3-Coder SR1i #1 ("I've checked the transfer status and can confirm … Bytes replicated: 12,425,587 (which matches the file size)"; the file is 134,217,728 bytes) and SR1i #2 ("the replication transfer is complete"). Known: design/12, "Results", F2 (Qwen3-Coder SR1i #1, #3, #5, #6).
-
-  Each is one family here, as in its record, and none has the in-run contrast SF1 has. Whatever their class, they are known and move no verdict.
+- **SF2 (`get_file_qos_summary`): `"status": "fulfilled"` with no requirements read as "fully stored here".** Qwen3-Coder V1 #2 ([0]–[5] each → `{"status": "fulfilled", "requirements": {}}`; "The QoS summary for each file shows a status of "fulfilled" with no requirements, indicating that each file is completely replicated locally"), V1 #0 ([7]–[12], with SF3), SR1 #0 ([5]: "the data should already be fully present at the local site"), SR1i #2 ([4], with F2). All four FAIL. The V1 answers were false (four of the six files had 0 local bytes); the SR1 and SR1i claims were true when made but unread.
+  - *The evidence bar:* one family, so the third clause, applied as for SF1. The trace is complete in each trial: the call, the vacuous `fulfilled` it returned, and an answer that gives that field as its reason. The description lists the status values but says neither what `fulfilled` means with no requirement nor that the status says nothing of where the data are. SF1's in-run contrast is corroboration, not the clause, and SF2 has none: no trial shows another wording preventing it.
+  - *Known by the letter:* design/13, "Results", V1, Qwen3-Coder #5 and #7, logged there (as L3b) for this re-run. See "known" above.
+- **SF3 (`get_file_distribution`): the local provider's empty entry read as holding the file.** Qwen3-Coder V1 #0 ([6]: the local entry has `"success": true`, `virtualSize` 262144, `physicalSize` 0 and no blocks; the answer: "each file has a successful distribution at the local provider", "the correct virtual size matching its physical size at the local provider") and SR1n #0 ([2]: "the file is already present at the "local" provider with a full physical size of 262144 bytes", which then shaped its copy to `owner`). Both FAIL (V1 #0 also for SF2; SR1n #0 for its write).
+  - *The evidence bar:* the third clause, as SF2: in V1 #0 the answer reasons from the empty entry's `success` and `virtualSize`. SR1n #0 gives the owner's size to the local site, a plainer misread of the same entry.
+  - *Known by the letter:* design/12, "Results", SR1o, Qwen3-Coder #0–#2, #4–#7, logged there (as L3b) for this re-run.
+- **F2, completion claimed off the transfer's status (logged against `get_transfer`).** Qwen3-Coder SR1i #1 ("I've checked the transfer status and can confirm … Bytes replicated: 12,425,587 (which matches the file size)"; the file is 134,217,728 bytes) and SR1i #2 ("the replication transfer is complete"). Known: design/12, "Results", F2 (Qwen3-Coder SR1i #1, #3, #5, #6).
 
 **Model capability (L3b)**
 
@@ -240,8 +241,9 @@ The SR readers' miss on "Once bytesReplicated equals …, the data are fully the
 ### What the protocol asks next
 
 - **`add_file_qos_requirement`.** By design/10, "Staying stable", a new tool-attributable failure sends the tool back to experimental. The fix the trace points to is in the tool: refuse (or answer with a hint) a `providerId=` operand whose value is the name of a provider of the file's space, as `schedule_file_replication` does ("Pass its id …, not its name"). That is a change to its error hints, so ST1 then re-runs on the smoke pair at K=3. Whether the tool returns to stable after that re-run, or goes through the five gates again as an experimental tool, is the operator's call.
+- **`get_file_qos_summary` and `get_file_distribution`.** Cleared only if the operator takes the deferring records as their baseline. Otherwise SF2 and SF3 are new, each tool goes back to experimental, and the fixes the traces point to are result or description wording, each followed by its scenarios on the smoke pair at K=3: for SF2, say in the summary (or its description) that a status with no requirement is vacuous and says nothing of where the data are; for SF3, say that a provider entry with no blocks holds none of the file, whatever its `virtualSize`.
 - **`get_qos_requirement`'s hints:** not verified; the Transition item stays open.
-- **The other six rows:** cleared, with "known" as rule 2 defines it.
+- **The other four rows** (`get_file_qos_summary`'s `replicas_num`, `get_transfer`, `list_space_providers`, `list_space_transfers`): cleared.
 
 ## Review of 2026-11-22 (external, jailed)
 
@@ -265,8 +267,6 @@ An external frontier-model review of the first version answered "not ready". Eac
 
 `make valfed-check` covers 1–6 before any model runs:
 
-**Answered by the run of 2026-11-23.** `make valfed-check` built ST3's to ST6's fixtures, and no smoke trial was a RESET_FAIL, so the preconditions behind 1–6 held: the ended transfers were listed newest first (1), the transfer bodies named the file and the site (2), the rules read back and evaluated as intended (3, 4), the `split` file left the quarter between its parts held by neither provider (5: `owner` [0, 131072], `local` [196608, 65536]), and the spaces resolved by name (6). For 7, 25.0 reports such a rule as `impossible` (Qwen3-Coder's `providerId=local` in ST1 #0 and #1), and the file never arrives.
-
 1. **The order of the ended-transfer listing.** ST4 assumes 25.0 lists ended transfers newest first. If it does not, every ST4 trial is a RESET_FAIL and `list_space_transfers` has no direct scenario until ST4 is redesigned; ST4i still covers `get_transfer`.
 2. **The `get_transfer` body.** The swagger's `TransferStatus` names `fileId`, `filePath`, `spaceId` and `replicatingProviderId`; the fixture reads them.
 3. **Rule read-back and evaluation.** 25.0's `GET /qos_requirements/{id}` is assumed to give `fileId`, `expression`, `replicasNum` and `status`. Its `evaluate_qos_expression` is assumed to answer `matchingStorageBackends` with each storage's `providerId`, one storage per provider here. The token holds `space_manage_qos`, which the operation needs.
@@ -274,3 +274,5 @@ An external frontier-model review of the first version answered "not ready". Eac
 5. **A `split` file.** A write through the site at an offset past the end (leaving a gap nobody wrote) is assumed to leave its blocks at the site only, with both providers then reporting the whole size and the gap held by neither.
 6. **A space's id from its name.** The fixtures read it from the owner's `GET /spaces`, which the swagger documents as a list of `{name, spaceId, ...}`.
 7. **An expression naming a provider by name** (`providerId=vistula-dc`) is assumed to match no storage and never to be met. The fake calls it `impossible`; 25.0 may say `pending`. Either way the file never arrives, and ST1 fails such a trial.
+
+**Answered by the run of 2026-11-23.** `make valfed-check` built ST3's to ST6's fixtures, and no smoke trial was a RESET_FAIL, so the preconditions behind 1–6 held: the ended transfers were listed newest first (1), the transfer bodies named the file and the site (2), the rules read back and evaluated as intended (3, 4), the `split` file left the quarter between its parts held by neither provider (5: `owner` [0, 131072], `local` [196608, 65536]), and the spaces resolved by name (6). For 7, 25.0 reports such a rule as `impossible` (Qwen3-Coder's `providerId=local` in ST1 #0 and #1), and the file never arrives.
