@@ -90,4 +90,6 @@ def register_module(mcp: FastMCP) -> None:
         The target must be a provider that supports the file's space, given by
         its provider id, not its name; otherwise the call fails.
         """
-        return await schedule_file_replication(file_id_or_path, target_provider_id)
+        return await schedule_file_replication(
+            file_id_or_path, target_provider_id, check_providers=True
+        )
