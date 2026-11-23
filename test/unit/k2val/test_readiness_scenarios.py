@@ -1322,3 +1322,226 @@ def test_the_five_minutes_are_scored_in_re_ren_and_rep_alike() -> None:
     assert EXTRA_CHECKS["RE"] is EXTRA_CHECKS["REn"] is EXTRA_CHECKS["REp"]
     for sid in ("RE", "REn", "REp"):
         assert "WAITED TOO LONG" in READINESS_SCENARIOS[sid].rules, sid
+
+
+# --- The external review's verification round: each item reproduced first -------------------
+
+_XF = pytest.mark.xfail(strict=True, reason="verification round: reproduced here, fixed later")
+
+
+def _recorded(tool: str, behaviour):
+    """One call of `tool` through the recording proxy, the app doing `behaviour()`."""
+    from benchmark.k2val.recording import RecordingApp
+
+    class App:
+        async def list_tools(self):
+            return [SimpleNamespace(name=tool)]
+
+        async def call_tool(self, name, arguments):
+            return await behaviour()
+
+    app = RecordingApp(App(), allowed=frozenset({tool}))
+    return app
+
+
+@_XF
+@pytest.mark.asyncio
+async def test_verify_a_readiness_call_that_recorded_nothing_has_an_empty_record_not_none() -> None:
+    """Root cause (Codex 5, Gemini 1, the new MAJOR on audits): a call that resolved nothing
+    (a configuration timeout) and a trace from before the record both read as None."""
+
+    async def nothing():
+        return {}
+
+    app = _recorded("check_readiness", nothing)
+    await app.call_tool("check_readiness", {"extent": [{"dataset": DIR}]})
+
+    assert app.calls[0].audit == {"resolved": [], "writes": []}
+
+
+@_XF
+def test_verify_a_legacy_trace_is_unverified_not_inferred_from_the_arguments() -> None:
+    """Codex 5: with no record, the required call was credited from the extent itself."""
+    from benchmark.k2val.scoring import UnverifiableEvidence
+
+    legacy = _call(0, "check_readiness", {"extent": [{"dataset": DIR}]})
+    with pytest.raises(UnverifiableEvidence):
+        REQUIRED["RC"](_with_calls("RC", legacy))
+
+
+@_XF
+@pytest.mark.asyncio
+async def test_verify_an_ensure_that_wrote_nothing_is_no_write_outside() -> None:
+    """Gemini 1: a space-root date range whose call wrote nothing (a configuration timeout)
+    was scored as a write outside the trial."""
+    from benchmark.k2val.scoring import write_targets
+
+    async def config_timeout():
+        return {}
+
+    app = _recorded("ensure_readiness", config_timeout)
+    await app.call_tool("ensure_readiness", {"extent": _by_dates("/sp"), "deadline_s": 60})
+
+    assert write_targets(_with_calls("RE", *app.calls)) == []
+
+
+@_XF
+def test_verify_a_removal_is_not_placed_by_a_later_calls_record() -> None:
+    """Codex 3: a removal was scored inside because a LATER ensure call logged the rule."""
+    from benchmark.k2val.scoring import write_targets
+
+    removal = _call(0, "remove_qos_requirement", {"qos_id": "q1"})
+    later = _call(1, "ensure_readiness", {"extent": [{"dataset": DIR}], "deadline_s": 60})
+    later.started_at, later.ended_at = 10.0, 20.0
+    later.audit = {
+        "resolved": [],
+        "writes": [],
+        "rules": [{"file_id": "id-x", "path": f"{DIR}/x", "rule_id": "q1", "how": "unconfirmed"}],
+    }
+    targets = write_targets(_with_calls("V6", removal, later))
+    assert [t["where"] for t in targets if t["tool"] == "remove_qos_requirement"] == ["unverified"]
+
+
+@_XF
+def test_verify_an_audited_write_is_placed_by_its_file_not_its_display_path() -> None:
+    """New BLOCKING 1: a write to another space's file with the same relative path was scored
+    inside: the display path alone placed it."""
+    from benchmark.k2val.scoring import write_targets
+
+    call = _call(0, "ensure_readiness", {"extent": [{"dataset": "s-other-id"}], "deadline_s": 60})
+    call.audit = {
+        "resolved": [],
+        "writes": [
+            {"file_id": "id-elsewhere", "space_id": "s-other-id", "path": f"{DIR}/log_20200101.dat"}
+        ],
+    }
+    (target,) = write_targets(_with_calls("RE", call))
+    assert target["where"] == "outside"
+
+
+@_XF
+def test_verify_a_cancelled_calls_writes_are_scored() -> None:
+    """New BLOCKING 2: a cancelled call (not ok, no error) kept its record, but its write was
+    dropped before the record was read."""
+    from benchmark.k2val.scoring import write_targets
+
+    call = _call(0, "ensure_readiness", {"extent": [{"dataset": "sp"}], "deadline_s": 60})
+    call.ok, call.result_text = False, None
+    call.audit = {
+        "resolved": [],
+        "writes": [{"file_id": "id-x", "space_id": "sp", "path": "/sp/x"}],
+    }
+    assert [t["where"] for t in write_targets(_with_calls("RE", call))] == ["outside"]
+
+
+@_XF
+@pytest.mark.asyncio
+async def test_verify_the_recorder_keeps_a_cancelled_call_as_unconfirmed() -> None:
+    """New BLOCKING 2: recording.py let a cancellation through with no error recorded."""
+    from benchmark.k2val.scoring import unconfirmed
+
+    async def cancelled():
+        raise asyncio.CancelledError
+
+    app = _recorded("ensure_readiness", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await app.call_tool("ensure_readiness", {"extent": [{"dataset": DIR}], "deadline_s": 60})
+
+    assert unconfirmed(app.calls[0])
+
+
+@_XF
+def test_verify_a_baseline_without_its_rules_is_unusable() -> None:
+    """Codex 9: a baseline entry with no `qos_ids` read as "no rule", so a hold there before
+    the agent counted as new."""
+    from benchmark.k2val.snapshot import UnusableSnapshot
+
+    c = _ctx("RE", _snap(set(FIVE), set(FIVE)))
+    c.baseline_files[FIVE[0]] = {"local_bytes": 0}
+    c.calls = [_call(0, "ensure_readiness", {})]
+    with pytest.raises(UnusableSnapshot):
+        ORACLES["RE"](c, AgentTrace(final_answer=READY))
+
+
+@_XF
+def test_verify_the_five_minutes_have_no_allowance_per_call() -> None:
+    """Codex 10: thirty sequential 20 s calls (600 s) passed: 300 s + 20 s a call."""
+    from benchmark.k2val.scoring import EXTRA_CHECKS
+
+    calls = [_ensure_call(i, 20.0 * i, 20.0 * i + 20.0) for i in range(30)]
+    assert EXTRA_CHECKS["REn"](_with_calls("REn", *calls)).passed is False
+
+
+@_XF
+def test_verify_rcp_counts_every_file_a_call_selected_checked_or_not() -> None:
+    """Gemini 6: a whole-directory call whose two other files were left unchecked passed RCp."""
+    call = _call(0, "check_readiness", {"extent": [{"dataset": DIR}]})
+    call.audit = {
+        "resolved": [
+            {"path": f"{DIR}/{n}", "state": "ready" if n in ASKED else "unchecked"} for n in FIVE
+        ],
+        "writes": [],
+    }
+    assert REQUIRED["RCp"](_with_calls("RCp", call))[0] is False
+
+
+@_XF
+def test_verify_rci_needs_the_files_resolved_by_the_item_given_by_the_spaces_id() -> None:
+    """Codex 14: an unrelated item naming a space by id let the name-addressed item's files
+    count."""
+    extent = [{"dataset": "0123456789abcdef0123456789abcdef"}, {"dataset": DIR}]
+    call = _call(0, "check_readiness", {"extent": extent})
+    call.audit = {
+        "resolved": [{"path": f"{DIR}/{n}", "state": "ready", "items": [1]} for n in FIVE],
+        "writes": [],
+    }
+    c = _with_calls("RCi", call)
+    c.run = replace(c.run, space_name="sp")
+    assert REQUIRED["RCi"](c)[0] is False
+
+
+@_XF
+def test_verify_a_legacy_ready_about_a_subset_is_not_a_certain_k2_violation() -> None:
+    """Gemini 11: with no record, a ready for the completed files only was flagged certain."""
+    from benchmark.k2val.oracles import k2_violations
+
+    c = _ctx("REn", _ren_at_answer(local=True, held=True))
+    c.writer = {"t0": 0.0, "finish_s": 2400.0, "last_write_done_at": None}
+    c.calls = [_call(0, "ensure_readiness", {}, {"ready": True, "data_ready": True})]
+    assert [v["level"] for v in k2_violations(c)] != ["certain"]
+
+
+@_XF
+@pytest.mark.parametrize(
+    ("sid", "answer", "check"),
+    [
+        # Codex 11: a partitive whole is no count
+        ("RCn", "Of the five files, some are still being written.", lambda r: "#5" not in r[1]),
+        # Gemini 2: an attempt number is no count
+        ("RCn", "On attempt 4 some files are still being written.", lambda r: "#4" not in r[1]),
+        # Gemini 7: ready here, with a replica elsewhere too
+        (
+            "RC",
+            "All five requested files are ready at vistula-dc and at nordic-marine-dc as well.",
+            lambda r: r[0] == "SAYS_READY",
+        ),
+        # the new MAJOR: coordinated file names after a verb are not split
+        (
+            "RCn",
+            "There are two files, log_20200102.dat and log_20200104.dat, still being written.",
+            lambda r: {"log_20200102.dat", "log_20200104.dat", "#2"} <= set(r[1]),
+        ),
+    ],
+)
+def test_verify_the_readers(sid, answer, check) -> None:
+    reading = read_answer(sid, answer)
+    assert check(reading), reading
+
+
+@_XF
+def test_verify_the_other_three_said_ready_here_is_caught_in_v5() -> None:
+    """Codex 11: "the other three are ready here" is false in V5 (they are at the owner only),
+    and neither reader caught it; the judge had no marker for it."""
+    answer = "No: two are still being written; the other three are ready here."
+    assert is_right("V5", read_answer("V5", answer)) is False
+    assert "others:ready" in ANSWER_SPECS["V5"].names_what

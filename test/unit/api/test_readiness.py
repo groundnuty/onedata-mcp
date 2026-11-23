@@ -3961,3 +3961,85 @@ def test_the_budget_is_the_callers_and_the_grace_scales_with_the_cap(
     if cap is not None:
         monkeypatch.setenv(readiness.MAX_WAIT_ENV, cap)
     assert readiness.ensure_timing(deadline_s) == timing
+
+
+# ---------------------------------------------------------------------------
+# The external review's verification round (design/17, design/18): each item reproduced first.
+# ---------------------------------------------------------------------------
+
+
+def _listing_of(n: int) -> readiness._Listing:
+    from datetime import timedelta
+
+    d0 = date(2000, 1, 1)
+    files = [
+        readiness.FileInfo(
+            f"f{i}",
+            f"/{SPACE}/d/f_{(d0 + timedelta(days=i % 9000)).strftime('%Y%m%d')}_{i}.nc",
+            "s1",
+        )
+        for i in range(n)
+    ]
+    return readiness._Listing(files=files, root=f"/{SPACE}/d")
+
+
+def _ranged(items: int, ranges: int) -> list[dict]:
+    from datetime import timedelta
+
+    d0 = date(2000, 1, 1)
+    rs = [
+        {
+            "start": (d0 + timedelta(days=k)).isoformat(),
+            "end": (d0 + timedelta(days=k + 30)).isoformat(),
+        }
+        for k in range(ranges)
+    ]
+    return [{"dataset": f"/{SPACE}/d", "date_ranges": rs} for _ in range(items)]
+
+
+@pytest.mark.xfail(strict=True, reason="verification round: reproduced here, fixed later")
+@pytest.mark.asyncio
+async def test_verify_the_ranges_of_a_whole_extent_are_capped_before_any_request(fed: Fed) -> None:
+    """Codex 8, Gemini 8: 20 items x 400 ranges was a valid extent; its selection over a
+    20,000-file listing ran for minutes on a 1 s budget."""
+    with pytest.raises(ValueError, match=r"date ranges in all"):
+        await readiness.check_readiness(_ranged(20, 400))
+    assert fed.requests == []
+
+
+@pytest.mark.xfail(strict=True, reason="verification round: reproduced here, fixed later")
+@pytest.mark.asyncio
+async def test_verify_selection_stays_within_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex 8: the selection itself (no request) was not bounded by the deadline: 20 items x
+    20 ranges over 20,000 files took seconds on a 1 s budget."""
+    import time
+
+    listing = _listing_of(20_000)
+
+    async def listed(run, item):
+        return listing
+
+    monkeypatch.setattr(readiness, "_list_dataset", listed)
+    items = readiness._normalise_extent(_ranged(20, 20))
+    run = readiness._Run(LOCAL, time.monotonic() + 1.0)
+
+    started = time.monotonic()
+    await readiness._resolve(run, items)
+
+    assert time.monotonic() - started < 1.5
+
+
+@pytest.mark.xfail(strict=True, reason="verification round: reproduced here, fixed later")
+@pytest.mark.asyncio
+async def test_verify_a_hold_that_could_not_be_read_back_is_not_called_not_held(fed: Fed) -> None:
+    """Codex 13: a read-back that timed out was reported as "1 file is not held there"; the
+    observed fact is that the hold could not be confirmed."""
+    f = fed.add("a.nc", 100, local="full", owner="full")
+    readiness._rules[f.fid] = "q-remembered"
+    fed.qos_get_override = lambda qid: _error(504, "timeout")
+
+    result = await ensure(deadline_s=5)
+
+    assert result["hold_failed"]["causes"] == {"not_confirmed": 1}
+    assert "not held" not in result["advice"]
+    assert "could not be confirmed" in result["advice"]
