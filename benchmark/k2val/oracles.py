@@ -801,11 +801,16 @@ def _split_and(clause: str) -> list[str]:
     written" splits after "ready" only; "log_2 and log_4 are being written" is one clause)."""
     out, start = [], 0
     for m in _AND.finditer(clause):
-        if _VERB.search(clause[start : m.start()]):
+        # a clause on both sides: a verb on the left, and on the right one before any comma (an
+        # independent predicate, not "two files, a and b, still being written")
+        if _VERB.search(clause[start : m.start()]) and _OWN_VERB.match(clause[m.end() :]):
             out.append(clause[start : m.start()])
             start = m.end()
     out.append(clause[start:])
     return out
+
+
+_OWN_VERB = re.compile(r"[^,;:]*?" + _VERB.pattern, re.I)
 
 
 _ANSWERED_NO = re.compile(r"^\W*\?\W*(?:no|none)\b", re.I)
@@ -814,7 +819,8 @@ _PAST_WRITING = re.compile(r"\b(?:was|were|had been|has been|have been)\s+(?:sti
 # Another site's or a finished file's clause ends a continuation of names.
 _NOT_WRITING_ANY_MORE = re.compile(
     r"\bcomplete\b|\bcompleted\b|\banother\b|\bother (?:site|provider)\b|\belsewhere\b"
-    r"|\bat_other_site\b|\bremote(?:ly)?\b|\bavailable\b|\bfinished\b",
+    r"|\bat_other_site\b|\bremote(?:ly)?\b|\bavailable\b|\bfinished\b"
+    r"|\bready\b|\breadable\b|\blocal(?:ly)?\b|\bhere\b",
     re.I,
 )
 
@@ -948,7 +954,15 @@ _ONLY = re.compile(r"\bonly\b", re.I)
 _NOT_FILES = re.compile(
     r"\b(?:" + _NUMBER + r"|\d+\.\d+|a few|several)\s*(?:s|secs?|seconds?|ms|mins?|minutes?|h|"
     r"hrs?|hours?|days?|calls?|attempts?|tries|times|rounds?|polls?|%|percent|bytes?|"
-    r"[kmgt]i?b)\b",
+    r"[kmgt]i?b)\b"
+    # a number naming a try, not counting files: "on attempt 4", "the 4th call", "poll #3"
+    r"|\b(?:attempts?|tries|try|rounds?|polls?|calls?|checks?|passes|pass|iterations?|steps?)"
+    r"\s*(?:no\.?|number|#)?\s*\d+\b"
+    r"|\b\d+(?:st|nd|rd|th)\b"
+    # the whole a part is taken from: "of the five files, some ...", "out of 5"
+    r"|\b(?:of|out of|among)\s+(?:the\s+|all\s+|these\s+|those\s+)?"
+    + _NUMBER
+    + r"\b(?:\s+(?:files?|logs?|requested|declared))*",
     re.I,
 )
 # A count after the phrase, bound to files: "still being written: 4 files", "in progress for all
@@ -1013,7 +1027,7 @@ def writing_claim_problems(
     """What is false in the files an answer says are still being written (V5, RCn, REn): a
     name that is not being written, or a count other than the true one. The names are taken
     as examples (a true one passes), the counts as claims about the whole."""
-    names = {n for n in said if not n.startswith("#") and n != OTHERS_NOT_READY}
+    names = {n for n in said if not n.startswith("#") and n not in OTHERS_MARKERS}
     counts = {n for n in said if n.startswith("#")}
     true_count = {f"#{len(truth)}"} | ({"#all"} if len(truth) == total else set())
     out = []
@@ -1062,11 +1076,33 @@ def _source_regex(owner: str) -> re.Pattern[str]:
     )
 
 
-def _ready_clauses(text: str, other_site: re.Pattern[str], owner: str) -> list[str]:
+_READY_WORD = re.compile(r"\b(?:complete|ready|readable|available|accessible)\b", re.I)
+_NEGATION = re.compile(r"\b(?:nothing|none|no|not|neither|nor|without)\b|n['’]t\b", re.I)
+
+
+def _ready_here(clause: str, other_site: re.Pattern[str], local: str) -> bool:
+    """The clause puts its ready word at this site: "ready at <local>", "readable here", with no
+    other site and no negation between the two (so "ready at <local> and at <owner> as well"
+    is, and "complete at <owner> and being copied here" or "with nothing at <local>" is not)."""
+    here = re.compile(
+        r"\b(?:(?:at|on|in)\s+(?:" + re.escape(local) + r"|your\s+(?:site|provider))"
+        r"|here|locally)\b",
+        re.I,
+    )
+    for word in _READY_WORD.finditer(clause):
+        for place in here.finditer(clause, word.end(), word.end() + 40):
+            between = clause[word.end() : place.start()]
+            if not other_site.search(between) and not _NEGATION.search(between):
+                return True
+    return False
+
+
+def _ready_clauses(text: str, other_site: re.Pattern[str], owner: str, local: str) -> list[str]:
     """The clauses that claim the files ready HERE: a ready word, no negation or hedge in the
     clause, and not about another site. Another site named only as the source ("copied from
-    <owner> and now complete and readable at <local>") does not make the clause about it; any
-    other mention does ("complete at <owner>, with nothing at <local>")."""
+    <owner> and now complete and readable at <local>") does not make the clause about it; nor
+    does a replica named beside one here ("ready at <local> and at <owner> as well",
+    `_ready_here`); any other mention does ("complete at <owner>, with nothing at <local>")."""
     source = _source_regex(owner)
     return [
         clause
@@ -1074,7 +1110,9 @@ def _ready_clauses(text: str, other_site: re.Pattern[str], owner: str) -> list[s
         for clause in _READY_CLAUSE_SPLIT.split(sentence)
         if _READY_POS.search(clause)
         and not _DONE_NEG.search(clause)
-        and not other_site.search(source.sub(" ", clause))
+        and (
+            not other_site.search(source.sub(" ", clause)) or _ready_here(clause, other_site, local)
+        )
     ]
 
 
@@ -1104,6 +1142,27 @@ def _others_regex(owner: str) -> re.Pattern[str]:
     )
 
 
+# ... and that they ARE here: true in RCn and REn (once made ready), false in V5 (they are at
+# the owner only). Checked against the state at the answer, as `others:not_ready` is.
+OTHERS_READY = "others:ready"
+OTHERS_MARKERS = (OTHERS_NOT_READY, OTHERS_READY)
+_OTHERS_READY = re.compile(
+    r"\b(?:the\s+)?(?:other|others|remaining|rest)\b(?:\s+" + _NUMBER + r")?"
+    r"(?:\s+(?:files?|ones?|logs?))?\s+(?:are|is|were)\s+(?:(?:all|now|already)\s+)*"
+    r"(?:here|ready|complete|readable|local(?:ly)?|available|fine|present|in place)\b",
+    re.I,
+)
+
+
+def says_others_ready(text: str) -> bool:
+    """The answer says the files it does not say are being written are here and ready: "the
+    other three are ready here", "the rest are complete"."""
+    return any(
+        not _DENIED_BEFORE.search(text[: m.start()]) and not _NEGATION.search(m.group())
+        for m in _OTHERS_READY.finditer(text)
+    )
+
+
 def says_others_not_ready(text: str, owner: str) -> bool:
     """The answer says the files it does not say are being written are not here: "the other
     three are missing", "the rest are only at <owner>". "None of the others is missing" is no
@@ -1130,9 +1189,11 @@ def read_check(answer: str, local: str, owner: str) -> tuple[str, frozenset[str]
     writing = says_writing(answer)
     if writing and says_others_not_ready(text, owner):
         said = said | {OTHERS_NOT_READY}
+    if writing and says_others_ready(text):
+        said = said | {OTHERS_READY}
     not_ready = _says_not_ready(text)
     verdict = bool(_NOT_READY_VERDICT.search(text) or _OPENS_NO.match(text))
-    claims = _ready_clauses(text, other_site, owner)
+    claims = _ready_clauses(text, other_site, owner, local)
     if claims and not (writing or verdict or _partly_ready(claims)):
         return "SAYS_READY", said
     if not (not_ready or writing):
@@ -1181,10 +1242,16 @@ def verify_writing(ctx: K2Context, trace: AgentTrace) -> OracleResult:
         why = _CHECK_WRONG.get(label, "not ready, without 'still being written'")
         parts.append(f"{why} ({label})")
     false = writing_claim_problems(said, S2_NAMES, len(ctx.file_names) or 5)
-    if OTHERS_NOT_READY in said and _others_here(ctx):
+    here = _others_here(ctx)
+    if OTHERS_NOT_READY in said and here is True:
         false.append(
             "says the files not being written are not here, and at the answer the local copy "
             "covered them"
+        )
+    if OTHERS_READY in said and here is False:
+        false.append(
+            "says the files not being written are ready here, and at the answer the local copy "
+            "did not cover them"
         )
     parts.extend(false)
     ok = label == "NOT_READY_WRITING" and not false
@@ -1194,13 +1261,13 @@ def verify_writing(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     return _result(ok, None, parts or ["not ready: files still being written"])
 
 
-def _others_here(ctx: K2Context) -> bool:
-    """At the answer, the local copy covered every file of the trial that is not being written
-    (RCn: always; REn: once they were made ready; V5: never, they are at the owner only). The
-    scorer always has that snapshot (`score` refuses to judge without it); an oracle called
-    without one cannot show the claim false."""
+def _others_here(ctx: K2Context) -> bool | None:
+    """Whether, at the answer, the local copy covered every file of the trial that is not being
+    written (RCn: always; REn: once they were made ready; V5: never, they are at the owner
+    only). None without that snapshot: the scorer always has it (`score` refuses to judge
+    without it); an oracle called without one cannot show either claim false."""
     if ctx.at_answer is None:
-        return False
+        return None
     at = require_usable(ctx.at_answer, "at the answer")
     others = [n for n in ctx.file_names if n not in S2_NAMES]
     return bool(others) and at.all_local_covered(others)

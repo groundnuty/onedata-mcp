@@ -1519,7 +1519,6 @@ def test_verify_a_legacy_ready_about_a_subset_is_not_a_certain_k2_violation() ->
     assert [v["level"] for v in k2_violations(c)] != ["certain"]
 
 
-@_XF
 @pytest.mark.parametrize(
     ("sid", "answer", "check"),
     [
@@ -1546,10 +1545,68 @@ def test_verify_the_readers(sid, answer, check) -> None:
     assert check(reading), reading
 
 
-@_XF
 def test_verify_the_other_three_said_ready_here_is_caught_in_v5() -> None:
     """Codex 11: "the other three are ready here" is false in V5 (they are at the owner only),
     and neither reader caught it; the judge had no marker for it."""
     answer = "No: two are still being written; the other three are ready here."
     assert is_right("V5", read_answer("V5", answer)) is False
     assert "others:ready" in ANSWER_SPECS["V5"].names_what
+
+
+@pytest.mark.parametrize(
+    ("sid", "answer", "check"),
+    [
+        # a partitive whole is no count; the part taken from it is
+        ("RCn", "Of the five files, two are still being written.", lambda r: r[1] == {"#2"}),
+        ("RCn", "Two of the five files are still being written.", lambda r: r[1] == {"#2"}),
+        # an attempt number or an ordinal is no count; a count beside it is
+        (
+            "RCn",
+            "On the 4th attempt, 2 files are still being written.",
+            lambda r: r[1] == {"#2"},
+        ),
+        ("RCn", "After poll #3, two files are still being written.", lambda r: r[1] == {"#2"}),
+        # a replica elsewhere beside the one here leaves a ready claim; a copy on its way does not
+        (
+            "RC",
+            "The files are complete at nordic-marine-dc and being copied to vistula-dc.",
+            lambda r: r[0] != "SAYS_READY",
+        ),
+        (
+            "RC",
+            "All five are complete at nordic-marine-dc, and readable here as well.",
+            lambda r: r[0] == "SAYS_READY",
+        ),
+        # "and" between two clauses still splits; between two names it does not
+        (
+            "RCn",
+            "log_20200102.dat is still being written and log_20200104.dat is ready.",
+            lambda r: set(r[1]) == {"log_20200102.dat"},
+        ),
+        (
+            "RCn",
+            "Two files, Jan 2 and Jan 4, are still being written.",
+            lambda r: set(r[1]) == {"log_20200102.dat", "log_20200104.dat", "#2"},
+        ),
+    ],
+)
+def test_verify_the_readers_and_their_pairs(sid, answer, check) -> None:
+    reading = read_answer(sid, answer)
+    assert check(reading), reading
+
+
+@pytest.mark.parametrize(
+    ("sid", "others_local", "right"),
+    [("V5", False, False), ("RCn", True, True)],  # false in V5, true in RCn
+)
+def test_verify_the_other_three_said_ready_is_judged_against_the_state(
+    sid, others_local, right
+) -> None:
+    from benchmark.k2val.oracles import OTHERS_READY
+
+    answer = "No: two are still being written; the other three are ready here."
+    reading = read_answer(sid, answer)
+    assert OTHERS_READY in reading[1]
+    assert is_right(sid, reading) is right
+    result = ORACLES[sid](_rcn_ctx(others_local=others_local), AgentTrace(final_answer=answer))
+    assert result.mcp_pass is right, result.diagnosis

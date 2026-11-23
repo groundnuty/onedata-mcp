@@ -192,8 +192,9 @@ _CHECK = AnswerSpec(
     'is not a count ("after 150 s"), nor is a number of files said to be ready. A file named as '
     'an example ("some, including log_20200102.dat") is listed, with no number. When it says '
     "some files are still being written and also that the others are not complete and readable "
-    'there (missing, not copied, only at another site), add "others:not_ready". An empty list '
-    "when it names and counts none of them.",
+    'there (missing, not copied, only at another site), add "others:not_ready"; when it says '
+    'the others ARE complete and readable there ("the other three are ready here"), add '
+    '"others:ready". An empty list when it names and counts none of them.',
 )
 _V6 = AnswerSpec(
     "label",

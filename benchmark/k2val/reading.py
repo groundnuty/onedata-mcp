@@ -162,10 +162,12 @@ def is_right(sid: str, value: Reading) -> bool | None:
     if sid in _RIGHT and _RIGHT[sid] is None:
         return None
     if sid == "V5":
+        # the other three are at the owner only in V5: "they are ready here" is a false claim
         return (
             isinstance(value, tuple)
             and value[0] == "NOT_READY_WRITING"
             and not oracles.writing_claim_problems(frozenset(value[1]), oracles.S2_NAMES, 5)
+            and oracles.OTHERS_READY not in value[1]
         )
     if sid == "V4":
         return isinstance(value, tuple) and value[0] == "NOT_READY_ELSEWHERE"
