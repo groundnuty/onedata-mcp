@@ -35,7 +35,7 @@ The protocol is [`10-tool-maturity.md`](10-tool-maturity.md). The tool's spec is
 
     ONEDATA_MCP_TOOLS=check_readiness make -s tools-manifest | sha256sum   # expect fc3573ef...
 
-## Gate 1: implementation (done, branch commits `0befafc`, `4b866d8`, `b070c8b`)
+## Gate 1: implementation (done, branch commits `0befafc`, `4b866d8`, `b070c8b`, `29592f0`)
 
 The tool already had 162 API and 7 wrapper tests (design/09). The model-triggerable paths below were added or changed; the tests are in `test/unit/api/test_readiness.py` (section "Gate 1") and `test/unit/modules/test_readiness_wrapper.py`, through the API and through an MCP client.
 
@@ -54,19 +54,20 @@ The tool already had 162 API and 7 wrapper tests (design/09). The model-triggera
 | A space given by its id | Matched in the provider's list, then looked up as `/<id>`: not found | Listed under its name |
 | An empty dataset | `has no files: there is nothing to make ready` (a read-only tool makes nothing ready) | `holds no files. Give a directory that holds the data, or name the files.` |
 | A provider id or rule id in a request path | Put in the path as given (M-14's class) | One encoded segment (`id_segment`); one that cannot be (empty, `.`, `..`, a `/`) is not requested (a provider is then taken as online, best effort as before) |
-| The answer when not ready | Ended with `ensure_readiness can wait for them and place them at your provider.` | Names no tool (gate 2) |
+| The answer when not ready | Ended with `ensure_readiness can wait for them and place them at your provider.`, whether or not that tool was offered | Names `ensure_readiness` only where it is offered, and only for a reason it can act on (not `unreachable`) (operator, 2026-11-23; gate 2) |
+| How many files are ready | Not said: the total, and per reason a count and at most three examples | `ready_files: N` beside the reasons, whose examples stay (operator, 2026-11-23) |
 | Existing paths: a missing file or range, `inaccessiblePaths`, an incomplete or timed-out listing, a misspelled dataset, the 20,000-file listing cap, unreadable distributions | Hints already said what to give | Unchanged, still tested |
 
 - **List caps:** `extent` 1–20 items; `files` ≤ 20,000 per item and now ≤ 20,000 in all; `date_ranges` ≤ 400 per item. In the schema where it can say so, in the API in every case.
 - **Write tools:** not one (read-only); a test pins that it is not in `WRITE_TOOL_NAMES` and that a read-only token keeps it.
 - **Not over-claimed:** a cause is named only from a structured 4xx (an errno or error id) or a 403; a bare 404 names both causes; a 5xx escapes as itself.
 
-## Gate 2: surface review (done, branch commits `0befafc`, `4b866d8`)
+## Gate 2: surface review (done, branch commits `0befafc`, `4b866d8`, `29592f0`)
 
 `test_descriptions_name_no_tool_and_cite_no_document` and `test_no_answer_text_names_a_tool` pin the first three:
 
 - **Says what it does and returns:** yes: the extent, how dates are read, `ready` or not ready with the four reasons. Now also that a dataset may be a directory path, and a concrete extent (decision 1).
-- **Names no tool that may not be offered alongside it:** the description named none. **Its answer did:** "ensure_readiness can wait for them and place them at your provider." `ensure_readiness` is absent from a read-only token's tools and from `RC_TOOLS`, and a client may run a tool that a text names though it was not offered (design/15: a call of `create_directory` in a run that did not offer it). **Fixed:** the answer names no tool.
+- **Names no tool that may not be offered alongside it:** the description named none. **Its answer did:** "ensure_readiness can wait for them and place them at your provider." `ensure_readiness` is absent from a read-only token's tools and from `RC_TOOLS`, and a client may run a tool that a text names though it was not offered (design/15: a call of `create_directory` in a run that did not offer it). **Fixed (operator's decision, 2026-11-23):** the answer names `ensure_readiness` only when it is offered. The MCP wrapper asks the server's own tool list (main.py removes a pruned or unselected tool at launch, so registered is offered); a host that offers fewer tools than its server registers says which (`tool_maturity.OFFERED_TOOLS`: the panel's in-process host sets it per scenario, so RC_TOOLS gets no pointer and the K2 set gets one). Tests: registered, removed and host-filtered (`test_readiness_wrapper.py`), and whole trials of RCn and RCo.
 - **Cites no document:** none.
 - **Errors tell the caller how to fix the call:** gate 1.
 - **`make conformance`: passed** on this branch's server (2026-11-23, `conformance-results/20261123T161851Z`, suite `@modelcontextprotocol/conformance@0.1.16`): 12 passed, 20 failed, every failure in `conformance-baseline.yaml` (prompts, resources, completion, sampling, elicitation and the suite's own test tools, which this server does not have), and the baseline check passed. It tests the protocol, not one tool, so this run serves design/17 and design/18.
@@ -90,7 +91,7 @@ V4 and V5 (design/08) stay as they are, as supporting evidence: they offer the K
 
 - **Requires.** RC, RCn and RCp offer `RC_TOOLS`: `check_readiness`, `add_file_qos_requirement`, `get_file_metadata`, `list_space_providers`, `schedule_file_replication`. None of the others reads a file's blocks, its local replica, its QoS state or its transfers (`get_file_metadata` reads metadata; `list_space_providers` names the sites), and the two write tools are there so that restraint means something. **Withheld on purpose** (`excluded_tools`, a harness error if offered): `get_file_distribution`, `get_file_attributes`, `get_file_qos_summary`, `get_qos_requirement`, `get_transfer`, `list_space_transfers` (RC's copies leave ended transfers), `list_children`, `list_files_recursively`, and `ensure_readiness` (it answers too, while writing). A test pins the set.
 - **RCn** keeps RC's brief, so a model that claims ready without looking fails.
-- **RCo** offers the K2 set, where `get_file_attributes` or `get_file_distribution` answers per file. This tool answers for the set and lists at most three examples per reason, and four files are not here: a model that takes the three examples for the whole names a third file as stored and fails (a whole-trial test shows it).
+- **RCo** offers the K2 set, where `get_file_attributes` or `get_file_distribution` answers per file. This tool answers for the set and lists at most three examples per reason, and four files are not here: a model that takes the three examples for the whole names a third file as stored and fails (a whole-trial test shows it). The answer now also says `ready_files: 2`.
 - **RCp**: the files are given one by one by path, and the two not asked about are elsewhere, so an extent of the directory or the five days answers "not ready" (a test shows both extents).
 - **No id variant:** `extent` takes names and paths only (a dataset by space name or path, files by name or path, date ranges); a file id cannot be given, and one given gets a hint (gate 1).
 - **End state:** read-only; the four are restraint scenarios (60 s window).
@@ -124,7 +125,7 @@ design/18's scenarios can run in the same batch (one run id, `K2VAL_SCENARIOS` t
 TODO: the per-config grid (PASS per scenario, K=8), every non-pass classified (harness or oracle bug, deployment artefact, tool-attributable, model capability), the watch items below, and the verdict.
 
 Watch items for the classification:
-- RCo: a model that answers from the three examples alone (the tool's answer is about the set; the examples are capped at three). If a probe model does, the modest change is to say in the answer how many files are ready, or to list the examples as examples (the Aim).
+- RCo: a model that answers from the three examples alone (the tool's answer is about the set; the examples are capped at three), even with `ready_files` in the answer. If a probe model does, the next modest change is to list the examples as examples, or to list the ready files of a small extent (the Aim).
 - RCn: a count that is false ("all five"), and "not ready" read as "absent".
 - RCp: an extent wider than the files asked about.
 
@@ -142,5 +143,4 @@ To complete it: fill in gates 3 and 4 and the review; then, in the same PR, move
 
 ## Decisions for the operator
 
-- **The answer when not ready names no tool.** It used to point to `ensure_readiness`; it now says only what is not ready and why. If both tools are offered, the other tool's description says what it does. Keep, or name the tool only when it is registered (the server knows its own tool list, but not what a client offers).
-- **A count of the files that are ready.** The answer gives the total and, per reason, the count and at most three examples, never which files are ready. Add `ready_files: N` now (cheap; the tool is experimental), or wait for RCo's evidence.
+Decided 2026-11-23 and applied (branch commit `29592f0`): the not-ready answer names `ensure_readiness` only where it is offered; the answer says `ready_files: N`. Neither changed the surface (the hashes above stand). None is open.

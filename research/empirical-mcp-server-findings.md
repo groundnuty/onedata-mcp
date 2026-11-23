@@ -1700,8 +1700,10 @@ call that listed it was (`scoring._qos_attachment`); before, it was an
 unverifiable write, a harness outcome in V6 and V7.
 
 **Decision:** Fixed (this PR, the operator's decision 3). NOT VERIFIED
-until a trial reads the ids. Open: holds placed by a server process
-that has since restarted are not listed (design/18).
+until a trial reads the ids. When more than 100 are held, the answer
+says where the others are found ("each file's QoS summary lists its
+requirement ids"), naming no tool. Holds placed by a server process
+that has since restarted are not listed: M-45, open.
 
 ---
 
@@ -1758,9 +1760,16 @@ named tool that was not offered (design/15 records one such call).
 
 **Evidence:** design/17 and design/18, gate 2.
 
-**Fix:** `ensure_readiness`'s description says what `extent` is itself;
-no answer of either tool names a tool ("Call again to keep waiting").
-Tests check every description, schema text and answer text.
+**Fix:** `ensure_readiness`'s description says what `extent` is itself.
+`check_readiness`'s not-ready answer names `ensure_readiness` only when
+it is offered (the operator's decision): the server's own tool list
+says so, since main.py removes a pruned or unselected tool at launch,
+unless a host that offers fewer tools than its server registers says
+which (`tool_maturity.OFFERED_TOOLS`, which the panel's in-process host
+sets per scenario). `ensure_readiness`'s answer names no tool ("Call
+again to keep waiting"). Tests check every description and schema
+text, and the answer with the tool registered, removed, and filtered
+by a host.
 
 **Decision:** Fixed (this PR).
 
@@ -1800,6 +1809,41 @@ given by its id is listed under its name; ids go into paths through
 `id_segment`.
 
 **Decision:** Fixed (this PR).
+
+---
+
+## M-45. Duplicate holds after a server restart
+
+**Surface:** `ensure_readiness`, how it remembers the holds it placed.
+
+**Behaviour:** the tool remembers which QoS requirement holds each file
+in the server process only. A server restarted between two calls has
+forgotten them, so the next call on the same files places a second
+requirement on each, beside the first. Its answer lists only the new
+ones.
+
+**Why this matters:** the data stay held after the agent removes every
+id it was given, and each restart adds another requirement per file.
+The data are safe; storage at the site is held longer than the agent
+knows, and an agent that tries to release what it held cannot.
+
+**How it was found:** the review of the readiness tools' promotion
+(design/18, decision 3); no trial has shown it (the panel runs one
+server per run).
+
+**Evidence:** design/18 ("Not claimed"; the operator's decisions).
+
+**Fix (proposed, not made):** before placing a hold, read the file's
+QoS requirements and reuse one whose expression is this tool's own
+(`providerId=<local id> & anyStorage`, or the plain form). Cost: at
+least two more reads per file on a call that has not remembered its
+hold (the file's QoS summary, then each requirement it lists), so a
+2,000-file extent adds 4,000 reads or more, within the 16 in flight; and a requirement someone else made with the same expression
+would be taken for this tool's own.
+
+**Decision:** Open (the operator, 2026-11-23: not fixed now). Reopen
+the fix if a deployment restarts its server while agents hold data,
+or a trial shows a released hold still keeping its file.
 
 ---
 

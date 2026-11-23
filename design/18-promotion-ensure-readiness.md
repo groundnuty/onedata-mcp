@@ -35,8 +35,8 @@ The protocol is [`10-tool-maturity.md`](10-tool-maturity.md); the spec [`07-read
 ## The operator's decisions (2026-11-23), applied
 
 1. **An extent example** in the `extent` field's description (design/17), so a model need not guess the shape: one external CLI leg of the panel's second wave guessed `{space, paths, date_from, date_to}`. The example validates against the schema (a test). Behind it, a defect: an unknown field was dropped silently, so a guessed `{dataset, paths}` meant the whole dataset, which this tool then held; such a field is now refused by name (gate 1, design/17).
-2. **A shorter wait.** One call waits at most 150 s (was 240 s) and ends within 170 s (`ENSURE_GRACE_S` 30 → 20 s; the final pass keeps its 20 s), under the ~180 s a common MCP client allows a call: in the panel's second wave, one call through a CLI client was cancelled at 180 s. The description says "about 2.5 minutes". "If the answer is not ready because data are being written or in transfer, call it again" still reads right: a longer wait is several calls, and V7's writes (6 minutes) need three. `ONEDATA_MCP_ENSURE_MAX_WAIT_S` still changes the wait, up to 240 s (README says that above 150 s the description understates it and a client may cancel).
-3. **Releasable holds.** The answer's `held` lists the ids of the QoS requirements that hold the files (`qos_requirement_ids`, in the files' path order; at most 100, the rest counted in `qos_requirement_ids_not_shown`), counting only those confirmed for this answer: remembered ones are read back, a vanished one is not listed. The description says each keeps its file at the provider until that requirement is removed by its id, and names no tool (gate 2). "Keep them there for your run" is gone: nothing ends a hold with a run. The README says so too. **Not claimed:** that removing the listed ids frees all holds; a server restarted between calls forgets its rules and places new ones, so an earlier process's rules may remain (a test of the restart is not possible without one).
+2. **A shorter wait.** One call waits at most 150 s (was 240 s) and ends within 170 s (`ENSURE_GRACE_S` 30 → 20 s; the final pass keeps its 20 s), under the ~180 s a common MCP client allows a call: in the panel's second wave, one call through a CLI client was cancelled at 180 s. The description says "about 2.5 minutes". "If the answer is not ready because data are being written or in transfer, call it again" still reads right: a longer wait is several calls, and V7's writes (6 minutes) need three. `ONEDATA_MCP_ENSURE_MAX_WAIT_S` may lower the wait, never raise it above 150 s (operator, 2026-11-23: so the description always holds; a test pins 240 → 150).
+3. **Releasable holds.** The answer's `held` lists the ids of the QoS requirements that hold the files (`qos_requirement_ids`, in the files' path order; at most 100, the rest counted in `qos_requirement_ids_not_shown`, with a `note` saying where they are found: "Not every id is listed here: each file's QoS summary lists its requirement ids.", naming no tool), counting only those confirmed for this answer: remembered ones are read back, a vanished one is not listed. The description says each keeps its file at the provider until that requirement is removed by its id, and names no tool (gate 2). "Keep them there for your run" is gone: nothing ends a hold with a run. The README says so too. **Not claimed:** that removing the listed ids frees all holds; a server restarted between calls forgets its rules and places new ones, so an earlier process's rules may remain. Left open by the operator (M-45).
 
 ## Gate 1: implementation (done, branch commits `0befafc`, `4b866d8`, `b070c8b`)
 
@@ -49,7 +49,7 @@ The extent's rows are design/17's (unknown fields refused, `.`/`..` components, 
 | A wait that ends not ready | `… Call ensure_readiness again to keep waiting.` | `… Call again to keep waiting.` (names no tool) |
 | The provider's id not read in time | `… Call ensure_readiness again.` | `… Call again.`, with an empty `qos_requirement_ids` |
 | A remembered rule id read back | Put in the path as given | One encoded segment (`id_segment`); an id that cannot be one is not confirmed, so the rule is placed again |
-| The whole call on a slow provider | within 240 + 30 s | within 150 + 20 s by default (a test on the fake clock); the env may raise the wait to 240 s |
+| The whole call on a slow provider | within 240 + 30 s | within 150 + 20 s (a test on the fake clock); the env may only lower the wait |
 | `deadline_s` outside 1–86,400, not an integer | Refused by the schema and the API | Unchanged, still tested |
 
 - **List caps:** the extent's (design/17); the answer's id list is capped at 100.
@@ -125,7 +125,7 @@ With design/17's package, jailed, before the run.
 
 ## Findings (gate 5)
 
-In the findings log: M-39 (the extent guess, and unknown fields dropped), M-40 (a call longer than a common client allows), M-41 (holds with no way to release them), M-43 (a description naming a tool that may not be offered) and M-44 (hints that claimed more than the provider said). The run's own findings are added when it has run.
+In the findings log: M-39 (the extent guess, and unknown fields dropped), M-40 (a call longer than a common client allows), M-41 (holds with no way to release them), M-43 (a description naming a tool that may not be offered), M-44 (hints that claimed more than the provider said) and M-45 (duplicate holds after a restart; open). The run's own findings are added when it has run.
 
 ## Gate 5: record
 
@@ -133,6 +133,10 @@ To complete it: fill in gates 3 and 4 and the review; then, in the same PR, move
 
 ## Decisions for the operator
 
-- **The env ceiling.** `ONEDATA_MCP_ENSURE_MAX_WAIT_S` may still raise the wait to 240 s, past the description's "about 2.5 minutes" and a common client's timeout. Keep the ceiling at 240 s (for clients that allow longer), or lower it to 150 s so the description is always true.
-- **The id list's cap.** 100 ids are listed; an extent of 2,000 files lists 100 and counts the rest, which a model cannot then release by id. Keep; or place one hold per dataset directory (one id to release, but it would also hold files written there later); or let a later call return the rest.
-- **Holds after a restart.** A restarted server forgets its rules and places new ones beside the old. Reading a file's QoS requirements for this tool's own expression before placing one would end the duplicates (two reads per file).
+Decided 2026-11-23 and applied (branch commit `29592f0`), with no surface change (the hashes above stand):
+
+- **The env ceiling:** lowered to 150 s; the env may only lower the wait.
+- **The id list's cap:** kept at 100 with the rest counted; the answer says where the others are found (each file's QoS summary), naming no tool.
+- **Holds after a restart:** not fixed now; an open finding, M-45, with the cost of the fix.
+
+None is open for the operator.
