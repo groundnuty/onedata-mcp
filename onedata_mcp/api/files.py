@@ -184,36 +184,74 @@ def _id_in_path(file_id: str, file_id_or_path: str) -> str:
 _FILE_ID_HEADER = 8  # bytes
 _FILE_ID_PART = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _UNSEEN_SPACE = " The space in the id is not one this token sees at this provider."
+# The payload of the id of an older Onedata: the Erlang term {guid, Uuid, SpaceId}, as
+# `83 h 03 d 00 04 "guid"` and two binaries (`m`, a 4-byte length, the bytes).
+_TERM_GUID = b"\x83h\x03d\x00\x04guid"
+
+
+def _term_ids(payload: bytes) -> list[str] | None:
+    """The uuid and space id of an older id's payload, `{guid, Uuid, SpaceId}` as an Erlang term;
+    None if it is not exactly that."""
+    rest, ids = payload[len(_TERM_GUID) :], []
+    for _ in range(2):
+        if len(rest) < 5 or rest[0] != 0x6D:
+            return None
+        size = int.from_bytes(rest[1:5], "big")
+        try:
+            ids.append(rest[5 : 5 + size].decode("ascii"))
+        except UnicodeDecodeError:
+            return None
+        rest = rest[5 + size :]
+    return None if rest else ids
 
 
 def _file_id_parts(value: str) -> tuple[str, str] | None:
-    """(uuid, space id) of a complete 25.0 file id; None for anything else.
+    """(uuid, space id) of a complete file id; None for anything else.
 
-    The id is hex. It decodes to an 8-byte header and the ASCII payload `guid#<uuid>#<space
-    id>`. The header's sixth byte is the payload's length (CDMI object-id layout): the
-    swagger's example id has 0x5C = 92 payload bytes, and all 383 distinct ids that a 25.0
-    Oneprovider returned in the validation runs, trash and archive roots included, have their
-    own payload length there, `guid#` at byte 8 and exactly two more `#`. The length byte is
-    what shows a byte dropped from an otherwise well-formed id. The rest of the header is not
-    checked (the 2-byte checksum is not known here), so a header spliced onto another file's
-    payload passes; a changed hex digit inside the uuid passes too, and is Onedata's to refuse.
+    The id is hex. It decodes to an 8-byte header and a payload, which is one of:
+
+    - `guid#<uuid>#<space id>` in ASCII: what a 25.0 Oneprovider returns. The header's sixth
+      byte is the payload's length (CDMI object-id layout): the swagger's example id has
+      0x5C = 92 payload bytes, and all 383 distinct ids that a 25.0 Oneprovider returned in the
+      validation runs, trash and archive roots included, have their own payload length there,
+      `guid#` at byte 8 and exactly two more `#`. The length byte is what shows a byte dropped
+      from an otherwise well-formed id.
+    - the same as an Erlang term (an older id: the swagger README's example, whose length byte
+      0x91 is its 145 payload bytes). The length byte is checked here too.
+    - `shareGuid#<uuid>#<space id>#<share id>`, the id of a file as seen through a share (the
+      swagger's examples show only its first characters). Its length byte is not checked: no
+      whole example is at hand to show it holds.
+
+    The rest of the header is not checked (the 2-byte checksum is not known here), so a header
+    spliced onto another file's payload passes; a changed hex digit inside the uuid passes too,
+    and is Onedata's to refuse.
     """
     if not value or len(value) % 2 or not re.fullmatch(r"[0-9A-Fa-f]+", value):
         return None
     raw = bytes.fromhex(value)
     payload = raw[_FILE_ID_HEADER:]
-    if not payload or (len(payload) <= 0xFF and raw[5] != len(payload)):
+    if not payload:
         return None
-    try:
-        parts = payload.decode("ascii").split("#")
-    except UnicodeDecodeError:
+    length_ok = len(payload) > 0xFF or raw[5] == len(payload)
+    ids: list[str] | None
+    if payload.startswith(_TERM_GUID):
+        ids = _term_ids(payload) if length_ok else None
+    else:
+        try:
+            parts = payload.decode("ascii").split("#")
+        except UnicodeDecodeError:
+            return None
+        if parts[0] == "guid" and len(parts) == 3 and length_ok:
+            ids = parts[1:]
+        elif parts[0] == "shareGuid" and len(parts) == 4:
+            ids = parts[1:3]
+            if not _FILE_ID_PART.fullmatch(parts[3]):
+                return None
+        else:
+            return None
+    if ids is None or not all(_FILE_ID_PART.fullmatch(part) for part in ids):
         return None
-    if len(parts) != 3 or parts[0] != "guid":
-        return None
-    uuid, space_id = parts[1], parts[2]
-    if not (_FILE_ID_PART.fullmatch(uuid) and _FILE_ID_PART.fullmatch(space_id)):
-        return None
-    return uuid, space_id
+    return ids[0], ids[1]
 
 
 def _incomplete_file_id_message(value: str) -> str:

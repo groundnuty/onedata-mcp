@@ -29,6 +29,33 @@ def whole_id(uuid: str = UUID, space_id: str = SPACE_ID, *, lower: bool = False)
     return text if lower else text.upper()
 
 
+# the older id of the swagger README (an Erlang term {guid, Uuid, SpaceId}): its sixth header byte
+# is its 145 payload bytes
+README_TERM_ID = (
+    "0000000000917733836803640004677569646D0000005254576F796132686E575530775331424F516B5534"
+    "646B5A4963565678644545795746684F616E646B5157466A615531484D565A33516E42785A794D6A6E7A69"
+    "434565634B2D494A4679387770456E6E3850776D0000002B6136552D334675766A6A6C465A7251576D7639"
+    "584256304E454448594A615A4C4D6132725A566F704F746B"
+)
+
+
+def term_id(uuid: str = UUID, space_id: str = SPACE_ID) -> str:
+    """The older id of the same file: the payload is the Erlang term {guid, Uuid, SpaceId}."""
+
+    def binary(text: str) -> bytes:
+        return b"m" + len(text).to_bytes(4, "big") + text.encode()
+
+    payload = b"\x83h\x03d\x00\x04guid" + binary(uuid) + binary(space_id)
+    return (bytes([0, 0, 0, 0, 0, len(payload), 0x91, 0x77]) + payload).hex().upper()
+
+
+def share_id(uuid: str = UUID, space_id: str = SPACE_ID, share_id: str = "shareid0123") -> str:
+    """The id of the same file as seen through a share (the layout is the swagger's prefix,
+    `shareGuid#`, and the parts the share's file id has: unverified beyond that)."""
+    payload = f"shareGuid#{uuid}#{space_id}#{share_id}".encode()
+    return (bytes([0, 0, 0, 0, 0, len(payload), 0x6C, 0xB6]) + payload).hex().upper()
+
+
 WHOLE = whole_id()
 
 
@@ -42,6 +69,8 @@ WHOLE = whole_id()
         (whole_id(f"trash_{SPACE_ID}"), f"trash_{SPACE_ID}", SPACE_ID),
         (whole_id(f"archives_root_{SPACE_ID}"), f"archives_root_{SPACE_ID}", SPACE_ID),
         (whole_id("a", "b"), "a", "b"),
+        (term_id(), UUID, SPACE_ID),  # an older id, as an Erlang term
+        (share_id(), UUID, SPACE_ID),  # an id through a share
     ],
 )
 def test_a_whole_id_is_read_as_its_uuid_and_space(value: str, uuid: str, space_id: str) -> None:
@@ -75,6 +104,16 @@ ALMOST = {
     "a changed digit in the marker": _flip(WHOLE, MARKER, "7"),  # `wuid#` for `guid#`
     "a changed digit in a separator": _flip(WHOLE, MARKER + 10 + 2 * len(UUID), "4"),  # no `#`
     "a header that says another length": _flip(WHOLE, 10, "F"),
+    "the older id with a byte dropped from its end": term_id()[:-2],
+    "the older id with a byte dropped from its first binary": term_id()[:40] + term_id()[42:],
+    "the older id doubled": term_id() + term_id(),
+    "the share id with a fourth part missing": share_id()[
+        : 16 + 2 * len(f"shareGuid#{UUID}#{SPACE_ID}")
+    ],
+    "a share id with a changed marker": _flip(share_id(), 16, "5"),
+    "a snippet of the swagger, cut short": (
+        "000000000052326167756964233037613463613661663861343136633438633834336635633864356232"
+    ),
     "empty": "",
     "a path": "/space/dir/file.dat",
     "a file name": "log_20200101.dat",
@@ -96,6 +135,21 @@ def test_what_the_check_cannot_see_passes_and_is_onedatas_to_refuse() -> None:
     other = whole_id("f" * len(UUID))  # same length, so the same header length byte
     spliced = WHOLE[:16] + other[16:]
     assert _file_id_parts(spliced) is not None
+    # and a share id cut inside its last part, since its length byte is not compared
+    assert _file_id_parts(share_id()[:-12]) is not None
+
+
+def test_the_swagger_readme_id_is_whole() -> None:
+    assert _file_id_parts(README_TERM_ID) is not None
+    assert _file_id_parts(README_TERM_ID[:-2]) is None  # and a byte short is not
+
+
+def test_a_share_id_is_not_refused_for_its_length_byte() -> None:
+    """No whole share id is at hand to show that its header counts the payload, so the byte is
+    not compared: a share id whose header says another length is still read."""
+    other = share_id()[:10] + "F" + share_id()[11:]  # the header's length byte changed
+    assert _file_id_parts(share_id()) is not None
+    assert _file_id_parts(other) is not None
 
 
 def test_a_payload_too_long_for_the_length_byte_is_not_refused_for_its_length() -> None:
