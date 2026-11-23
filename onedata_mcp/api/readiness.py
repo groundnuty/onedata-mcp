@@ -30,6 +30,8 @@ helpers in `api/files.py`, `api/qos.py`, `api/spaces.py` and `api/transfers.py`.
 from __future__ import annotations
 
 import asyncio
+import bisect
+import functools
 import logging
 import os
 import re
@@ -82,6 +84,8 @@ MAX_EXTENT_ITEMS = 20
 MAX_FILES = 20_000  # files an extent may resolve to, and a dataset listing may hold
 MAX_FILES_PER_ITEM = 20_000  # names in one item's `files`
 MAX_DATE_RANGES_PER_ITEM = 400
+MAX_DATE_RANGES = 400  # date ranges in the whole extent (all items together)
+SELECT_CHECK_EVERY = 1024  # files or names looked at between two checks of the deadline
 LIST_PAGE_LIMIT = 1000
 CHECK_CONCURRENCY = 16
 PLACE_CONCURRENCY = 8
@@ -210,6 +214,7 @@ def max_wait_s() -> float:
 _DATE_RE = re.compile(r"(?<!\d)\d{8}(?!\d)")
 
 
+@functools.lru_cache(maxsize=65_536)
 def name_date(name: str) -> date | None:
     """The date a file name carries: its first run of exactly 8 digits that is a real YYYYMMDD."""
     for match in _DATE_RE.finditer(name):
@@ -571,6 +576,7 @@ def _normalise_extent(extent: Sequence[Mapping[str, Any]]) -> list[_Item]:
         raise ValueError(f"extent must be a list of 1 to {MAX_EXTENT_ITEMS} items")
     items: list[_Item] = []
     named = 0
+    ranged = 0
     for index, raw in enumerate(extent):
         where = f"extent[{index}]"
         if not isinstance(raw, Mapping):
@@ -591,6 +597,12 @@ def _normalise_extent(extent: Sequence[Mapping[str, Any]]) -> list[_Item]:
         if len(raw_ranges) > MAX_DATE_RANGES_PER_ITEM:
             raise ValueError(
                 f"{where}.date_ranges may hold at most {MAX_DATE_RANGES_PER_ITEM} ranges"
+            )
+        ranged += len(raw_ranges)
+        if ranged > MAX_DATE_RANGES:
+            raise ValueError(
+                f"The extent gives more than {MAX_DATE_RANGES} date ranges in all. Merge them "
+                "into fewer, wider ranges (a range may span years), or name the files."
             )
         ranges: list[tuple[date, date]] = []
         for r_index, rng in enumerate(raw_ranges):
@@ -1203,8 +1215,51 @@ def _same_name(item: _Item, name: str, matches: list[str]) -> str:
     )
 
 
+def _ticker(out_of_time: Callable[[], bool] | None) -> Callable[[int], None]:
+    def tick(i: int) -> None:
+        # every SELECT_CHECK_EVERY files, not before the first batch: a small selection is
+        # done (it costs nothing), a large one stops within one batch of the deadline
+        if out_of_time is not None and i and i % SELECT_CHECK_EVERY == 0 and out_of_time():
+            raise TimeoutError("selection did not finish within the time budget")
+
+    return tick
+
+
+@dataclass
+class ListingIndex:
+    """One listing's files, indexed once for every item that selects from it: by path, by
+    name, and (the files whose name carries a date) sorted by that date."""
+
+    paths: list[str]
+    known: set[str]
+    by_name: dict[str, list[str]]
+    days: list[date]  # sorted, one per dated file
+    dated: list[str]  # the dated files, in the order of `days`
+
+    @classmethod
+    def of(
+        cls, paths: Sequence[str], out_of_time: Callable[[], bool] | None = None
+    ) -> ListingIndex:
+        tick = _ticker(out_of_time)
+        by_name: dict[str, list[str]] = {}
+        pairs: list[tuple[date, str]] = []
+        for i, path in enumerate(paths):
+            tick(i)
+            name = path.rsplit("/", 1)[-1]
+            by_name.setdefault(name, []).append(path)
+            if (day := name_date(name)) is not None:
+                pairs.append((day, path))
+        pairs.sort()
+        return cls(list(paths), set(paths), by_name, [d for d, _ in pairs], [p for _, p in pairs])
+
+
 def select_paths(
-    item: _Item, paths: Sequence[str], *, complete: bool = True
+    item: _Item,
+    paths: Sequence[str],
+    *,
+    complete: bool = True,
+    out_of_time: Callable[[], bool] | None = None,
+    index: ListingIndex | None = None,
 ) -> tuple[list[str], list[str]]:
     """The paths of `paths` (every file listed under the item's dataset, absolute, named by the
     space's name) that an item selects, and a text for each thing it declares that selects no
@@ -1221,7 +1276,13 @@ def select_paths(
     `complete` False: `paths` is a listing that stopped early. A file or range not seen in it is
     unknown, never "not found"; a name seen once is not taken (another file of that name may be
     in the rest of the listing); a path seen is taken.
+
+    `out_of_time` (the tool's deadline): checked every SELECT_CHECK_EVERY files or names; once
+    true, TimeoutError (the caller reports the item as not selected in time). `index`: `paths`
+    indexed once (`ListingIndex`) for all the items of one listing; built here if not given.
+    Each date range is then a search of the sorted dates, not a scan of the files.
     """
+    tick = _ticker(out_of_time)
     unresolved: list[str] = []
     if not item.files and not item.ranges:
         if not paths:
@@ -1231,13 +1292,13 @@ def select_paths(
             )
         return list(paths), unresolved
 
-    known = set(paths)
-    by_name: dict[str, list[str]] = {}
-    for path in paths:
-        by_name.setdefault(path.rsplit("/", 1)[-1], []).append(path)
+    if index is None:
+        index = ListingIndex.of(paths, out_of_time)
+    known, by_name = index.known, index.by_name
 
     chosen: dict[str, None] = {}
-    for name in item.files:
+    for i, name in enumerate(item.files):
+        tick(i)
         # Names are matched exactly as declared: no trimming, no normalising.
         if name.startswith("/"):
             matches = [name] if name in known else []
@@ -1273,30 +1334,56 @@ def select_paths(
             )
         chosen.update(dict.fromkeys(matches))
 
-    dated = [(p, name_date(p.rsplit("/", 1)[-1])) for p in paths] if item.ranges else []
+    for i, (start, end) in enumerate(_merged_ranges(item.ranges)):
+        tick(i)
+        lo = bisect.bisect_left(index.days, start)
+        hi = bisect.bisect_right(index.days, end)
+        chosen.update(dict.fromkeys(index.dated[lo:hi]))
     for start, end in item.ranges:
-        matches = [p for p, day in dated if day is not None and start <= day <= end]
-        if not matches and not complete:
+        k = bisect.bisect_left(index.days, start)
+        if k < len(index.days) and index.days[k] <= end:
+            continue
+        if not complete:
             unresolved.append(
                 f"date range {start.isoformat()}..{end.isoformat()} in '{item.dataset}' is "
                 "unknown: it matched no file among those listed before the listing stopped."
             )
-        elif not matches:
+        else:
             unresolved.append(
                 f"date range {start.isoformat()}..{end.isoformat()} in '{item.dataset}' "
                 "matched no file: dates are read from the YYYYMMDD in file names. "
                 "Widen the range or name the files."
             )
-        chosen.update(dict.fromkeys(matches))
     return list(chosen), unresolved
 
 
+def _merged_ranges(ranges: Sequence[tuple[date, date]]) -> list[tuple[date, date]]:
+    """The union of inclusive day ranges, as sorted, disjoint ranges."""
+    merged: list[tuple[date, date]] = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
 def _select(
-    item: _Item, files: list[FileInfo], unresolved: list[str], *, complete: bool = True
+    item: _Item,
+    files: list[FileInfo],
+    unresolved: list[str],
+    *,
+    complete: bool = True,
+    out_of_time: Callable[[], bool] | None = None,
+    index: ListingIndex | None = None,
+    by_path: Mapping[str, FileInfo] | None = None,
 ) -> list[FileInfo]:
-    """The files an item declares (`select_paths`); what selects nothing goes to `unresolved`."""
-    by_path = {f.path: f for f in files}
-    selected, problems = select_paths(item, list(by_path), complete=complete)
+    """The files an item declares (`select_paths`); what selects nothing goes to `unresolved`.
+    `index` and `by_path`: the listing's, made once for all its items."""
+    by_path = by_path if by_path is not None else {f.path: f for f in files}
+    selected, problems = select_paths(
+        item, list(by_path), complete=complete, out_of_time=out_of_time, index=index
+    )
     unresolved.extend(problems)
     return [by_path[path] for path in selected]
 
@@ -1319,6 +1406,7 @@ async def _resolve(run: _Run, items: list[_Item]) -> tuple[list[FileInfo], list[
     unresolved: list[str] = []
     resolved: dict[str, FileInfo] = {}
     listings: dict[str, _Listing] = {}
+    indexed: dict[str, tuple[ListingIndex, dict[str, FileInfo]]] = {}
     for index, item in enumerate(items):
         if item.root not in listings:
             listings[item.root] = await _list_dataset(run, item)
@@ -1327,7 +1415,27 @@ async def _resolve(run: _Run, items: list[_Item]) -> tuple[list[FileInfo], list[
         if not listing.files and listing.problems:
             continue  # nothing to pick from; the problems are reported above
         named = replace(item, root=listing.root) if listing.root else item
-        for f in _select(named, listing.files, unresolved, complete=listing.complete):
+        try:
+            if item.root not in indexed:
+                by_path = {f.path: f for f in listing.files}
+                indexed[item.root] = (ListingIndex.of(list(by_path), run.out_of_time), by_path)
+            listing_index, by_path = indexed[item.root]
+            selected = _select(
+                named,
+                listing.files,
+                unresolved,
+                complete=listing.complete,
+                out_of_time=run.out_of_time,
+                index=listing_index,
+                by_path=by_path,
+            )
+        except TimeoutError:
+            unresolved.append(
+                f"dataset '{item.dataset}': its files were not selected within the time budget. "
+                "Call again, or declare fewer files or date ranges."
+            )
+            continue
+        for f in selected:
             f.items.add(index)
             if f.file_id in resolved:
                 _merge_file(resolved[f.file_id], f)
@@ -1503,6 +1611,8 @@ def _hold_sentence(cause: str, n: int) -> str:
 
 
 _CAN_WAIT_FOR = ("being_written", "in_transfer", "at_other_site")
+# Causes after which a hold may well be there: never said to be "not held" (only not confirmed).
+_UNKNOWN_HOLD = ("no_answer", "not_confirmed")
 
 
 def _advice(
@@ -1531,12 +1641,17 @@ def _advice(
 
     hold_causes = hold_causes or {}
     sentences: list[str] = []
-    if data_ready:  # ensure only: the data are, the holds are not
-        missing = sum(hold_causes.values())
-        be = "is" if missing == 1 else "are"
+    if data_ready:  # ensure only: the data are, the holds are not (or are not confirmed)
+        missing = sum(hold_causes.get(c, 0) for c in HOLD_CAUSES if c not in _UNKNOWN_HOLD)
+        unknown = sum(hold_causes.get(c, 0) for c in _UNKNOWN_HOLD)
+        halves = []
+        if missing:
+            halves.append(f"{_noun(missing)} {'is' if missing == 1 else 'are'} not held there")
+        if unknown:
+            halves.append(f"the hold of {_noun(unknown)} could not be confirmed")
         sentences.append(
             "the data are complete and readable at your provider now (data_ready), but "
-            f"{_noun(missing)} {be} not held there."
+            f"{' and '.join(halves)}."
         )
     for reason in REASONS:
         if counts.get(reason):

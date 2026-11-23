@@ -3997,7 +3997,6 @@ def _ranged(items: int, ranges: int) -> list[dict]:
     return [{"dataset": f"/{SPACE}/d", "date_ranges": rs} for _ in range(items)]
 
 
-@pytest.mark.xfail(strict=True, reason="verification round: reproduced here, fixed later")
 @pytest.mark.asyncio
 async def test_verify_the_ranges_of_a_whole_extent_are_capped_before_any_request(fed: Fed) -> None:
     """Codex 8, Gemini 8: 20 items x 400 ranges was a valid extent; its selection over a
@@ -4007,7 +4006,6 @@ async def test_verify_the_ranges_of_a_whole_extent_are_capped_before_any_request
     assert fed.requests == []
 
 
-@pytest.mark.xfail(strict=True, reason="verification round: reproduced here, fixed later")
 @pytest.mark.asyncio
 async def test_verify_selection_stays_within_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     """Codex 8: the selection itself (no request) was not bounded by the deadline: 20 items x
@@ -4029,7 +4027,6 @@ async def test_verify_selection_stays_within_the_budget(monkeypatch: pytest.Monk
     assert time.monotonic() - started < 1.5
 
 
-@pytest.mark.xfail(strict=True, reason="verification round: reproduced here, fixed later")
 @pytest.mark.asyncio
 async def test_verify_a_hold_that_could_not_be_read_back_is_not_called_not_held(fed: Fed) -> None:
     """Codex 13: a read-back that timed out was reported as "1 file is not held there"; the
@@ -4043,3 +4040,29 @@ async def test_verify_a_hold_that_could_not_be_read_back_is_not_called_not_held(
     assert result["hold_failed"]["causes"] == {"not_confirmed": 1}
     assert "not held" not in result["advice"]
     assert "could not be confirmed" in result["advice"]
+
+
+@pytest.mark.asyncio
+async def test_a_selection_stopped_by_the_deadline_is_reported_and_holds_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past the deadline a large selection stops within one batch of files, and the item says
+    why; a heavy extent within the caps ends within its budget."""
+    import time
+
+    listing = _listing_of(20_000)
+
+    async def listed(run, item):
+        return listing
+
+    monkeypatch.setattr(readiness, "_list_dataset", listed)
+    items = readiness._normalise_extent(_ranged(1, 400))
+    run = readiness._Run(LOCAL, time.monotonic() - 1)  # the budget is gone already
+
+    files, unresolved = await readiness._resolve(run, items)
+
+    assert files == []
+    assert unresolved == [
+        f"dataset '/{SPACE}/d': its files were not selected within the time budget. Call "
+        "again, or declare fewer files or date ranges."
+    ]
