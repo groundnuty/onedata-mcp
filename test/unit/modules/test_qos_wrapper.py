@@ -270,3 +270,115 @@ async def test_the_summary_carries_replicas_num_from_25_0s_replicas_num(
         result = await client.call_tool("get_file_qos_summary", {"file_id_or_path": "/space/f"})
     rule = result.structured_content["requirements"][QID]
     assert rule["replicas_num"] == 2 and rule["expression"] == "anyStorage"
+    assert "meaning" not in result.structured_content  # a requirement is behind the status
+
+
+NO_REQUIREMENT = (
+    "No QoS requirement applies to this file (inherited ones included); "
+    "'fulfilled' here says nothing about where its data are."
+)
+
+
+@pytest.mark.asyncio
+async def test_a_summary_with_no_requirement_says_what_its_status_means(
+    qos_mcp: FastMCP, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SF2 (design/16): `"status": "fulfilled"` with nothing behind it was read as "the file is
+    stored here"."""
+
+    async def summary(_: str) -> dict:
+        return {"status": "fulfilled", "requirements": {}}
+
+    monkeypatch.setattr(qos_module, "get_file_qos_summary", summary)
+    async with Client(qos_mcp) as client:
+        result = await client.call_tool("get_file_qos_summary", {"file_id_or_path": "/space/f"})
+    assert result.structured_content == {
+        "status": "fulfilled",
+        "requirements": {},
+        "meaning": NO_REQUIREMENT,
+    }
+
+
+@pytest.mark.asyncio
+async def test_the_meaning_quotes_the_status_the_summary_gave(
+    qos_mcp: FastMCP, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def summary(_: str) -> dict:
+        return {"status": "impossible", "requirements": {}}
+
+    monkeypatch.setattr(qos_module, "get_file_qos_summary", summary)
+    async with Client(qos_mcp) as client:
+        result = await client.call_tool("get_file_qos_summary", {"file_id_or_path": "/space/f"})
+    assert result.structured_content["meaning"].endswith(
+        "'impossible' here says nothing about where its data are."
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body", [{"status": "fulfilled"}, {"requirements": None}, {"requirements": []}]
+)
+async def test_a_summary_without_a_requirements_mapping_is_passed_on_unchanged(
+    qos_mcp: FastMCP, monkeypatch: pytest.MonkeyPatch, body: dict
+) -> None:
+    """Only an empty mapping is "no requirement": a missing or malformed one is not claimed to
+    be one."""
+
+    async def summary(_: str) -> dict:
+        return body
+
+    monkeypatch.setattr(qos_module, "get_file_qos_summary", summary)
+    async with Client(qos_mcp) as client:
+        result = await client.call_tool("get_file_qos_summary", {"file_id_or_path": "/space/f"})
+    assert "meaning" not in (result.structured_content or {})
+
+
+SPACE_ID = "9JO5__9nL1b01YEvwnft1r20gwgwlkIp19ND_n8hgxs"
+_PAYLOAD = f"guid#t_w-ghd1c7eDoMvTmo-gW_3aszvpHkGzy6Xw4#{SPACE_ID}".encode()
+FILE_ID = (bytes([0, 0, 0, 0, 0, len(_PAYLOAD), 0x5C, 0xF4]) + _PAYLOAD).hex().upper()
+SPACE_URL = f"https://{HOST}/api/v3/oneprovider/spaces/{SPACE_ID}"
+PROVIDERS = [
+    {"providerId": "pLocal0123456789abcdef", "providerName": "provider-a"},
+    {"providerId": "pOwner0123456789abcdef", "providerName": "provider-b"},
+]
+
+
+@pytest.mark.asyncio
+async def test_adding_a_rule_by_a_providers_name_is_refused_with_the_id_to_use(
+    qos_mcp: FastMCP, httpx_mock: HTTPXMock
+) -> None:
+    """SF1 (design/16), as the model gets it through the tool: the refusal says what to use, and
+    no rule is created."""
+    httpx_mock.add_response(method="GET", url=SPACE_URL, json={"providers": PROVIDERS})
+
+    async with Client(qos_mcp) as client:
+        result = await client.call_tool(
+            "add_file_qos_requirement",
+            {"file_id_or_path": FILE_ID, "expression": "providerId=provider-a"},
+            raise_on_error=False,
+        )
+
+    text = "\n".join(c.text for c in result.content if hasattr(c, "text"))
+    assert result.is_error is True
+    assert "'provider-a' is a provider's name; providerId= takes its id: providerId=<id>" in text
+    assert "providerId=pLocal0123456789abcdef" in text
+    assert HOST not in text
+    assert [r.method for r in httpx_mock.get_requests()] == ["GET"]  # no POST
+
+
+@pytest.mark.asyncio
+async def test_adding_a_rule_by_a_providers_id_goes_through(
+    qos_mcp: FastMCP, httpx_mock: HTTPXMock
+) -> None:
+    httpx_mock.add_response(method="GET", url=SPACE_URL, json={"providers": PROVIDERS})
+    httpx_mock.add_response(
+        method="POST", url=QOS_URL, json={"qosRequirementId": QID}, status_code=201
+    )
+
+    async with Client(qos_mcp) as client:
+        result = await client.call_tool(
+            "add_file_qos_requirement",
+            {"file_id_or_path": FILE_ID, "expression": "providerId=pLocal0123456789abcdef"},
+        )
+
+    assert result.structured_content == {"qosRequirementId": QID}

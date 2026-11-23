@@ -27,8 +27,58 @@ from onedata_mcp.api.files import (
 from onedata_mcp.api.files import (
     create_directory as api_create_directory,
 )
+from onedata_mcp.api.readiness import parse_distribution
 
 ONEDATA_FILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{20,}$")
+
+# --- `holds_whole_file` in get_file_distribution's provider entries (SF3, design/16) ----------
+
+WHOLE_FILE_SIZE_NOTE = (
+    "The file's size is 0 or not reported, so whether this provider holds the whole file "
+    "cannot be told from its blocks."
+)
+WHOLE_FILE_BLOCKS_NOTE = (
+    "This provider's blocks could not be read in full, so whether it holds the whole file "
+    "is not known."
+)
+
+
+def _add_holds_whole_file(result: dict[str, Any]) -> None:
+    """Say, on each readable provider entry of a regular file's distribution, whether that
+    provider's blocks cover the whole file: `holds_whole_file` true or false, so that an entry
+    with a size and no blocks cannot be read as a copy.
+
+    The file's size is the largest `virtualSize` or `logicalSize` any provider reports, or a
+    block's end if that is larger: a smaller, stale size must not make a partial replica look
+    whole. When no provider reports a size above 0, or a provider's blocks could not be read in
+    full (and what was read does not cover the file), the field is null with a note: no guess.
+    A directory has no blocks, so its entries are left as they are, as are the failed entries
+    (they hold only an error).
+    """
+    per_provider = result.get("distributionPerProvider")
+    if result.get("type") == "DIR" or not isinstance(per_provider, dict):
+        return
+    reported = [
+        value
+        for info in per_provider.values()
+        if isinstance(info, dict) and info.get("success") is not False
+        for value in (info.get("virtualSize"), info.get("logicalSize"))
+        if isinstance(value, int) and not isinstance(value, bool)
+    ]
+    size_known = bool(reported) and max(reported) > 0
+    dist = parse_distribution(result)
+    for provider_id, info in per_provider.items():
+        if not isinstance(info, dict) or info.get("success") is False:
+            continue
+        if not size_known:
+            info["holds_whole_file"], info["holds_whole_file_note"] = None, WHOLE_FILE_SIZE_NOTE
+        elif provider_id in dist.covering:
+            info["holds_whole_file"] = True
+        elif provider_id in dist.failed:
+            info["holds_whole_file"], info["holds_whole_file_note"] = None, WHOLE_FILE_BLOCKS_NOTE
+        else:
+            info["holds_whole_file"] = False
+
 
 # --- the `attributes` input of get_file_attributes and list_children ---------------------------
 
@@ -590,6 +640,7 @@ def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
             for pid, info in per_provider.items():
                 if isinstance(info, dict) and pid in pid_to_name:
                     info["providerName"] = pid_to_name[pid]
+        _add_holds_whole_file(result)
         return result
 
     @mcp.tool(name="move_file", annotations=ToolAnnotations(destructiveHint=True))

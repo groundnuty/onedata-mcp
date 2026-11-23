@@ -13,11 +13,13 @@ The fileId is in the body, not the URL (per swagger paths/qos_requirements.yaml)
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from urllib.parse import quote
 
-from onedata_mcp.api.files import _normalize_path_to_file_id
-from onedata_mcp.config import get_oneprovider_config
+from onedata_mcp.api.files import _file_id_parts, _normalize_path_to_file_id
+from onedata_mcp.api.transfers import _providers_of_space, _providers_sentence
+from onedata_mcp.config import OnedataConfig, get_oneprovider_config
 from onedata_mcp.utils import (
     OnedataApiError,
     bound_message,
@@ -45,10 +47,69 @@ async def get_file_qos_summary(file_id_or_path: str) -> dict[str, Any]:
     return response["body"]
 
 
+# A `providerId=<value>` operand of a QoS expression: the key as a whole word (not the tail of
+# another attribute's name), a single `=` (`==` is Onedata's to refuse), and a value that runs to
+# the next operator, bracket, `=` or space.
+_PROVIDER_OPERAND = re.compile(r"(?<![A-Za-z0-9_.-])providerId\s*=(?!=)\s*([^\s&|\\()=]+)")
+
+
+async def _refuse_unusable_provider_operands(
+    file_id: str, expression: str, config: OnedataConfig
+) -> None:
+    """Refuse, before any rule is created, a `providerId=<value>` operand whose value is not the
+    id of a provider supporting the file's space (SF1, design/16).
+
+    Onedata accepts `providerId=local`, a provider's NAME, and creates a rule that no storage
+    matches: it stays "impossible" for good, and the model blames the site. A value that is the
+    NAME of a provider of the space is answered with that provider's id; one that is neither a
+    name nor an id of such a provider, with the providers listed. Ids pass unchanged, and no
+    other operand is looked at.
+
+    Best-effort: with no `providerId=` operand there is no request at all, and when the space
+    cannot be told from the file id (the id does not decode) or its providers cannot be listed,
+    nothing is refused and the rule is created as before.
+    """
+    operands = list(dict.fromkeys(_PROVIDER_OPERAND.findall(expression)))
+    if not operands:
+        return
+    parts = _file_id_parts(file_id)
+    if parts is None:
+        return
+    providers = await _providers_of_space(parts[1])
+    if not providers:
+        return
+    ids = {pid for _, pid in providers}
+    problems: list[str] = []
+    for value in operands:
+        if value in ids:
+            continue
+        named = next((pid for name, pid in providers if name is not None and name == value), None)
+        if named is not None:
+            problems.append(
+                f"{_shown(value)} is a provider's name; providerId= takes its id: "
+                f"providerId=<id>, here providerId={named}."
+            )
+        else:
+            problems.append(
+                f"{_shown(value)} is neither the id nor the name of a provider that supports "
+                "the file's space."
+            )
+    if problems:
+        message = (
+            "No QoS requirement was added. "
+            + " ".join(problems)
+            + " "
+            + _providers_sentence(providers)
+        )
+        raise ValueError(bound_message(redact_endpoints(message, config)))
+
+
 async def add_qos_requirement(
     file_id_or_path: str,
     expression: str,
     replicas_num: int = 1,
+    *,
+    check_providers: bool = False,
 ) -> dict[str, Any]:
     """Add a new QoS requirement on a file or directory.
 
@@ -65,6 +126,10 @@ async def add_qos_requirement(
             Operators: '&' (AND), '|' (OR), '\\' (exclusion).
             Reference: https://onedata.org/#/home/documentation/doc/using_onedata/qos.html
         replicas_num: target replica count. Must be >= 1.
+        check_providers: refuse a `providerId=<value>` operand whose value is not the id of a
+            provider supporting the file's space (`_refuse_unusable_provider_operands`). Off by
+            default: the MCP tool turns it on, the readiness tools and the fixtures pass ids
+            they got from Onedata and need no extra request.
 
     Response: {"qosRequirementId": "<id>"} + Location header.
 
@@ -77,6 +142,8 @@ async def add_qos_requirement(
 
     config = get_oneprovider_config()
     file_id = await _normalize_path_to_file_id(file_id_or_path)
+    if check_providers:
+        await _refuse_unusable_provider_operands(file_id, expression, config)
     response = await request(
         config,
         "POST",
