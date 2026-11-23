@@ -139,19 +139,35 @@ _FA_NONE = re.compile(
 # An explicit conclusion naming the odd file: "log_20200103.dat is the one that differs".
 _FA_ODD = re.compile(
     r"\b(?:is|was) the (?:only |odd )?(?:one|file)\b|\bdiffers?\b|\bis different\b|\bstands out\b"
-    r"|\bhas (?:different|other|distinct|unique|more restrictive|stricter) (?:permissions|mode)\b"
+    r"|\b(?:has|with) (?:different|other|distinct|unique|more restrictive|stricter) "
+    r"(?:permissions|mode)\b"
     r"|\bthe odd one\b",
+    re.I,
+)
+# "None of them differ", "no file differs": the "differ" of `_FA_ODD`, negated.
+_NONE_DIFFER = re.compile(
+    r"\b(?:none of (?:them|these|those|the (?:four )?files)|no (?:file|one))\b[^.\n]{0,20}?"
+    r"\b(?:differs?|is different|stands? out)\b",
     re.I,
 )
 _MODE = re.compile(r"\b0?([0-7]{3})\b|\b([r-][w-][x-]){3}\b")
 # A contrast: one clause about one file, another about the others ("..., whereas a, b and c all
-# have the same permissions").
+# have the same permissions"; "X has 600, while the other three files (a, b, c) all have 644").
 _CONTRAST = re.compile(r"\s(?:whereas|while|but|and)\s|;", re.I)
 _OTHERS_SAME = re.compile(
     r"\b(?:all|the (?:other|remaining) (?:three|ones|files)|the others|others)\b[^.\n]{0,60}"
-    r"\b(?:same|identical|share)",
+    r"\b(?:same|identical|share)"
+    # (the span may cross the others' names: "the other three files (a.dat, b.dat) all have")
+    r"|\b(?:the (?:other|remaining)|others)\b(?:[^.\n]|\.dat\b){0,120}?\ball\s+(?:have|are|show"
+    r"|use)\b",
     re.I,
 )
+
+
+def _one_mode(text: str) -> str | None:
+    """The one mode `text` states, else None (none, or several)."""
+    modes = {m.group(0).lstrip("0") or "0" for m in _MODE.finditer(text.replace(".dat", ""))}
+    return modes.pop() if len(modes) == 1 else None
 
 
 def _modes_listed(answer: str, names: tuple[str, ...]) -> dict[str, str]:
@@ -187,11 +203,15 @@ def fa_label(answer: str, names: tuple[str, ...]) -> str:
             rest = " ".join(clauses[k + 1 :] + clauses[:k])
             if _FA_ODD.search(clause) and not _FA_NONE.search(clause):
                 return here[0]
-            if _OTHERS_SAME.search(rest) and here[0] not in rest:
+            # when both sides state a mode, the others' must differ from this file's
+            same_mode = _one_mode(clause) is not None and _one_mode(clause) == _one_mode(rest)
+            if _OTHERS_SAME.search(rest) and here[0] not in rest and not same_mode:
                 return here[0]
     for sentence in sentences:
         in_sentence = [n for n in names if n in sentence]
-        says_none = _FA_NONE.search(sentence) and not _FA_ODD.search(sentence)
+        says_none = _FA_NONE.search(sentence) and (
+            not _FA_ODD.search(sentence) or _NONE_DIFFER.search(sentence)
+        )
         if says_none and (not in_sentence or len(in_sentence) == len(names)):
             return "none"
     modes = _modes_listed(answer, names)
@@ -272,7 +292,16 @@ _NOT_A_NAME = {
     # type words and number words: "Subdirectories: 0", "type: DIR"
     *("dir", "reg", "type", "symlnk", "symlink", "regular"),
     *("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"),
+    # a sentence's connective before a comma ("Therefore, there are no subdirectories"), an
+    # abbreviation ("e.g. log_20200101.dat"), a JSON value quoted ("`isLast` was `true`")
+    *("therefore", "thus", "hence", "so", "additionally", "also", "however", "note", "finally"),
+    *("e.g", "eg", "i.e", "ie", "etc", "true", "false", "null"),
 }
+# What names files, not an entry: an extension alone ("`.dat` files") and a pattern
+# ("`acq_*.dat`", "log_YYYYMMDD.dat").
+_EXTENSION_ONLY = re.compile(r"^\.(?:dat|txt|log|csv|json|bin)$", re.I)
+# (`_\.` is what a glob leaves once its `*` is read as emphasis: `acq_*.dat` -> `acq_.dat`)
+_PATTERN = re.compile(r"\*|_\.|Y{4}|M{2}D{2}|X{3,}|N{3,}")
 _FIXTURE_FILE = re.compile(r"^(?:log_\d{8}|acq_\d{4})\.dat$")
 _FILE_EXT = re.compile(r"\.[A-Za-z0-9]{1,5}$")
 _DIR_WORDS = re.compile(r"\b(?:sub-?)?(?:director(?:y|ies)|folders?)\b", re.I)
@@ -290,8 +319,12 @@ def _system_names() -> set[str]:
 
 
 def _dir_like(token: str, exclude: set[str]) -> str | None:
-    """`token` as a directory name the answer gives, or None (a file, a word, a system name)."""
-    name = normalise_name(token).strip(".,;:!?()")
+    """`token` as a directory name the answer gives, or None (a file, a word, a system name, an
+    extension or a pattern)."""
+    raw = normalise_name(token)
+    if _EXTENSION_ONLY.match(raw.strip(",;:!?()")) or _PATTERN.search(raw):
+        return None
+    name = raw.strip(".,;:!?()")
     if not re.fullmatch(r"[A-Za-z0-9][\w.-]*", name or "-") or name.isdigit():
         return None
     if name.lower() in _NOT_A_NAME or name.lower() in exclude or _FIXTURE_FILE.match(name):
@@ -347,9 +380,13 @@ _NO_LOGS = re.compile(
 
 def log_names_claimed(answer: str) -> frozenset[str] | None:
     """LCo: every data file name the answer gives (a path before it is ignored), including
-    names that are not in the directory; the empty set when it says there are none; else None."""
+    names that are not in the directory; the empty set when it says there are none; else None.
+    A pattern is not a name: `log_*.dat` (read with its `*`, which `_plain` would drop) and
+    `log_YYYYMMDD.dat`."""
     text = _plain(answer)
-    found = frozenset(_ANY_DATA_FILE.findall(text))
+    found = frozenset(
+        n for n in _ANY_DATA_FILE.findall(answer.replace("`", "")) if not _PATTERN.search(n)
+    )
     if found:
         return found
     return frozenset() if _NO_LOGS.search(text) else None

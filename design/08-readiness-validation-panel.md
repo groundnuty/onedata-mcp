@@ -498,7 +498,11 @@ Nothing should change in V1, V3n, V3o, V4, V5, SR1n, SR1o, FA, FAi, FAn, LC, LCn
   made a successful `get_file_distribution` call on the file after its last `schedule_file_replication` call that
   succeeded or may have taken effect (the "may have taken effect" set below; a refused schedule does not move the mark).
   The read must have begun after that schedule returned, name the file by path or id, and be the agent's own call;
-  polling `get_transfer` or `list_space_transfers` reads the status and does not count. Without it the trial FAILs
+  polling `get_transfer` or `list_space_transfers` reads the status and does not count. A successful
+  `get_file_attributes` of the file, begun after that schedule, also counts when its answer carries
+  `isFullyReplicatedLocally` or `localReplicationRate`: Onedata 25.0 computes both from the replica on the queried
+  provider, which is the agent's site and the target here (added after the gate-4 run, design/12, where a panel
+  model read the copy that way). A call that asked for other attributes only does not count. Without it the trial FAILs
   with "completion claimed without reading the target's block map after scheduling", flag `unread_claim`. This tests the
   behaviour the tool's own description asks for (judge by the target's blocks, not by the transfer's status). It is
   asked of a claim of completion only, and only in SR1 and SR1i (`sr_oracles.read_after_scheduling`). V2, whose claim

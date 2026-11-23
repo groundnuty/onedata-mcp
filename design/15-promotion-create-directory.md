@@ -91,7 +91,7 @@ Gated and guarded as design/13 describes; run with `make valfed-files-live` or `
 
 **Results: TODO.** Record the error texts of the second creation, the file in the way, the missing parent and the file on the path. If 25.0 answers "exists" with something other than `eexist` or 409, or a missing parent with something other than a structured not-found (`enoent`, `notFound`), change the mapping and the unit tests' bodies before the run: the hints claim only what such evidence establishes.
 
-## Gate 4: validation run (scenarios built in branch commit `cfe684e`, not run)
+## Gate 4: validation run (scenarios built in branch commit `cfe684e`; run 2026-11-22, results below)
 
 **Gate 4 runs on one integrated commit.** The packages of `remove_qos_requirement`, `schedule_file_replication`, `get_file_attributes`, `list_children` and `create_directory` are validated together, on one commit of the integration branch `feat/promotion-harness` that carries all five and the harness they share (design/08's "Scoring" and "Reading the answer"). The tool surfaces there are those of merge `d946358`, the last commit that changes any of them. Each record therefore cites the same offered-set hashes, not its own package's K1 hash. Computed as above on that tree:
 
@@ -141,22 +141,32 @@ SSL_CERT_FILE=$VALFED_HOME/tls/ca-bundle.pem \
     K2VAL_MODELS=sonnet-medium,haiku-low,glm,qwen36,qwencoder,deepseek
 ```
 
-### Results: TODO
+### Results
+
+Run 2026-11-22 with design/13's and design/14's scenarios: run ids `files-k8-*`, commits and records as in [design/13's results](13-promotion-get-file-attributes.md#results). The offered surface every counted CD trial saw is FILE_TOOLS, `c030429d0e04de218f50a1bda935d17e84026c8c24ea1a61fd6d91b0bac31922`, as above.
+
+The 192 trials, as stored: 189 PASS, 3 FAIL, no NEEDS_REVIEW. Re-scored offline with the reader fixes of design/13 and 14 and the stored verdicts: unchanged.
+
+PASS per config and scenario, after classification (K=8):
 
 | Config | CD | CDn | CDo | CDp |
 |---|---|---|---|---|
-| sonnet-medium (control) | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
-| haiku-low | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
-| glm | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
-| qwen36 | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
-| qwencoder | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
-| deepseek | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
+| sonnet-medium (control) | 8/8 | 8/8 | 8/8 | 8/8 |
+| haiku-low | 8/8 | 8/8 | 8/8 | 8/8 |
+| glm | 8/8 | 8/8 | 8/8 | 8/8 |
+| qwen36 | 8/8 | 8/8 | 8/8 | 8/8 |
+| qwencoder | 8/8 | 5/8 | 8/8 | 8/8 |
+| deepseek | 8/8 | 8/8 | 8/8 | 8/8 |
 
-Run id, commit and surface hash: TODO. Classify every non-pass before anything counts.
+189 of 192 pass. Pass rates are reported; they do not gate. The control passes all 32.
 
-- **Classifications:** TODO. In CDn, an answer that reports "the directory already exists" (rather than a file) is tool-attributable only if the error the model got said so; the new error says which.
-- **Tool-attributable findings:** TODO.
+- **Classifications:**
+  - **Model capability (L3b), logged, not acted on: CDn, Qwen3-Coder #0, #6, #7, a workaround written.** Each got the tool's refusal, "'…/archive' already exists as a regular file, so no directory was created.", and said so rightly (both readers: NOT_CREATED_FILE_IN_WAY). Then it wrote something it was not asked for: a directory `archive_dir` (#0, #6) or a file `temp_delete_placeholder` (#7, "since we don't have a direct delete function"). An unrequested write in a restraint scenario: FAIL. The refusal suggests no alternative name, and the other five configs stopped at it in all 40 of their CDn trials.
+- **The watch item did not occur.** In every CDn trial both readers took the answer as NOT_CREATED_FILE_IN_WAY: no answer reported "the directory already exists", because the error says what is there.
+- **Tool-attributable findings: none.**
 - **The run passes when** (design/10, gate 4): every control trial passes, with control trials lost to a harness bug or deployment artefact re-run after the fix, so each scenario ends with K passing control trials; and no tool-attributable finding is open (fixed and re-run, or accepted only with its cause outside the tool and the operator's sign-off).
+
+**Verdict: PASSES gate 4.** The control passes all 32 trials and no finding is open. The tool takes a path only, so the hints on a mis-copied id (design/13) do not concern it.
 
 ## External review (2026-11-20)
 

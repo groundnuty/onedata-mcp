@@ -91,7 +91,7 @@ Gated and guarded as design/13 describes; run with `make valfed-files-live` or `
 - the order of the entries. If 25.0 does not list in name order, LCp may hold all three subdirectories on its first page: change LCp's names so the two empty ones sort last, before the run;
 - the error texts of a regular file, a missing path and a made-up token.
 
-## Gate 4: validation run (scenarios built in branch commit `9694c3d`, not run)
+## Gate 4: validation run (scenarios built in branch commit `9694c3d`; run 2026-11-22, results below)
 
 **Gate 4 runs on one integrated commit.** The packages of `remove_qos_requirement`, `schedule_file_replication`, `get_file_attributes`, `list_children` and `create_directory` are validated together, on one commit of the integration branch `feat/promotion-harness` that carries all five and the harness they share (design/08's "Scoring" and "Reading the answer"). The tool surfaces there are those of merge `d946358`, the last commit that changes any of them. Each record therefore cites the same offered-set hashes, not its own package's K1 hash. Computed as above on that tree:
 
@@ -140,22 +140,48 @@ SSL_CERT_FILE=$VALFED_HOME/tls/ca-bundle.pem \
     K2VAL_MODELS=sonnet-medium,haiku-low,glm,qwen36,qwencoder,deepseek
 ```
 
-### Results: TODO
+### Results
+
+Run 2026-11-22 with design/13's and design/15's scenarios: run ids `files-k8-*`, commits and records as in [design/13's results](13-promotion-get-file-attributes.md#results). The offered surface every counted LC trial saw is FILE_TOOLS, `c030429d0e04de218f50a1bda935d17e84026c8c24ea1a61fd6d91b0bac31922`, as above.
+
+The 240 trials, as stored: 217 PASS, 1 FAIL, 21 NEEDS_REVIEW, 1 NO_RESULT. Re-scored offline with the reader fixes below and the stored verdicts (`rejudge --cached-only`): 235 PASS, 3 FAIL, 1 NEEDS_REVIEW, 1 NO_RESULT.
+
+PASS per config and scenario, after classification (K=8):
 
 | Config | LC | LCn | LCo | LCp | LCi |
 |---|---|---|---|---|---|
-| sonnet-medium (control) | TODO /8 | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
-| haiku-low | TODO /8 | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
-| glm | TODO /8 | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
-| qwen36 | TODO /8 | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
-| qwencoder | TODO /8 | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
-| deepseek | TODO /8 | TODO /8 | TODO /8 | TODO /8 | TODO /8 |
+| sonnet-medium (control) | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 |
+| haiku-low | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 |
+| glm | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 |
+| qwen36 | 8/8 | 8/8 | 8/8 | 7/8 | 8/8 |
+| qwencoder | 8/8 | 8/8 | 8/8 | 6/8 | 8/8 |
+| deepseek | 8/8 | 8/8 | 8/8 | 7/8 | 8/8 |
 
-Run id, commit and surface hash: TODO. Classify every non-pass before anything counts.
+236 of 240 pass (235 as re-scored, and Haiku LCo #3, PASS by hand). Pass rates are reported; they do not gate. The control passes all 40.
 
-- **Classifications:** TODO. An LCp failure that read one page with `isLast: false` in the answer it got is tool-attributable until shown otherwise: the description is what tells a model to page.
-- **Tool-attributable findings:** TODO.
+- **Classifications:**
+  - **Harness (oracle) bug, fixed and re-scored: the LC and LCo readers took words, extensions and patterns for names (20 NEEDS_REVIEW; 18 now PASS, 2 FAIL as the judge read them; no stored PASS changed).**
+    - `names_claimed` took a sentence's opening word before a comma ("Therefore, it has no subdirectories", DeepSeek LCn #4, Qwen3-Coder LCn #3, #6; "Additionally, …", Qwen3.6 LCi #7; "Thus, …", Qwen3-Coder LCp #3). It also took "e.g." (GLM LCi #6), a quoted JSON value ("the `isLast` was `true`", DeepSeek LCp #2), an extension ("regular files (`.dat` files)", Qwen3.6 LCp #1, #5; DeepSeek LCp #0, #3, #6, #7; Qwen3-Coder LCp #3, #5) and a glob ("110 `acq_*.dat` files", Haiku LCp #3; GLM LCp #5).
+    - `log_names_claimed` (LCo) took a naming pattern for a file ("named in the `log_YYYYMMDD.dat` pattern", GLM LCo #5, #7, Qwen3.6 LCo #6; "matching the `log_*.dat` naming", GLM LCo #1).
+
+    Connectives, abbreviations and JSON values join the readers' list of words that are not names, and an extension alone or a pattern is not a name. An invented name is still kept (paired cases, `test/unit/k2val/test_gate4_readers.py`). Qwen3-Coder LCp #3 and #5 now read "none" and FAIL (below).
+  - **NEEDS_REVIEW resolved by hand (1):** Haiku LCo #3. Both readers agree on the three right names, but the judge's evidence joins three list items with commas, which the quote check rightly rejects as not one passage. The right reading is the three names: PASS (one `list_files_recursively` call, the directory unchanged). The check behaved as specified; nothing to fix.
+  - **Deployment artefact (1): DeepSeek LCp #4,** NO_RESULT. After four good pages, 29 of its `list_children` calls failed with `connection_error` from the provider, and it ran out of its 40 rounds. Not a control trial; a re-run would only complete the grid.
+  - **Paging stopped while `isLast` was false (3): Qwen3.6 LCp #4, Qwen3-Coder LCp #3, #5.** This is finding F3 below.
+- **Tool-attributable findings:**
+  - **F3 (L3a, open): paging stopped while `isLast` was false (LCp).**
+    - Qwen3.6 #4 read four pages of 10 and one of 100, each `isLast: false`, and answered "`acq_0001.dat` through `acq_0100.dat` (and potentially more …). **The directory has no subdirectories.**"
+    - Qwen3-Coder #3 read one page (10 entries, `isLast: false`) and answered "does not contain any subdirectories".
+    - Qwen3-Coder #5 read four pages, each `isLast: false`, and answered "I've checked all pages".
+
+    The evidence bar is met: two model families (the operator counts Qwen3.6 and Qwen3-Coder as two). The record above also presumes this case tool-attributable "until shown otherwise", since the description is what tells a model to page. #5 misreads this tool's own answer (`isLast: false` taken as the last page).
+
+    *Against attribution:* the same models read the listing to its end in 6 of 8 (Qwen3-Coder) and 7 of 8 (Qwen3.6) LCp trials at the same surface; Qwen3.6 #4 shows it knew more entries followed; Sonnet, Haiku, GLM and DeepSeek always paged to the end. That does not show a cause outside the tool, so the finding stays open.
+
+    *Fixes to consider:* a result that states the continuation when `isLast` is false (for example "more entries follow: call again with token"), or a larger default `limit` (10 now; 100 would fit LC's fixtures, though not LCp's 113 entries). Either changes the result's shape or the schema's default, so after it LCp must be re-run.
 - **The run passes when** (design/10, gate 4): every control trial passes, with control trials lost to a harness bug or deployment artefact re-run after the fix, so each scenario ends with K passing control trials; and no tool-attributable finding is open (fixed and re-run, or accepted only with its cause outside the tool and the operator's sign-off).
+
+**Verdict: BLOCKED by F3.** The control passes every trial. Gate 4 passes once F3 is fixed and LCp re-run, or signed off by the operator with a reason that places its cause outside the tool. `list_children` also shares the hints on a mis-copied id of design/13 ("Open: the hints on a mis-copied id"). No LCi trial passed a mis-copied id, but the same fix applies here.
 
 ## External review (2026-11-20)
 
