@@ -51,7 +51,7 @@ The tests are in `test/unit/api/test_list_children.py`, through the API and thro
 | The parent is a regular file | **Defect (seen live, 25.0, 2026-11-21):** Onedata does not refuse; it returns the file itself as the only child, so a model would read "the directory contains <file>" | `'…' is a regular file, not a directory; it has no children.` (detected on the first page by the single entry being the target, or one type read when the target was given by id) |
 | `enotdir` on the listing itself | Onedata's message only | `The path '…' is not a directory: only a directory has entries to list.` |
 | A component of the path is not a directory (`enotdir` while resolving `/s/file/child`) | Onedata's message only | `A component of path '…' before its last part is not a directory, so this provider cannot resolve the path.` (review, 6) |
-| An id that names nothing (a structured not-found), a malformed id, no access | Onedata's message only | The hints of design/13 (`This provider reports nothing at …`, `This provider rejected … as a file id`, `Not allowed to list … Calling again will not help.`), then Onedata's message |
+| An id that names nothing (a structured not-found), a malformed id, no access | Onedata's message only | The hints of design/13 (`This provider reports nothing at …`, `This provider rejected … as a file id`, `Not allowed to list … Calling again will not help.`), then Onedata's message. (For an **id**, the no-access hint is amended after gate 4: see the last rows.) |
 | A bare 404 (no structured body) | Onedata's message only | Its possible causes, not one of them (review, 5): `This provider answered 404 for … without saying why: it may not exist, its space may not be supported by this provider, or the token may not see it. Check …` |
 | A path that names nothing | `Path "…" not found` | Unchanged |
 | `attributes` as JSON text | pydantic `list_type` error | Read as that list, as for `get_file_attributes` (the same validator); any other string refused with what to send |
@@ -62,6 +62,11 @@ The tests are in `test/unit/api/test_list_children.py`, through the API and thro
 | `attributes` as JSON text longer than 64 names of 128 characters, or nested too deeply to decode | Decoded unbounded; a `RecursionError` passed the hint | Refused with the same hint (review, 12) |
 | A bad token | Onedata's 400 | Unchanged: passed on, with no id hint |
 | Empty result (an empty directory) | `{"children": [], "isLast": true}` | Unchanged; the description now says what `isLast` means |
+| *Rows added after gate 4 (2026-11-23), for the operator's decisions below. The description is unchanged, so the surface hashes are; these are behaviour, not surface.* | | |
+| A page that is not the last (`isLast` is false) (F3) | The page as Onedata gave it | The page, plus `"more": "More entries follow: call again with token set to nextPageToken."` (without a `nextPageToken`: `"More entries follow."`). Nothing is added to a last page (`isLast` true) or to an answer that does not say. The note says what the description says (`call again with` `token` `set to` `nextPageToken`) and names no tool. |
+| A directory given as an id that cannot be whole (truncated, extended, doubled, not hex) | Sent; Onedata answered 403, `spaceNotSupportedBy`, 404 or 400 | Refused before any request: `'…' is not a complete file id; copy it exactly from the earlier answer, or give the path, /<space_name>/<path>.` The check and its limits are design/13's (gate 1, the rows added after gate 4). A path is not checked. |
+| No access (403, `forbidden`, `eacces`) for an **id** | `Not allowed to list file id '…': the token has no access to it. Calling again will not help.` | `Could not list file id '…': the id may be mis-copied (…), or the token may have no access to the file. Copy the id exactly from the earlier answer, or give the path, /<space_name>/<path>.` and, when it applies, ` The space in the id is not one this token sees at this provider.` For a **path** the old hint stands. |
+| `spaceNotSupportedBy` for an **id** | `This provider does not support the space of file id '…', so it cannot list it here; the space may still exist.` | `Could not list file id '…': this provider reports that it does not support the space in the id. The id may be mis-copied (…): copy it exactly …` then the unseen-space sentence when it applies, and the spaces the token sees. For a **path** the row above stands. |
 
 The 25.0 error bodies are unverified, as in design/13.
 
@@ -169,19 +174,47 @@ PASS per config and scenario, after classification (K=8):
   - **Deployment artefact (1): DeepSeek LCp #4,** NO_RESULT. After four good pages, 29 of its `list_children` calls failed with `connection_error` from the provider, and it ran out of its 40 rounds. Not a control trial; a re-run would only complete the grid.
   - **Paging stopped while `isLast` was false (3): Qwen3.6 LCp #4, Qwen3-Coder LCp #3, #5.** This is finding F3 below.
 - **Tool-attributable findings:**
-  - **F3 (L3a, open): paging stopped while `isLast` was false (LCp).**
+  - **F3 (was L3a, open; since 2026-11-23 not L3a under the one-family rule, fixed by decision, re-run TODO): paging stopped while `isLast` was false (LCp).**
     - Qwen3.6 #4 read four pages of 10 and one of 100, each `isLast: false`, and answered "`acq_0001.dat` through `acq_0100.dat` (and potentially more …). **The directory has no subdirectories.**"
     - Qwen3-Coder #3 read one page (10 entries, `isLast: false`) and answered "does not contain any subdirectories".
     - Qwen3-Coder #5 read four pages, each `isLast: false`, and answered "I've checked all pages".
 
-    The evidence bar is met: two model families (the operator counts Qwen3.6 and Qwen3-Coder as two). The record above also presumes this case tool-attributable "until shown otherwise", since the description is what tells a model to page. #5 misreads this tool's own answer (`isLast: false` taken as the last page).
+    The evidence bar was read as met by two model families (the operator counted Qwen3.6 and Qwen3-Coder as two); **superseded 2026-11-23:** the operator counts models of one vendor lineage as one family (design/10, "The standing panel"), so these are one family (Qwen), and no control trial failed. The record above also presumes this case tool-attributable "until shown otherwise", since the description is what tells a model to page. #5 misreads this tool's own answer (`isLast: false` taken as the last page).
 
     *Against attribution:* the same models read the listing to its end in 6 of 8 (Qwen3-Coder) and 7 of 8 (Qwen3.6) LCp trials at the same surface; Qwen3.6 #4 shows it knew more entries followed; Sonnet, Haiku, GLM and DeepSeek always paged to the end. That does not show a cause outside the tool, so the finding stays open.
 
     *Fixes to consider:* a result that states the continuation when `isLast` is false (for example "more entries follow: call again with token"), or a larger default `limit` (10 now; 100 would fit LC's fixtures, though not LCp's 113 entries). Either changes the result's shape or the schema's default, so after it LCp must be re-run.
+
+    **Decision (operator, 2026-11-23): fix, and re-run LCp at K=8.** Not L3a under the one-family rule, but a modest tool change prevents the failure, and the protocol's aim is tools that less capable models can use (design/10, "Aim"). The first option was taken, not a larger default `limit`: that changes the schema (the surface), and does not help a directory longer than the limit. A page that is not the last now carries `more` (gate 1, the rows added after gate 4). The description is unchanged, so the surface hashes are. Unit tests: `test_a_page_that_is_not_the_last_says_more_entries_follow` and the cases around it (nothing on a last page, nothing when the answer does not say), and `test_the_note_reaches_the_model_and_agrees_with_the_description`. The re-run is a TODO below.
 - **The run passes when** (design/10, gate 4): every control trial passes, with control trials lost to a harness bug or deployment artefact re-run after the fix, so each scenario ends with K passing control trials; and no tool-attributable finding is open (fixed and re-run, or accepted only with its cause outside the tool and the operator's sign-off).
 
-**Verdict: BLOCKED by F3.** The control passes every trial. Gate 4 passes once F3 is fixed and LCp re-run, or signed off by the operator with a reason that places its cause outside the tool. `list_children` also shares the hints on a mis-copied id of design/13 ("Open: the hints on a mis-copied id"). No LCi trial passed a mis-copied id, but the same fix applies here.
+**Verdict: BLOCKED by F3 until the re-run below passes.** The control passes every trial. On 2026-11-23 the operator chose the fix over a sign-off: the fix is made (above), and gate 4 passes once LCp is re-run at K=8 and the re-run is clean. `list_children` also shared the hints on a mis-copied id of design/13 ("Open: the hints on a mis-copied id"). No LCi trial passed a mis-copied id, but the same fix is made here (design/13, "Fixed 2026-11-23"), and LCi is re-run on the smoke pair at K=3.
+
+### Re-runs after the 2026-11-23 decisions (TODO, not run)
+
+Nothing here has run. Before starting, check `$VALFED_HOME/HOLD` and the study coordinator's limits: the federation is on a shared host. `K2VAL_ARTEFACT_ROOT` (new in the Makefile) passes `--artefact-root`. LCp uses the panel and K above (six configs, K=8, the control `sonnet-medium`), in the same three batches as the first run; new run ids, in the durable evidence store. LCi uses this record's reading of "the smoke pair at K=3" (design/10, "Staying stable"): Qwen3-Coder and Haiku at effort low. The operator did not fix the panel or K for the LCi re-run.
+
+```
+make valfed-up && make valfed-reset
+SSL_CERT_FILE=$VALFED_HOME/tls/ca-bundle.pem \
+  make k2val K2VAL_CONFIG=benchmark/k2val/k2val.valfed.toml \
+    K2VAL_ARTEFACT_ROOT=/mnt/volume2/onedata-mcp-val/evidence/k2val \
+    K2VAL_RID=files-f3-k8-sonnet-medium-glm \
+    K2VAL_SCENARIOS=LCp K2VAL_K=8 K2VAL_MODELS=sonnet-medium,glm
+# then the same options with
+#   K2VAL_RID=files-f3-k8-haiku-low-qwen36    K2VAL_MODELS=haiku-low,qwen36
+#   K2VAL_RID=files-f3-k8-qwencoder-deepseek  K2VAL_MODELS=qwencoder,deepseek
+
+# the mis-copied-id guard, on the smoke pair
+SSL_CERT_FILE=$VALFED_HOME/tls/ca-bundle.pem \
+  make k2val K2VAL_CONFIG=benchmark/k2val/k2val.valfed.toml \
+    K2VAL_ARTEFACT_ROOT=/mnt/volume2/onedata-mcp-val/evidence/k2val \
+    K2VAL_RID=lc-guard-k3 \
+    K2VAL_SCENARIOS=LCi K2VAL_K=3 K2VAL_MODELS=qwencoder,haiku-low
+```
+
+- **LCp at K=8 (F3).** 1 scenario × 6 configs × 8 = 48 trials. Passes when every control trial passes and no new tool-attributable finding appears. F3 is closed when no config's answer stops paging while `isLast` is false, or each that does is classified. DeepSeek LCp #4 (a deployment artefact in the first run) is run again with the rest.
+- **LCi on the smoke pair at K=3 (the guard).** 1 scenario × 2 configs × 3 = 6 trials; the same pass test as design/13's FAi re-run. The two re-runs may share one invocation (`K2VAL_SCENARIOS=FAi,LCi`).
 
 ## External review (2026-11-20)
 

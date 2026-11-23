@@ -54,13 +54,18 @@ Every error path a model can trigger, and what the model now reads. The tests ar
 | `spaceNotSupportedBy`, by id or while resolving a path | Onedata's message only | `This provider does not support the space of …, so it cannot read the attributes of it here; the space may still exist.` and the spaces the token sees. Before the review it said `Space "…" does not exist` (review, 5). It is an `OnedataApiError`, which the readiness tools' reads catch. |
 | A component of the path is not a directory (`enotdir` while resolving) | Onedata's message only | `A component of path '…' before its last part is not a directory, so this provider cannot resolve the path.` (review, 6) |
 | A path that names nothing | `Path "…" not found` | Unchanged |
-| No access (403, `forbidden`, `eacces`, `eperm`) | Onedata's message only | `Not allowed to read the attributes of …: the token has no access to it. Calling again will not help.` |
+| No access (403, `forbidden`, `eacces`, `eperm`) | Onedata's message only | `Not allowed to read the attributes of …: the token has no access to it. Calling again will not help.` (For a file given as an **id**, amended after gate 4: see the last rows.) |
 | A relative path, client without MCP roots | `Paths must start with '/'` hint | Unchanged |
 | A relative path with no MCP session (the panel's API legs) | `RuntimeError: session is not available …` | The same `Paths must start with '/'` hint (review, 7) |
 | 500, transport errors | Unchanged | Unchanged. Nothing for the caller to fix. |
 | Empty result | Not applicable: a file or directory always has attributes | |
+| *Rows added after gate 4 (2026-11-23), for the operator's decisions below. The description is unchanged, so the surface hashes are; these are behaviour, not surface.* | | |
+| An id that cannot be whole (truncated, extended, doubled, not hex), given **through the tool** | Sent; Onedata answered 403, `spaceNotSupportedBy`, 404 or 400 | Refused before any request, with no lookup: `'…' is not a complete file id; copy it exactly from the earlier answer, or give the path, /<space_name>/<path>.` The id is hex, with an 8-byte header whose sixth byte is the payload length and the payload `guid#<uuid>#<space id>`. A path is not checked, and a relative path keeps its `Paths must start with '/'` hint. A changed digit inside the uuid, or a header spliced onto another file's payload, is whole and is Onedata's to refuse. |
+| No access (403, `forbidden`, `eacces`, `eperm`) for an **id** given through the tool | `Not allowed to read the attributes of file id '…': the token has no access to it. Calling again will not help.` | `Could not read the attributes of file id '…': the id may be mis-copied (an id with a missing or changed character is refused like this), or the token may have no access to the file. Copy the id exactly from the earlier answer, or give the path, /<space_name>/<path>.` When one `GET /spaces` shows that the id's space is not one the token sees: ` The space in the id is not one this token sees at this provider.` For a **path** the row above stands. |
+| `spaceNotSupportedBy` for an **id** given through the tool | `This provider does not support the space of file id '…', so it cannot read the attributes of it here; the space may still exist.` | `Could not read the attributes of file id '…': this provider reports that it does not support the space in the id. The id may be mis-copied (…): copy it exactly from the earlier answer, or give the path, /<space_name>/<path>.` Then the unseen-space sentence when it applies, and the spaces the token sees. For a **path** the row above stands. |
 
 - The hints are keyed on the HTTP status, with the error id and errno as a fallback; a specific diagnosis needs distinguishing evidence (review, 5). The real 25.0 bodies are **unverified**: the unit tests use plausible shapes, and the live test prints the real ones.
+- **Who gets the id handling.** Only the MCP tool: the API function takes `copied_id=True` from the tool's wrapper (`onedata_mcp/modules/files.py`). The other callers of the function (the stable `download_file`, the readiness tools) pass ids that Onedata gave them and keep their handling, which a test pins (`test_the_callers_that_pass_ids_from_onedata_keep_their_handling`).
 - Paths are resolved with the three tools' own lookup. The stable tools keep `get_file_id`, whose shared mapping still reads `spaceNotSupportedBy` as a missing space; changing it would need their own gates.
 - Gate 1 also asks for list caps: `attributes` was the tool's only list, and it had none.
 
@@ -204,9 +209,26 @@ PASS per config and scenario, after classification (K=8):
   - for a well-formed id whose space is not one the token sees, say the id may be mis-copied, instead of claiming no access or an unsupported space.
 
   `schedule_file_replication` (design/12) and `list_children` (design/14) share the defect. A well-formedness check does not catch everything: GLM FAi #7 spliced one brief id's 8-byte header onto another file's `guid#…` payload, and Onedata returned that other file, so the header is not checked. The fix changes errors only, not the surface; FAi should be re-run on the smoke pair at K=3 after it.
+
+  - **Fixed 2026-11-23 (operator's decision), with the code on this branch.** The two parts of the fix above, for an id given through the tool (gate 1, the rows added after gate 4). The check is a stricter test than "decodes to `guid#<uuid>#<space id>`": it also reads the header's sixth byte as the payload's length, which is what shows a byte dropped from an otherwise well-formed id. Over the 383 distinct ids that 25.0 returned in the validation runs, trash and archive roots included, it refuses none; over the 55 ids in the recorded calls of the three tools that were not an id Onedata or a brief had given, it refuses 50 (the other 5 are whole: a changed digit or a spliced header). The id handling is only for the tool's own calls (gate 1). Unit tests: `test/unit/api/test_file_ids.py` and the mis-copy cases of `test_get_file_attributes.py`, `test_list_children.py` and `test_transfers.py`. The FAi re-run is a TODO below.
 - **The run passes when** (design/10, gate 4): every control trial passes, with control trials lost to a harness bug or deployment artefact re-run after the fix, so each scenario ends with K passing control trials; and no tool-attributable finding is open (fixed and re-run, or accepted only with its cause outside the tool and the operator's sign-off).
 
-**Verdict: PASSES gate 4,** unless the operator reads the hints on a mis-copied id as L3a (above). The control passes all 32 trials and no tool-attributable finding is open. Before the promotion PR, fix the hint on a mis-copied id (gate 1) and re-run FAi on the smoke pair at K=3.
+**Verdict: PASSES gate 4 as recorded, pending the FAi re-run after the id guard (below).** The control passes all 32 trials and no tool-attributable finding is open. The hint on a mis-copied id is a gate-1 defect, not L3a (operator's call, 2026-11-23); it is fixed (above), and FAi is re-run on the smoke pair at K=3 before the promotion PR.
+
+### Re-run after the 2026-11-23 decisions (TODO, not run)
+
+Nothing here has run. Before starting, check `$VALFED_HOME/HOLD` and the study coordinator's limits: the federation is on a shared host. `K2VAL_ARTEFACT_ROOT` (new in the Makefile) passes `--artefact-root`. The panel and K are this record's reading of "the smoke pair at K=3" (design/10, "The standing panel"; design/10, "Staying stable"): Qwen3-Coder and Haiku at effort low. The operator did not fix them for this re-run.
+
+```
+make valfed-up && make valfed-reset
+SSL_CERT_FILE=$VALFED_HOME/tls/ca-bundle.pem \
+  make k2val K2VAL_CONFIG=benchmark/k2val/k2val.valfed.toml \
+    K2VAL_ARTEFACT_ROOT=/mnt/volume2/onedata-mcp-val/evidence/k2val \
+    K2VAL_RID=fa-guard-k3 \
+    K2VAL_SCENARIOS=FAi K2VAL_K=3 K2VAL_MODELS=qwencoder,haiku-low
+```
+
+- **FAi on the smoke pair at K=3 (the mis-copied-id guard).** 1 scenario × 2 configs × 3 = 6 trials. Passes when no new tool-attributable failure appears (design/10, "Staying stable"): an id that was not the brief's is refused with "not a complete file id", or reaches Onedata and draws a hint that says the id may be mis-copied. Qwen3.6 and GLM produced most of the mis-copies; the smoke pair may not exercise the guard, so adding them (`K2VAL_MODELS=qwencoder,haiku-low,glm,qwen36`) is a one-word change if the operator wants it. The record then gets this tool's `get_file_attributes` pass confirmed.
 
 ## External review (2026-11-20)
 

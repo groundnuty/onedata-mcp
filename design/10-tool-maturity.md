@@ -4,6 +4,10 @@ Status: agreed 2026-11-20; tightened the same day after the external reviews of 
 
 Every tool the server registers has a maturity tier, recorded in [`onedata_mcp/tool_maturity.py`](../onedata_mcp/tool_maturity.py). Operators can expose only stable tools (`ONEDATA_MCP_MATURITY=stable`). The tier is model-invisible: it never appears in a tool's description.
 
+## Aim
+
+The protocol exists to make the tools usable by less capable models, and the standing panel's probes are chosen for that. When a probe model fails in a way a modest tool change could prevent (a clearer result, an explicit empty answer, a hint in the result), prefer making the change, even where the evidence is thinner than a tool-attributable finding needs, as with F2 and F3 (design/12 and design/14), and record the decision either way. A "not changed" decision is for failures that no reasonable tool change would prevent.
+
 ## Tiers
 
 - **experimental**: every new tool starts here. So does any tool whose model-facing surface changed in a way the rules below send back.
@@ -58,6 +62,8 @@ A tool is promoted by a PR that moves it into `STABLE` and adds its validation r
    - the per-model results and each classification;
    - the external review(s) and how each BLOCKING or MAJOR finding was resolved.
 
+   The record must also add every finding the run produced to `research/empirical-mcp-server-findings.md`, as an M-n entry in that file's existing shape (Surface, Behaviour, Why this matters, Evidence, Fix) plus a **Decision** field: *Fixed* (with the change and the re-run that validated it); *Not changed, model capability* (why the tool is not at fault, and what evidence would change that); or *Open*. That covers a deliberate decision not to change a tool as much as a fix.
+
 ## Staying stable
 
 A change to a stable tool's surface:
@@ -71,7 +77,7 @@ Bug fixes that leave both the surface and the behaviour unchanged need only gate
 
 The panel is defined by role, so that it survives model churn. The current instance is configured in the benchmark harness. Models are chosen for the failures they expose, not for their scores.
 
-- **Probes:** at least three open-weight model families of modest capability. Today:
+- **Probes:** at least three open-weight model families of modest capability. Models from the same vendor lineage are **one** family: Qwen3.6-35B-A3B and Qwen3-Coder-30B-A3B count as one (Qwen), so today's probes span three, GLM, Qwen and DeepSeek (operator's decision, 2026-11-23). Today:
   - Qwen3-Coder-30B-A3B, a literal reader of descriptions and argument types;
   - GLM-5.3-Flash;
   - Qwen3.6-35B-A3B;
