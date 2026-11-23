@@ -1,6 +1,6 @@
 # Smoke scenarios for the stable tools
 
-Status: built and unit-tested on the fake federation (2026-11-22), revised after an external review the same day (below). Nothing here has run against a live Onedata or a model.
+Status: built and unit-tested on the fake federation (2026-11-22), revised after an external review the same day (below). First run on the validation federation 2026-11-23, control and smoke pair, and classified ([Results](#results-of-the-first-smoke-run-2026-11-23)): six of the eight rows stay stable, `add_file_qos_requirement` is at risk (one new tool-attributable finding), and the hint row is not verified.
 
 [`10-tool-maturity.md`](10-tool-maturity.md), "Staying stable", says that a stable tool whose description wording, error hints or result shape changes must re-run "the tool's scenarios on the smoke pair at K=3". Eight such changes are owed, over seven tools:
 
@@ -145,6 +145,104 @@ The tool stays stable if no **new** tool-attributable failure appears; otherwise
 3. **Count each finding against the tool it names, and that tool's rows only.**
 4. **A row is verified** when its direct scenarios ran. For a supporting scenario, a trial counts only with a target-matched call of the tool. The `replicas_num` row additionally needs at least one trial with its shape check applied (not `None`). The hint row needs at least one exposure, otherwise its wording stays "not verified" (above). A row that is not verified does not clear design/10's "Transition" for that change, whatever the pass rule says.
 
+## Results of the first smoke run (2026-11-23)
+
+Run on the validation federation on 2026-11-23, 00:07 to 01:35 UTC, at `8863c3e`, in two run ids in the durable evidence store:
+- `smoke-control-1`: the control (Sonnet at effort medium) once on each new scenario (ST1–ST7, ST4i). It holds 14 records for 8 trials: 6 are superseded ADAPTER_ERROR records (the subscription's session expired mid-run; the resume re-ran those trials).
+- `smoke-stable-1`: the smoke pair (Qwen3-Coder, Haiku at effort low) on the 15 mapped scenarios at K=3. It holds one record per trial, 90 in all.
+
+The offered surfaces, read from every counted record, are the recorded ones: K1 `9192d3f502ebbd04a4d17ef787c27f7193df0fb89bac5eafa1ea618ae1324df3` and ST7_TOOLS `76995017fe996f35c81b2437727354ebed1951c6d39d767e57ee3e1372646b1c`. No trial was a RESET_FAIL, so every fixture precondition above held. Answers were read by the deterministic reader and the judge (Claude Sonnet 5.5, effort medium).
+
+The classes are design/10's, gate 4: **L1** harness or oracle bug, **L2** deployment artefact, **L3a** tool-attributable, **L3b** model capability. The L3a bar is the same diagnosis in at least two model families, or a control failure, or one model with a traced mechanism. Models of one vendor lineage are one family (the operator, 2026-11-23), so this run has two: Qwen and Anthropic (Haiku; the control is Anthropic too).
+
+### Rescore
+
+The stored answers were read again offline (`rejudge --cached-only`: the stored verdicts, no judge call), into new directories beside the runs, which were left unchanged (sha256 of every file checked before and after).
+
+| Run | As stored (`8863c3e`) | master `56c0dc2` (#41's reader fixes) | with the fixes below | after review by hand |
+|---|---|---|---|---|
+| control (8) | 6 PASS, 2 NEEDS_REVIEW | 6 PASS, 2 NEEDS_REVIEW | 8 PASS | 8 PASS |
+| pair (90) | 63 PASS, 11 FAIL, 16 NEEDS_REVIEW | 65 PASS, 10 FAIL, 15 NEEDS_REVIEW | 76 PASS, 10 FAIL, 4 NEEDS_REVIEW | 77 PASS, 13 FAIL |
+
+#41 changed two Haiku trials: SR1 #1 (the read rule accepts `isFullyReplicatedLocally`) and SR1n #2 ("Once that's done, I can schedule" is a condition), both now PASS. The fixes below change 13 readings and no other reading of any stored run: the 912 scored answers of this run and of the gate-4 runs (design/12–15) were read at master and on the branch, and only these 13 differ. No stored PASS changed.
+
+### L1: reader fixes (paired regression tests in `test/unit/k2val/test_smoke_readers.py`)
+
+| # | Reader | Misread | Fix | Trials |
+|---|---|---|---|---|
+| S1 | ST1 `read_rule_task` | "The QoS summary still says `pending`", "Its status still reads `pending`", "The rule showed `pending` on the first check" undid "the data are now fully at your site" | a pending rule status that its own sentence explains away (a past reading, "on the first check"; a lag, "rather than missing data", "even though … already"; a coming change, "should flip") no longer undoes a clause saying the data are fully there. The rest of the sentence is still read ("status pending and the data are not yet there" stays not done), a status with no data claim stays not done, and a bare "the data are fully there, but the rule is still pending" still says both | control #0; Haiku #0, #2 → PASS |
+| S2 | ST3 `read_single_copy` | "2. `log_20200114.dat` - Has a requirement with replicas_num = 2": the dash cut the name from its count, and the bare name was read as claimed | a list item labelled by one name takes the count that follows it, when that text states one kind of count | Qwen3-Coder #0, #1, #2 → PASS |
+| S3 | ST4 `read_transfer_ids` | "The replicating provider ID is `<id>`" not read as a label; "… the ID of the transfer … is:" then the id alone two lines below not read as the conclusion | "provider ID is" labels an id (an id word is required: "the file is X" is no label); the lead-in of an id on its own line is the text before it | Qwen3-Coder #0 → PASS |
+| S4 | ST5 (and ST2) `_FIELD`, `_CAN_ALL` | "Number of Copies Requested: 2" gave no count; "Can they all be met at once? Yes." gave no verdict | the field with "requested", "required" and the like; a "Yes" right after the restated question about being met | Qwen3-Coder #1, #2, control #0 → PASS |
+| S5 | ST6 `read_shares` | "1. Site: local" with "- Percentage of Data: 25%" on the sub-item below gave no share | the first percentage under an item that names one site; a blank line, a line naming another site, or a line that is not a list item ends it ("The remaining 25% …" is no site's) | Qwen3-Coder #0, #2 → PASS |
+| S6 | V3o `oracles._HAS_RULE` | "Since the QoS requirement for the file specifies this provider, it means that the file is indeed kept at the local site" not read as yes | a rule noun, then "is kept / held / stored / pinned / placed at" in the same clause | Qwen3-Coder #2 → PASS |
+| S7 | the re-judge report (`ST_RIGHT`) | ST6's and ST7's right readings named `vistula-dc` and `nordic-marine-dc`, so every right ST6 and ST7 answer on this federation (`owner`, `local`) was listed as "a stored PASS the judge reads as wrong" (scoring was not affected: the oracles use the trial's names) | both depend on the trial, like ST4's | none (report only) |
+
+### NEEDS_REVIEW resolved by hand
+
+- **Qwen3-Coder SR1 #2** (reader OTHER, judge SAYS_NOT_YET): SAYS_NOT_YET ("The transfer is currently in "enqueued" status"; "Once bytesReplicated equals 134217728, the data are fully there" is a condition). FAIL either way.
+- **Qwen3-Coder SR1i #1** (reader OTHER, judge SAYS_WHOLE): SAYS_WHOLE ("the replication is currently in progress", then "The data are now fully present at the local site"). FAIL either way (`unread_claim`).
+- **Qwen3-Coder SR1n #2** (reader SAYS_NOT_POSSIBLE, judge OTHER): SAYS_NOT_POSSIBLE ("Since "oder-dc" is not a provider for this space, I cannot directly replicate the file to that site"), no write. **PASS.** The answer ends on "Let me try to find if there's another way … `<tool_call>`": the turn ended on a tool call begun as text. The gate-4 run (design/12) has two answers of the same shape, Qwen3-Coder SR1n #1 and #3, which both readers read as SAYS_NOT_POSSIBLE and which are PASS there. No row depends on this trial.
+- **Qwen3-Coder ST4 #2** (reader none, judge unclear): FAIL either way, and its required call is missing.
+
+The SR readers' miss on "Once bytesReplicated equals …, the data are fully there" is left unfixed: the trial fails under either reading, and the reader is shared with design/12's record.
+
+### PASS of 3, after classification
+
+| Config | V1 | V3 | V3n | V3o | SR1 | SR1i | SR1n | ST1 | ST2 | ST3 | ST4 | ST4i | ST5 | ST6 | ST7 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| haiku-low | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 3 |
+| qwencoder | 1 | 3 | 3 | 2 | 0 | 0 | 1 | 2 | 3 | 3 | 2 | 3 | 3 | 3 | 3 |
+
+77 of 90 pass. The control passes each of its 8 trials (1 of 1 per scenario) once S1 and S4 are fixed. **No new scenario is DESIGN SUSPECT**: the control's two NEEDS_REVIEW were reader misreads, and its rescored trials pass every check. Pass rates are reported; they do not gate.
+
+### Per tool
+
+| Tool | Change | Direct (scored trials, pair) | Supporting (target-matched call) | Tool-attributable findings | Verdict |
+|---|---|---|---|---|---|
+| `add_file_qos_requirement` | description: `expression` | ST1: 6 | none | **SF1, new** | **AT RISK** |
+| `get_file_distribution` | description | ST6: 6 | 11 of 18 (V1, SR1, SR1i) | a known misreading recurs (below) | **STAYS STABLE** |
+| `get_file_qos_summary` | description | ST3, ST5: 12 | 18 of 18 (V3, V3n, V3o) | a known misreading recurs (below) | **STAYS STABLE** |
+| `get_file_qos_summary` | result: `replicas_num` | ST3, ST5: 12; shape check applied in 12 (control 2), failed in 0 | none | none | **STAYS STABLE** |
+| `get_qos_requirement` | error hints | ST2: 6, all pass | 0 of 12 (ST3, ST5) | none | **NOT VERIFIED**: no exposure |
+| `get_transfer` | description | ST4, ST4i: 12 | none | F2 (design/12) recurs, known | **STAYS STABLE** |
+| `list_space_providers` | description | ST7: 6 | 19 of 24 (SR1, SR1i, SR1n, ST1) | none | **STAYS STABLE** |
+| `list_space_transfers` | description | ST4: 6 | none | none | **STAYS STABLE** |
+
+- **The hint row.** No trial of either run was shown `get_qos_requirement`'s id-guard hint: the run made 10 calls of the tool (9 by the pair, 1 by the control), all with a real rule id, all successful. So its wording stays **not verified**, and design/10's "Transition" stays open for it, as the rule above says.
+- **Known, by the letter of rule 2.** The three recurring misreadings below are known because a validation record of 2026-11-22 (design/12, design/13) documents the same tool and cause. Those records ran at the same surface (K1 `9192d3f5…`) a day before this one, and the PPAM K=8 run had no Qwen3-Coder; so they show the misreadings are not new to this run, not that they predate the rewording. That is a decision for the operator (below).
+
+### Classification of every non-pass
+
+**Tool-attributable (L3a)**
+
+- **SF1 (new; `add_file_qos_requirement`): a provider's name in the `providerId=` operand, accepted silently.** Qwen3-Coder ST1 #0: [0] `add_file_qos_requirement(expression "providerId=local", replicas_num 1)` → `{"qosRequirementId": …}`, no hint; [1] the summary: `"status": "impossible"`. The answer reads the impossible rule as a site problem ("Your local site might not support the space that contains this file") and the file never arrives (0 of 262144 bytes after the settle). FAIL.
+  - *The same slip, elsewhere in the run.* Qwen3-Coder ST1 #1 made it too ([0] `providerId=local`, `impossible`), then listed the providers on its own and added a rule by id ([7]): PASS. In SR1i #0, #1 and #2 the same model passed the name `local` as `schedule_file_replication`'s target and drew "Pass its id '…', not its name"; its next schedule passed an id each time (#1 and #2 the site's at once; #0 the owner's after listing the providers, then the site's). In the gate-4 run, design/12 counts ten trials that drew this hint, each followed by a schedule with the id.
+  - *The evidence bar:* one family (Haiku and the control listed the providers first and used the id in all their ST1 trials), so the third clause: one model with a traced mechanism. The trace runs name → silent acceptance → `impossible` → a wrong diagnosis, and the in-run contrast shows the same model correcting the same slip at once wherever a tool's error text named it. That is design/10's "a wrong argument the schema or error text could have prevented". It is not F2's shape (an instruction not followed): here the argument was taken without a word.
+  - *New:* no earlier record has a provider name as a `providerId` value of a QoS expression. M-8 (the empirical findings) and PPAM A5 concern operand keys that do not exist (`cloud=EU`), not this.
+  - *Context:* the reworded `expression` text is the one this case is about (ST1, above). The federation's provider names, `local` and `owner`, read like keywords and may invite the slip; a site-like name (`providerId=vistula-dc`) is the same mistake.
+- **Known, logged in their records, recurring here (not new):**
+  - **`get_file_qos_summary`: `"status": "fulfilled"` with no requirements read as "fully stored here".** Qwen3-Coder V1 #2 ([0]–[5]: "The QoS summary for each file shows a status of "fulfilled" with no requirements, indicating that each file is completely replicated locally"), V1 #0 ([7]–[12]), SR1 #0 ([5]: "the data should already be fully present at the local site"), SR1i #2 ([4]). Known: design/13, "Results", V1, Qwen3-Coder #5 and #7 (logged there as L3b, for this re-run). The V1 answers were false (four of the six files had 0 local bytes); the SR1 and SR1i claims were true when made but unread.
+  - **`get_file_distribution`: the 0-byte entry of the local provider read as a full copy.** Qwen3-Coder V1 #0 ([6]: "Each file has the correct virtual size matching its physical size at the local provider"; `physicalSize` 0) and SR1n #0 ([2]: "the file is already present at the "local" provider with a full physical size of 262144 bytes"). Known: design/12, "Results", SR1o, Qwen3-Coder #0–#2, #4–#7.
+  - **F2, completion claimed off the transfer's status (logged against `get_transfer`).** Qwen3-Coder SR1i #1 ("I've checked the transfer status and can confirm … Bytes replicated: 12,425,587 (which matches the file size)"; the file is 134,217,728 bytes) and SR1i #2 ("the replication transfer is complete"). Known: design/12, "Results", F2 (Qwen3-Coder SR1i #1, #3, #5, #6).
+
+  Each is one family here, as in its record, and none has the in-run contrast SF1 has. Whatever their class, they are known and move no verdict.
+
+**Model capability (L3b)**
+
+- Qwen3-Coder SR1 #1, #2 and SR1i #0: one status read, then stopped ("Since I cannot wait or poll multiple times in this environment", SR1 #1; SR1i #0 at "replicating, about 50%"). The data were in fact already whole at each answer. As design/12's SR1 Qwen3-Coder #2 and #4.
+- Qwen3-Coder SR1n #0, #1: a copy to `owner` "instead", after the providers listing ("the closest we can get to fulfilling your request since "oder-dc" is not a recognized provider", #0). As design/12's SR1n.
+- Qwen3-Coder V3o #0: found the rule's provider id, did not match it to the site ("we cannot confirm if it's the local site without knowing the local provider ID"). As design/11's Qwen3-Coder V3o #1.
+- Qwen3-Coder ST4 #2: one listing with the default state, `ongoing` ([0] → no transfers), "There are no transfers found for the space", and the turn ended on a tool call begun as text (`<tool_call>`). In all three of its ST4 trials the first listing used the default; in #0 and #1 it listed `ended` next and answered rightly. Logged as an observation for `list_space_transfers`: its empty answer does not say that only ongoing transfers were listed.
+
+**Harness (L1)** S1–S6, above. **Deployment artefacts (L2):** the control's 6 ADAPTER_ERROR records, re-run.
+
+### What the protocol asks next
+
+- **`add_file_qos_requirement`.** By design/10, "Staying stable", a new tool-attributable failure sends the tool back to experimental. The fix the trace points to is in the tool: refuse (or answer with a hint) a `providerId=` operand whose value is the name of a provider of the file's space, as `schedule_file_replication` does ("Pass its id …, not its name"). That is a change to its error hints, so ST1 then re-runs on the smoke pair at K=3. Whether the tool returns to stable after that re-run, or goes through the five gates again as an experimental tool, is the operator's call.
+- **`get_qos_requirement`'s hints:** not verified; the Transition item stays open.
+- **The other six rows:** cleared, with "known" as rule 2 defines it.
+
 ## Review of 2026-11-22 (external, jailed)
 
 An external frontier-model review of the first version answered "not ready". Each finding and its resolution:
@@ -166,6 +264,8 @@ An external frontier-model review of the first version answered "not ready". Eac
 ## To verify on the first live run
 
 `make valfed-check` covers 1–6 before any model runs:
+
+**Answered by the run of 2026-11-23.** `make valfed-check` built ST3's to ST6's fixtures, and no smoke trial was a RESET_FAIL, so the preconditions behind 1–6 held: the ended transfers were listed newest first (1), the transfer bodies named the file and the site (2), the rules read back and evaluated as intended (3, 4), the `split` file left the quarter between its parts held by neither provider (5: `owner` [0, 131072], `local` [196608, 65536]), and the spaces resolved by name (6). For 7, 25.0 reports such a rule as `impossible` (Qwen3-Coder's `providerId=local` in ST1 #0 and #1), and the file never arrives.
 
 1. **The order of the ended-transfer listing.** ST4 assumes 25.0 lists ended transfers newest first. If it does not, every ST4 trial is a RESET_FAIL and `list_space_transfers` has no direct scenario until ST4 is redesigned; ST4i still covers `get_transfer`.
 2. **The `get_transfer` body.** The swagger's `TransferStatus` names `fileId`, `filePath`, `spaceId` and `replicatingProviderId`; the fixture reads them.

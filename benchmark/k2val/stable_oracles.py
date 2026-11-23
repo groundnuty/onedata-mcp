@@ -104,6 +104,37 @@ _NOT_SET_UP = re.compile(
     re.I,
 )
 _TRANSFER = re.compile(r"\btransfer", re.I)
+# The rule's (or its summary's) status read as pending: "the QoS summary still says pending",
+# "its status still reads pending", "the rule showed pending on the first check".
+_RULE_STATUS = re.compile(
+    r"\b(?:status|summary|rule|requirement|qos)\b[^.;:\n]{0,40}?"
+    r"\b(?:says?|said|reads?|showed|shows?|shown|reports?|reported|was|is|still)\b"
+    r"[^.;:\n]{0,20}?\b(?:pending|in progress)\b",
+    re.I,
+)
+# ... explained away in the same sentence: as a past reading ("on the first check",
+# "initially"), as lagging behind the data ("looks like a lag … rather than missing data", "even
+# though the file attributes already show the data present"), or as about to change ("should
+# flip to fulfilled"). Such a status does not undo the data said to be fully there. A bare "but
+# the rule is still pending" beside a data claim explains nothing: that answer says both.
+_STATUS_EXPLAINED = re.compile(
+    r"\b(?:on|at) the first\b|\bat first\b|\binitially\b|\bearlier\b|\blag(?:s|ging)?\b"
+    r"|\brather than\b|\beven though\b|\balthough\b|\balready\b"
+    r"|\b(?:will|should|may|might)\s+(?:\w+\s+)?(?:flip|update|change|catch up|turn)\b",
+    re.I,
+)
+
+
+def _st1_clauses(answer: str) -> list[tuple[str, bool]]:
+    """`sr_oracles._clauses`, each with whether its sentence explains a pending rule status
+    away (`_STATUS_EXPLAINED`)."""
+    out = []
+    for sentence in sr_oracles._SENTENCE.split(sr_oracles._EMPHASIS.sub("", answer)):
+        explained = bool(_RULE_STATUS.search(sentence) and _STATUS_EXPLAINED.search(sentence))
+        out.extend(
+            (c.strip(), explained) for c in sr_oracles._CLAUSE.split(sentence) if c and c.strip()
+        )
+    return out
 
 
 def _data_words(local: str) -> re.Pattern[str]:
@@ -117,8 +148,11 @@ def read_rule_task(answer: str, local: str = "vistula-dc", owner: str = "nordic-
     data are fully at the site, the work is done or the rule is met, with no negation or hedge
     in it, not about another site, and not a transfer's status alone; and no clause says it is
     not done. SAYS_NOT_DONE when one says the data are not (yet) fully there, or the rule was
-    not set up (failed, refused, impossible), and none says done. Else OTHER."""
-    clauses = sr_oracles._clauses(answer)
+    not set up (failed, refused, impossible), and none says done. Else OTHER. A pending rule
+    status that its sentence explains away (`_STATUS_EXPLAINED`) is a "not done" only where no
+    clause says done; the rest of its clause is still read."""
+    tagged = _st1_clauses(answer)
+    clauses = [c for c, _ in tagged]
     data = _data_words(local)
     done = any(
         _DONE.search(c)
@@ -128,13 +162,16 @@ def read_rule_task(answer: str, local: str = "vistula-dc", owner: str = "nordic-
         and not (_TRANSFER.search(c) and not data.search(c))
         for c in clauses
     )
-    not_done = any(
-        sr_oracles._NOT_YET.search(sr_oracles._PAST_STATUS.sub(" ", c)) or _NOT_SET_UP.search(c)
-        for c in clauses
-    )
+
+    def says_not_yet(clause: str, explained: bool) -> bool:
+        body = sr_oracles._PAST_STATUS.sub(" ", clause)
+        return bool(sr_oracles._NOT_YET.search(_RULE_STATUS.sub(" ", body) if explained else body))
+
+    not_done = any(says_not_yet(c, e) or _NOT_SET_UP.search(c) for c, e in tagged)
+    explained_status = any(e and _RULE_STATUS.search(c) for c, e in tagged)
     if done and not not_done:
         return SAYS_DONE
-    if not_done and not done:
+    if (not_done or explained_status) and not done:
         return SAYS_NOT_DONE
     return OTHER
 
@@ -145,12 +182,15 @@ _NUMBER_WORDS = {"one": 1, "single": 1, "a single": 1, "two": 2, "three": 3, "fo
 _NUM = r"(\d+|one|two|three|four|a single|single)"
 _COPIES = r"(?:cop(?:y|ies)|replicas?)"
 # the rule's own field: "replicas_num: 2", "replicasNum = 2", "replicas_num is 2", "replicas:
-# 2", "number of copies: 2"; not "two replicas (one at each site)", whose "(one" is no field
+# 2", "number of copies: 2", "Number of Copies Requested: 2", "copies required: 2"; not "two
+# replicas (one at each site)", whose "(one" is no field
 _FIELD_NAME = r"\b(?:replicas?_?num(?:ber)?|replicasNum|replica_?count)\b"
 _FIELD_SEP = r"[\s\"'`]*(?:[:=]|\bis\b|\bof\b)[\s\"'`]*"
+_ASKED_WORD = r"(?:requested|required|asked for|needed|wanted)"
 _FIELD = re.compile(
     _FIELD_NAME + r"[\s\"'`:=]*(?:is\s+)?(\d+)\b"
-    r"|\b(?:replicas?|replica count|number of (?:copies|replicas))\b" + _FIELD_SEP + _NUM + r"\b",
+    r"|\b(?:replicas?|replica count|number of (?:copies|replicas)(?:\s+" + _ASKED_WORD + r")?"
+    r"|(?:copies|replicas)\s+" + _ASKED_WORD + r")\b" + _FIELD_SEP + _NUM + r"\b",
     re.I,
 )
 # "2 copies", "two replicas", "a single copy"
@@ -238,6 +278,26 @@ def _name_list(clause: str, names: tuple[str, ...]) -> list[str]:
     return here if here and not _LIST_FILLER.sub("", rest) else []
 
 
+# A list item's marker standing alone, split off by the clause cut: "1.", "2)", "-", "*".
+_ITEM_MARK = re.compile(r"\A\W*(?:\d+[.)])?\W*\Z")
+
+
+def _item_count(parts: list[str], name: str, names: tuple[str, ...]) -> str | None:
+    """A list item labelled by its one name, whose count follows in the clauses after it
+    ("1. A - Has a requirement with replicas_num = 1"): "one" or "more" when that text states
+    exactly one kind of count (a denied "one" is "more", as in a clause); None otherwise."""
+    k = next((i for i, p in enumerate(parts) if name in p), None)
+    if k is None or not all(_ITEM_MARK.match(p) for p in parts[:k]):
+        return None
+    if _name_list(parts[k], names) != [name]:
+        return None
+    rest = " ".join(parts[k + 1 :])
+    one, more = _ONE_COPY.search(rest), _MORE_COPIES.search(rest)
+    if bool(one) == bool(more):
+        return None
+    return "one" if one and not _DENY.search(rest) else "more"
+
+
 def read_single_copy(answer: str, names: tuple[str, ...]) -> frozenset[str] | None:
     """ST3: the names the answer gives as files whose rules ask for one copy only.
 
@@ -280,6 +340,13 @@ def read_single_copy(answer: str, names: tuple[str, ...]) -> frozenset[str] | No
                 heading = "more"
             counted = counted or bool(one or more)
             continue
+        if len(here_line) == 1:  # "1. A - Has a requirement with replicas_num = 2"
+            parts = [p for p in _CLAUSE.split(line) if p and p.strip()]
+            item = _item_count(parts, here_line[0], names)
+            if item is not None:
+                counted = True
+                (claimed if item == "one" else excluded).update(here_line)
+                continue
         for clause in _CLAUSE.split(line):
             if not clause or not clause.strip():
                 continue
@@ -323,11 +390,17 @@ _TRANSFER_ID = re.compile(
     r"(?P<id>(?=[\w-]*\d)[\w-]+)(?![\w/-])",
     re.I,
 )
-# An id labelled as something else: "provider id X", "file id: X", "fileId=X", "space X".
+# An id labelled as something else: "provider id X", "file id: X", "fileId=X", "space X", and
+# with an id word, "the replicating provider ID is X" (not "the file is X": no id word).
+_OTHER_NOUN = (
+    r"(?:providers?|files?|spaces?|storages?|qos|requirements?|rules?|users?|director(?:y|ies)"
+    r"|folders?)"
+)
+_OTHER_FIELD = r"(?:fileId|providerId|spaceId|userId|replicatingProviderId|storageId)"
 _OTHER_LABEL = re.compile(
-    r"\b(?:providers?|files?|spaces?|storages?|qos|requirements?|rules?|users?|director(?:y|ies)"
-    r"|folders?)(?:\s*_?id|Id|\s+ID)?\b[\s:=`'\"*(]*$|\b(?:fileId|providerId|spaceId|userId|"
-    r"replicatingProviderId|storageId)\b[\s:=`'\"*(]*$",
+    r"\b" + _OTHER_NOUN + r"(?:\s*_?id|Id|\s+ID)?\b[\s:=`'\"*(]*$"
+    r"|\b" + _OTHER_NOUN + r"(?:\s*_?id|Id|\s+ID)\s+(?:is|was)[\s:=`'\"*(]*$"
+    r"|\b" + _OTHER_FIELD + r"\b(?:\s+(?:is|was))?[\s:=`'\"*(]*$",
     re.I,
 )
 _NO_TRANSFER = re.compile(
@@ -385,8 +458,11 @@ def read_transfer_ids(answer: str, who: Any = None) -> frozenset[str] | None:
             found[m.group("id")] = max(found.get(m.group("id"), -1), m.start("id"))
     if len(found) > 1:
         last = max(found.values())
-        start = max(text.rfind(c, 0, last) for c in ".\n!?") + 1
-        if _CONCLUSION.search(text[start:last]):  # what leads up to the last id given
+        # what leads up to the last id given: on its line, or, for an id on a line of its own,
+        # the text before it ("... the ID of the transfer is:\n\n<id>")
+        lead = text[:last].rstrip()
+        start = max(lead.rfind(c) for c in ".\n!?") + 1
+        if _CONCLUSION.search(lead[start:]):
             return frozenset({max(found, key=lambda t: found[t])})
     if found:
         return frozenset(found)
@@ -438,7 +514,9 @@ _CAN_ALL = re.compile(
     r"|\b(?:are|is) (?:all|both) (?:already )?(?:met|satisfied|fulfilled)\b"
     r"|\bboth (?:are )?(?:already )?(?:met|satisfied|fulfilled)\b"
     r"|\ball (?:of them )?(?:are )?(?:already )?(?:met|satisfied|fulfilled)\b"
-    r"|^\W*yes\b",
+    r"|^\W*yes\b"
+    # the brief's question restated, then answered: "Can they all be met at once? Yes."
+    r"|\b(?:met|satisfied|fulfilled)\b[^?.\n]{0,25}\?\W*yes\b",
     re.I | re.M,
 )
 # "compatible", unless denied before it in its clause ("are not compatible", "aren't compatible")
@@ -539,7 +617,33 @@ def read_shares(
         share = _PERCENT.search(clause)
         if len(named) == 1 and share:
             pairs.add(f"{named[0]}={round(float(share.group(1)))}")
+    pairs |= _item_shares(text, sites)
     return frozenset(pairs) or None
+
+
+_SUB_ITEM = re.compile(r"\A\s*(?:[-*•]|\d+[.)])\s+")
+
+
+def _item_shares(text: str, sites: dict[str, re.Pattern[str]]) -> set[str]:
+    """A share given under the item that names its site ("1. Site: local" with "   - Percentage
+    of Data: 25%" below it): the first percentage among its sub-items, for the one site the
+    item line names with no percentage of its own. A blank line, a line naming another site or
+    both, or a line that is not a list item ends the item ("The remaining 25% ..." is not the
+    site's)."""
+    out: set[str] = set()
+    current: str | None = None
+    for line in text.splitlines():
+        named = [site for site, pattern in sites.items() if pattern.search(line)]
+        if named:
+            current = named[0] if len(named) == 1 and not _PERCENT.search(line) else None
+            continue
+        if not line.strip() or not _SUB_ITEM.match(line):
+            current = None
+            continue
+        if current is not None and (share := _PERCENT.search(line)):
+            out.add(f"{current}={round(float(share.group(1)))}")
+            current = None  # one share per site item
+    return out
 
 
 # --- ST7: the sites that support the space ----------------------------------------------------
@@ -1099,7 +1203,10 @@ ST_READERS: dict[str, Callable[[str, Any], object]] = {
     "ST6": lambda a, w: read_shares(a, w.local_name, w.owner_name),
     "ST7": lambda a, w: read_sites(a, w),
 }
-# The reading of a right answer; None for ST4, where it is the trial's own transfer id.
+# The reading of a right answer; None where it depends on the trial: ST4's is its own transfer
+# id, and ST6's and ST7's name the federation's sites, whose names differ between federations
+# (the validation federation's are `owner` and `local`), so a fixed pair would list every right
+# answer there as a wrong one.
 ST_RIGHT: dict[str, object] = {
     "ST1": SAYS_DONE,
     "ST2": "TWO",
@@ -1107,6 +1214,6 @@ ST_RIGHT: dict[str, object] = {
     "ST4": None,
     "ST4i": frozenset({ST4_FILE}),
     "ST5": (CAN_ALL, ST5_COUNTS),
-    "ST6": frozenset({"nordic-marine-dc=50", "vistula-dc=25"}),
-    "ST7": frozenset({"nordic-marine-dc", "vistula-dc"}),
+    "ST6": None,
+    "ST7": None,
 }
