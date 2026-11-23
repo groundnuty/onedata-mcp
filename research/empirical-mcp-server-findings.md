@@ -1707,8 +1707,16 @@ placing, waiting) ends within `min(deadline_s, cap)`; the final
 read-back then takes at most 20 s, scaled down with the cap; `waited_s`
 is measured at return; the description and `deadline_s` say so.
 
+The verification round found a third half: selecting the files was
+pure work with no deadline. 20 items of 400 date ranges over a
+20,000-file listing ran for tens of seconds on a 1 s budget (78 s on
+the reviewer's machine). Each listing is now indexed once, a date range
+is a search of that index, the deadline is checked every 1024 files,
+and an extent may give at most 400 date ranges in all.
+
 **Decision:** Fixed (this PR, the operator's decision 2 and the
-decisions after the external review; design/18, decisions 2 and 5).
+decisions after the external review and its verification; design/18,
+decisions 2 and 5; design/17, gate 1).
 
 ---
 
@@ -1805,9 +1813,21 @@ clause; and a claim that the other files are not here is read
 rubric says the same, so the judge's reading matches (its hash changed:
 stored verdicts are not reused).
 
+The verification round found five more: "Of the five files, some are
+still being written" read as `#5`; "On attempt 4 ..." as `#4`; an "and"
+between two coordinated file names split them and lost the count; a
+ready claim at this site that also named a replica elsewhere was not
+read as one; and "the other three are ready here", false in V5, was
+caught by neither reader. Partitive wholes, tries and ordinals are no
+counts now; an "and" splits only when its right side has its own verb;
+a claim at this site stands beside a replica elsewhere; and
+`others:ready` is read, given to the judge, and checked against the
+state at the answer.
+
 **Decision:** Fixed (this PR, the operator's decision 5 and the
-decisions after the external review). V5's earlier results remain no
-evidence; the readiness tools' gate-4 run re-runs V5.
+decisions after the external review and its verification). V5's
+earlier results remain no evidence; the readiness tools' gate-4 run
+re-runs V5.
 
 ---
 
@@ -1905,7 +1925,13 @@ cause; the hints list the spaces there are and a real example; a
 malformed list of spaces is an error; one leading and one trailing
 slash are dropped.
 
-**Decision:** Fixed (this PR, and after the external review).
+The verification round found one more: when a hold's read-back timed
+out, the advice said the file "is not held there". It now says the
+hold "could not be confirmed", and "not held" only for a refusal, a
+rejection, a hold gone or one not placed in time.
+
+**Decision:** Fixed (this PR, after the external review and its
+verification).
 
 ---
 
@@ -2033,6 +2059,60 @@ trial draws it (design/10).
 *Numbering: master's last entry is M-38, and M-39 to M-45 are written
 on another branch (the readiness tools), so this is M-46, after the
 highest number present.*
+
+---
+
+## M-47. The panel read what a readiness call did from its arguments
+
+**Surface:** the validation panel's scoring of the readiness tools
+(`benchmark/k2val/scoring.py`, `readiness_oracles.py`, `recording.py`,
+`mcp_http.py`): the harness, not a tool.
+
+**Behaviour:** the external review's verification round found the
+scorer still inferring a call's writes and its coverage from the call's
+arguments, and placing what the call recorded by display path:
+- an empty record (a call that resolved nothing, such as a
+  configuration timeout) and a trace from before the record both
+  serialised as None; the scorer then read the extent, so a call that
+  checked no file met the required call, and a call that wrote nothing
+  was scored as a write outside the trial;
+- a removed hold was placed inside the trial by a LATER call's record;
+- an audited write was placed by its path alone: two spaces of one name
+  share relative paths, so a write to the other space read as inside;
+- a cancelled call (not ok, no error) had its recorded writes dropped,
+  and the in-process recorder let the cancellation through unrecorded;
+- RCi credited files that a name-addressed item resolved because
+  another item named a space by id; RCp dropped unchecked files before
+  its scope check;
+- a baseline without its rule ids read as "no rule".
+
+**Why this matters:** each one can certify a trial the evidence does
+not support: an outside write scored inside, a required call met by a
+call that checked nothing. The panel's verdict is what promotes a tool.
+
+**How it was found:** the external review's verification round
+(design/17, design/18, "External review").
+
+**Evidence:** the reproductions in `test/unit/k2val/
+test_readiness_scenarios.py` ("verification round"), each a failing
+test first.
+
+**Fix:** every readiness call's record starts with empty `resolved`
+and `writes` lists, set by the host before the call and kept through
+errors and cancellation; each entry names its file by the space's id
+and the file's id, and a resolved file by the extent items that
+selected it. An absent record means only a trace from before the
+record: never read from arguments, it is UNVERIFIED (a harness
+outcome). Recorded writes are read whatever the call's status and
+placed by file id and space id against the trial's own files. A removed
+hold is placed only by the call that created it or a record that ended
+before the removal began. A cancellation is recorded as an outcome not
+confirmed. RCi counts only files an id-addressed item resolved; RCp and
+REp check scope over every file selected. A baseline without rule ids
+is unusable.
+
+**Decision:** Fixed (this PR). Stored artefacts made before the record
+rescore every readiness call as UNVERIFIED.
 
 ---
 
