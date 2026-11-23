@@ -3333,3 +3333,64 @@ async def test_a_hold_that_vanished_before_the_answer_is_not_listed(fed: Fed) ->
 
     assert gone not in result["held"]["qos_requirement_ids"]
     assert held_summary(result)["files"] == len(result["held"]["qos_requirement_ids"])
+
+
+# ---------------------------------------------------------------------------
+# Ids in request paths go through `id_segment` (one encoded segment; empty, `.`, `..` and `/`
+# refused before any request), as in every other tool since M-14's fix.
+# ---------------------------------------------------------------------------
+
+
+def _raw_paths(httpx_mock: HTTPXMock) -> list[str]:
+    return [r.url.raw_path.decode() for r in httpx_mock.get_requests()]
+
+
+@pytest.mark.asyncio
+async def test_a_provider_id_is_one_encoded_segment_of_the_onezone_lookup(
+    fed: Fed, httpx_mock: HTTPXMock
+) -> None:
+    run = readiness._Run(LOCAL, readiness._monotonic() + 60)
+
+    assert await run.provider_online("p?x#y z") is True
+
+    assert "/api/v3/onezone/providers/p%3Fx%23y%20z" in _raw_paths(httpx_mock)
+
+
+@pytest.mark.parametrize("provider_id", ["", ".", "..", "p/../../user", "a/b"])
+@pytest.mark.asyncio
+async def test_a_provider_id_that_cannot_be_a_segment_is_not_looked_up(
+    fed: Fed, httpx_mock: HTTPXMock, provider_id: str
+) -> None:
+    run = readiness._Run(LOCAL, readiness._monotonic() + 60)
+
+    assert await run.provider_online(provider_id) is True  # best effort: taken as online
+    assert not any("/providers/" in p for p in _raw_paths(httpx_mock))
+
+
+@pytest.mark.asyncio
+async def test_a_rule_id_is_one_encoded_segment_when_a_hold_is_confirmed(
+    fed: Fed, httpx_mock: HTTPXMock
+) -> None:
+    f = fed.add("a.nc", 100, local="full", owner="full")
+    readiness._rules[f.fid] = "q?1#2"
+    run = readiness._Run(LOCAL, readiness._monotonic() + 60)
+    info = readiness.FileInfo(f.fid, f.path, SPACE_ID)
+
+    await readiness._rule_confirmed(run, info)
+
+    assert "/api/v3/oneprovider/qos_requirements/q%3F1%232" in _raw_paths(httpx_mock)
+
+
+@pytest.mark.parametrize("rule_id", [".", "..", "q/../../configuration"])
+@pytest.mark.asyncio
+async def test_a_rule_id_that_cannot_be_a_segment_is_not_confirmed_and_not_requested(
+    fed: Fed, httpx_mock: HTTPXMock, rule_id: str
+) -> None:
+    f = fed.add("a.nc", 100, local="full", owner="full")
+    readiness._rules[f.fid] = rule_id
+    run = readiness._Run(LOCAL, readiness._monotonic() + 60)
+
+    assert (
+        await readiness._rule_confirmed(run, readiness.FileInfo(f.fid, f.path, SPACE_ID)) is False
+    )
+    assert not any("/qos_requirements/" in p for p in _raw_paths(httpx_mock))

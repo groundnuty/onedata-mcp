@@ -48,7 +48,13 @@ from onedata_mcp.api.files import (
 from onedata_mcp.api.qos import add_qos_requirement, get_qos_requirement
 from onedata_mcp.api.transfers import get_transfer, list_space_transfers
 from onedata_mcp.config import get_oneprovider_config, get_onezone_config
-from onedata_mcp.utils import OnedataApiError, OnedataError, OnedataInvalidSpaceError, request
+from onedata_mcp.utils import (
+    OnedataApiError,
+    OnedataError,
+    OnedataInvalidSpaceError,
+    id_segment,
+    request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -625,8 +631,11 @@ class _Run:
 
     async def _lookup_online(self, provider_id: str) -> bool:
         try:
+            # The id comes from a distribution answer: one encoded path segment, and an id
+            # that cannot be one (empty, `.`, `..`, a `/`) is not looked up (ValueError).
+            segment = id_segment(provider_id, "provider id")
             response = await self.call_in_time(
-                request, get_onezone_config(), "GET", f"/providers/{provider_id}"
+                request, get_onezone_config(), "GET", f"/providers/{segment}"
             )
             return response["body"].get("online") is not False
         except Exception:  # noqa: BLE001 - best effort: never fail a tool on this lookup
@@ -1413,10 +1422,12 @@ async def _rule_confirmed(run: _Run, file: FileInfo) -> bool:
     if rule_id is None:
         return False
     try:
+        # One encoded path segment; an id that cannot be one is not confirmed (ValueError).
+        segment = id_segment(rule_id, "QoS requirement id")
         response = await run.call_in_time(
-            request, get_oneprovider_config(), "GET", f"/qos_requirements/{rule_id}"
+            request, get_oneprovider_config(), "GET", f"/qos_requirements/{segment}"
         )
-    except (OnedataApiError, TimeoutError):
+    except (OnedataApiError, TimeoutError, ValueError):
         return False
     body = response.get("body") if isinstance(response, dict) else None
     return (
