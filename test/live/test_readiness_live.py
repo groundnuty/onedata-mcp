@@ -19,6 +19,13 @@ What it settles (the points design/07-readiness-tools.md marks UNVERIFIED):
 - that a file written through this provider reads as ready, and is then held by a rule
   that shows up in the file's QoS summary.
 
+Since the promotion package (design/17, design/18; not yet run, marked TODO(first live run)):
+
+- a failure path of each tool: a declared file that is not there is an unresolved item with its
+  hint, and a dataset above its space is refused before any request;
+- the answer of ensure_readiness lists the ids of the holds it placed, each is the file's QoS
+  requirement, and removing it by that id releases the hold (the cleanup uses those ids).
+
 Not covered here, on purpose: whether a rule keeps up with a file still being written, and
 whether eviction is refused. Those need a second provider writing; run them by hand on the
 two-provider Compose federation and decide whether `_nudge` needs a body.
@@ -121,3 +128,42 @@ async def test_the_hold_expression_is_accepted_and_the_file_is_held(
     }
     (rule_id,) = readiness._rules.values()
     assert rule_id in (await get_file_qos_summary(path))["requirements"]
+
+
+@pytest.mark.asyncio
+async def test_a_file_that_is_not_there_is_unresolved_and_says_what_to_give(
+    space: str, probe_file: tuple[str, str]
+) -> None:
+    """A failure path (gate 3). TODO(first live run): the text as 25.0 leads to it."""
+    missing = "readiness-live-no-such-file.txt"
+
+    result = await readiness.check_readiness([{"dataset": space, "files": [missing]}])
+
+    print(f"unresolved: {result['unresolved']!r}")
+    assert result["ready"] is False and result["files"] == 0
+    assert result["unresolved"] == [
+        f"file '{missing}' in '{space}' not found: give the exact file name, or its absolute path."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_dataset_above_its_space_is_refused_before_any_request(space: str) -> None:
+    with pytest.raises(ValueError, match=r"empty, '\.' or '\.\.' component"):
+        await readiness.check_readiness([{"dataset": f"/{space}/.."}])
+
+
+@pytest.mark.asyncio
+async def test_the_answer_lists_the_hold_ids_and_removing_one_releases_its_hold(
+    space: str, probe_file: tuple[str, str]
+) -> None:
+    """TODO(first live run): the hold's id as the answer gives it, and its removal."""
+    name, path = probe_file
+
+    result = await readiness.ensure_readiness([{"dataset": space, "files": [name]}], 60)
+
+    print(f"held: {result['held']!r}")
+    (hold_id,) = result["held"]["qos_requirement_ids"]
+    assert hold_id in (await get_file_qos_summary(path))["requirements"]
+    await remove_qos_requirement(hold_id)
+    readiness.reset_state()  # nothing left for the fixture's cleanup
+    assert hold_id not in (await get_file_qos_summary(path))["requirements"]

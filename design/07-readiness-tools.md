@@ -166,6 +166,13 @@ completed, skipped and aborting transfers do not count.
 
 ## `ensure_readiness(extent, deadline_s)` (write: places and holds data)
 
+> **Since 2026-11-23** (design/18, the operator's decisions): one call waits at
+> most 150 s by default and ends within 170 s (`ENSURE_GRACE_S` 20 s), under a
+> common MCP client's ~180 s; the env may still raise the wait to 240 s. The
+> answer's `held` also lists the ids of the holds (`qos_requirement_ids`), and
+> neither tool's description or answer names the other tool. The text below is
+> the original spec.
+
 `deadline_s` is an int, 1–86,400: how long the agent is willing to wait in
 total. **One call waits at most `min(deadline_s, MAX_WAIT_S)`, counted from the
 call's start**: resolving and placing use up part of it.

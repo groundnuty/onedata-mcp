@@ -451,7 +451,8 @@ Nothing should change in V1, V3n, V3o, V4, V5, SR1n, SR1o, FA, FAi, FAn, LC, LCn
    - federation: all five locally covered at the end.
    - mcp: the answer says ready, and the local copy covered all five when it was given (else "premature claim").
 7. **V7 ensure, arriving** (K2). Five files: three S0, two S2 whose writing finishes 6 minutes after the first turn.
-   That is longer than one 240 s `ensure_readiness` call, so the agent must call again.
+   That is longer than one `ensure_readiness` call (240 s at first, 150 s since design/18), so the agent must call
+   again.
    - Same brief as V6.
    - federation: all five covered locally and complete.
    - mcp: the answer says ready, given after the writer finished and after local coverage; else "premature claim".
