@@ -1346,8 +1346,6 @@ def test_the_five_minutes_are_scored_in_re_ren_and_rep_alike() -> None:
 
 # --- The external review's verification round: each item reproduced first -------------------
 
-_XF = pytest.mark.xfail(strict=True, reason="verification round: reproduced here, fixed later")
-
 
 def _recorded(tool: str, behaviour):
     """One call of `tool` through the recording proxy, the app doing `behaviour()`."""
@@ -1613,8 +1611,6 @@ def test_verify_the_other_three_said_ready_is_judged_against_the_state(
 
 
 # --- The review's second verification round: reproduced first --------------------------------
-
-_XF2 = pytest.mark.xfail(strict=True, reason="verification round 2: reproduced here, fixed later")
 
 
 def test_verify2_a_file_created_outside_the_trial_is_outside() -> None:
