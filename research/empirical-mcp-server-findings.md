@@ -1618,6 +1618,387 @@ shown to no model: NOT VERIFIED, open.
 
 ---
 
+## M-39. The extent's shape guessed, and an unknown field dropped
+
+**Surface:** `check_readiness`, `ensure_readiness`, their `extent`
+(`onedata_mcp/modules/readiness.py`, `onedata_mcp/api/readiness.py`).
+
+**Behaviour:** the schema gave the item's fields (`dataset`, `files`,
+`date_ranges` with `start` and `end`) with descriptions, but no whole
+example. In the panel's second wave (the jailed CLI legs, design/08)
+one agent guessed `{space, paths, date_from, date_to}`; without
+`dataset` it was refused, and it recovered. Gate 1 then found the
+worse half: a field the item does not have was dropped silently, so
+`{dataset, paths, date_from}` became `{dataset}`, which means the
+whole dataset.
+
+**Why this matters:** a guess that keeps `dataset` succeeded on other
+data than declared. `check_readiness` answered for the whole dataset;
+`ensure_readiness` placed a hold on every file of it.
+
+**How it was found:** the panel's second wave (the guess); gate 1 of
+the readiness tools' promotion (the drop).
+
+**Evidence:** the guess: a second-wave trial whose record is not in
+this repository (the wave's artefacts were not committed). The drop:
+design/17, gate 1 ("An extent item with a field it does not have"),
+and its tests; design/18, decision 1.
+
+**Fix:** the `extent` field's description carries a concrete example
+with both dataset forms, `files` and `date_ranges`, and a test checks
+that it validates. An item or a date range with another field is
+refused by name (`additionalProperties: false`; the API, and through
+an MCP client too: "extent[0] has no field 'date_from', 'paths': its
+fields are dataset, files, date_ranges").
+
+**The external review (design/17, design/18) found three more ways an
+extent was read wider than declared,** each reproduced by a test first:
+`files: []` or `null` (an empty search result passed on) meant the
+whole dataset; a file name matched every file of that name at any
+depth; and a space segment that was one space's id and another's name
+reached the first space listed. Now an empty or null selector is
+refused in the schema (`minItems: 1`, no null) and the API; a name that
+several files share is refused with their paths; an ambiguous space is
+refused with both candidates, and the chosen space is bound to its id
+(its name used in a path only when no other space has it, the directory
+found checked against the id). The union of `files` and `date_ranges`
+is said in the description.
+
+**Decision:** Fixed (this PR, the operator's decision 1, and the
+operator's decisions after the external review). The example and the
+new refusals are NOT VERIFIED until a gate-4 trial shows a model reading
+them (design/17, design/18).
+
+---
+
+## M-40. One `ensure_readiness` call longer than a common client allows
+
+**Surface:** `ensure_readiness`, its wait (`MAX_WAIT_DEFAULT_S`,
+`ENSURE_GRACE_S`) and its description.
+
+**Behaviour:** one call waited up to 240 s and ended within 270 s.
+In the panel's second wave a CLI agent's MCP client cancelled one
+call at 180 s, a common client timeout.
+
+**Why this matters:** a cancelled call returns no answer: the agent
+sees a timeout, not "not ready because still being written", while
+the holds the call placed stay. A weaker model reads a timeout as a
+failure, not as "call again".
+
+**How it was found:** the panel's second wave (the jailed CLI legs).
+
+**Evidence:** the cancelled call: a second-wave trial whose record is
+not in this repository. The bound: design/18, decision 2, and the test
+"a default ensure call ends under a 180 s client timeout"
+(`test/unit/api/test_readiness.py`).
+
+**Fix:** one call waits at most 150 s and ends within 170 s (the grace
+for the final pass 30 → 20 s); the description says "at most about
+2.5 minutes". A longer wait is several calls, as the description and
+the not-ready answer say ("Call again to keep waiting").
+`ONEDATA_MCP_ENSURE_MAX_WAIT_S` may lower the wait, never raise it above
+150 s (the operator, 2026-11-23).
+
+**The external review added a second half:** the caller's `deadline_s`
+bounded the wait only. With `deadline_s` 1, resolving and placing could
+still run to 150 s and the final reads to 170 s, and `waited_s` was
+taken before them. Now every phase (the provider's id, resolving,
+placing, waiting) ends within `min(deadline_s, cap)`; the final
+read-back then takes at most 20 s, scaled down with the cap; `waited_s`
+is measured at return; the description and `deadline_s` say so.
+
+The verification round found a third half: selecting the files was
+pure work with no deadline. 20 items of 400 date ranges over a
+20,000-file listing ran for tens of seconds on a 1 s budget (78 s on
+the reviewer's machine). Each listing is now indexed once, a date range
+is a search of that index, the deadline is checked every 1024 files,
+and an extent may give at most 400 date ranges in all. The second
+verification round found items selecting from a listing already read
+(no request, so no check) running past a 1 s cap (1.46 s): the deadline
+is now checked before each such item and in batches inside each range.
+The cap's hint advised "fewer, wider ranges", which would select, and
+for ensure hold, the files in the gaps; it now advises merging only
+ranges that overlap or touch, or splitting them across calls.
+
+**Decision:** Fixed (this PR, the operator's decision 2 and the
+decisions after the external review and its two verification rounds;
+design/18, decisions 2 and 5; design/17, gate 1).
+
+---
+
+## M-41. Holds with no way to release them
+
+**Surface:** `ensure_readiness`, its answer and its description.
+
+**Behaviour:** the tool places one QoS requirement per file, which
+keeps the file at the provider until it is removed. Its answer named
+the expression, never the requirements' ids, and its description said
+the data are kept "for your run", though nothing ends a hold when a
+run ends.
+
+**Why this matters:** an agent could neither release what it held nor
+tell that it held anything lasting; the words suggested a hold that
+ends by itself.
+
+**How it was found:** the review of the experimental tools before
+their promotion (an observation; no trial failed on it).
+
+**Evidence:** design/18, decision 3.
+
+**Fix:** the answer's `held` lists `qos_requirement_ids` (in the
+files' path order; at most 100, the rest counted), only for holds
+confirmed for that answer. The description: "Each file is held by a
+QoS requirement that keeps it at your provider until that requirement
+is removed by its id; the answer lists the ids." It names no tool.
+The panel places the removal of such a hold inside the trial when the
+call that listed it was (`scoring._qos_attachment`); before, it was an
+unverifiable write, a harness outcome in V6 and V7.
+
+**The external review found `ready` claimed without the holds:** with
+every hold refused, the answer still said `ready: true` and "Ready: ...
+and held there". Now `ready` needs every requested hold confirmed for
+the answer; `data_ready` says whether the data alone are, and
+`hold_failed` counts the missing holds by the cause the provider showed
+(refused, rejected, no answer, not confirmed, gone, out of time), with
+the ids of holds that could not be read back. The note for ids beyond
+the first 100 pointed at each file's QoS summary, which lists other
+people's and inherited requirements too; it now says to call again with
+fewer files. The panel places a hold's removal by the call's own record
+of which file each rule is on (`CallRecord.audit`), no longer by the
+call's extent.
+
+**Decision:** Fixed (this PR, the operator's decision 3 and the
+decisions after the external review; design/18, decision 4). NOT
+VERIFIED until a trial reads the ids. Holds placed by a server process
+that has since restarted are not listed: M-45, open.
+
+---
+
+## M-42. V5's reading: a false count passed, a true example failed
+
+**Surface:** the panel's answer readers for V5 (`benchmark/k2val/`
+`oracles.py`, `rubrics.py`, `reading.py`): the harness, not a tool.
+
+**Behaviour:** both readers took the files an answer names as its
+whole claim. "Not ready: all five files are still being written" (a
+false quantity, no name) passed; "some files are still being written,
+including log_20200102.dat" (one true example) failed.
+
+**Why this matters:** V5 probes the failure the panel was built for
+(writes read as absence, done claimed early); a reading that passes a
+false count and fails a true example measures neither.
+
+**How it was found:** the gate-4 reading review of the second promotion
+wave (design/08, which left V5 out of that wave).
+
+**Evidence:** design/08 ("V5's reading"); the paired tests in
+`test/unit/k2val/test_oracles.py`.
+
+**Fix:** both readers return, beside the label, the names and the
+counts an answer states for the files being written (`#2`, `#all`),
+read from that clause only ("Of the 5 files, 2 are …" counts two). A
+name is an example: each must be one of the files being written. A
+count is a claim about the whole: each must be true. The same rule
+scores RCn and REn. The shared vocabulary lists no passing label
+first, and a ready sentence about some files beside files still being
+written reads as not ready.
+
+**The external review found the readers still lost quantities and
+scope:** a time read as a count ("Not ready after 150 s: ..." gave
+`#150`), a count of the ready files before "because" read as the
+writing count, a count after the phrase not read ("still being written:
+4 files", "for all 5 files"), "all five of the files" read as some, a
+ready sentence that named the source site not read as ready, and "two
+are still being written, the other three are missing" passing in RCn
+(where the three are local). Now times, sizes and tries are dropped
+before counts are read; clauses split on a colon, a dash, "because",
+"since", ", as", and an "and" that joins two clauses; a count after the
+phrase is bound to the files it counts; a ready claim is read per
+clause; and a claim that the other files are not here is read
+(`others:not_ready`) and checked against the state at the answer. The
+rubric says the same, so the judge's reading matches (its hash changed:
+stored verdicts are not reused).
+
+The verification round found five more: "Of the five files, some are
+still being written" read as `#5`; "On attempt 4 ..." as `#4`; an "and"
+between two coordinated file names split them and lost the count; a
+ready claim at this site that also named a replica elsewhere was not
+read as one; and "the other three are ready here", false in V5, was
+caught by neither reader. Partitive wholes, tries and ordinals are no
+counts now; an "and" splits only when its right side has its own verb;
+a claim at this site stands beside a replica elsewhere; and
+`others:ready` is read, given to the judge, and checked against the
+state at the answer.
+
+The second verification round found four more, now fixed: "On attempt
+four ..." read as `#4`; "A total of four files are still being written"
+lost its count; two file names sharing one verb ("... that a and b are
+still being written") were split; and a readiness claim was not bound
+to its stated place ("ready at <owner> and at <local> as well" missed,
+"complete at <owner> and being transferred here" taken as ready here,
+"the other three are ready only at <owner>" taken as `others:ready`).
+
+**Decision:** Fixed (this PR, the operator's decision 5 and the
+decisions after the external review and its two verification rounds).
+V5's earlier results remain no evidence; the readiness tools' gate-4
+run re-runs V5.
+
+---
+
+## M-43. A tool's text named a tool that may not be offered
+
+**Surface:** `ensure_readiness`'s description ("Takes the same `extent`
+as check_readiness"); `check_readiness`'s not-ready answer
+("ensure_readiness can wait for them and place them at your
+provider").
+
+**Behaviour:** each text pointed to the other tool. A read-only token
+prunes `ensure_readiness`, and a client or a scenario may offer one
+tool without the other.
+
+**Why this matters:** design/10's gate 2: a model told about a tool it
+does not have either looks for it or calls it; a client may run a
+named tool that was not offered (design/15 records one such call).
+
+**How it was found:** gate 2 of the readiness tools' promotion.
+
+**Evidence:** design/17 and design/18, gate 2.
+
+**Fix:** `ensure_readiness`'s description says what `extent` is itself.
+`check_readiness`'s not-ready answer names `ensure_readiness` only when
+it is offered (the operator's decision): the server's own tool list
+says so, since main.py removes a pruned or unselected tool at launch,
+unless a host that offers fewer tools than its server registers says
+which (`tool_maturity.OFFERED_TOOLS`, which the panel's in-process host
+sets per scenario). `ensure_readiness`'s answer names no tool ("Call
+again to keep waiting"). Tests check every description and schema
+text, and the answer with the tool registered, removed, and filtered
+by a host.
+
+The external review found the panel's host set `OFFERED_TOOLS` to the
+scenario's allow-list, not to the tools it lists (registered and
+allowed): a name allowed but not registered counted as offered. It now
+sets what it lists. The CLI and Claude legs' server is launched with
+the scenario's set as `ONEDATA_MCP_TOOLS`, so its own list is the
+offered set. **Residual:** a production client that filters the
+server's tools downstream, without telling the server, is not seen.
+
+**Decision:** Fixed (this PR); the residual recorded (design/17,
+gate 2).
+
+---
+
+## M-44. Readiness hints that claimed more than the provider said
+
+**Surface:** `check_readiness`, `ensure_readiness`: their unresolved
+items and errors.
+
+**Behaviour:** found writing the gate-1 tests, as in M-19:
+- a bare 404 for a dataset read "no such directory" (it may be one the
+  token cannot see); a 5xx carrying `enoent` read the same;
+- a space the provider does not list for the token read "Space 'x' not
+  found" (it may exist elsewhere);
+- a refusal of access to a dataset escaped as the provider's error,
+  with no hint;
+- an id given where a name or path is asked for read as a mistyped
+  name; a space given by its id was matched, then looked up as a path
+  and not found;
+- a provider id and a rule id went into request paths as given (M-14's
+  class).
+
+**Why this matters:** a hint is read as the tool's diagnosis (the
+Aim's rule 3); a false "does not exist" ends a search.
+
+**How it was found:** gate 1 of the readiness tools' promotion.
+
+**Evidence:** design/17, gate 1 (the table).
+
+**Fix:** each names only what the response establishes (design/17's
+table): "not found at your provider: no such directory, or one this
+token cannot see"; a 5xx escapes as itself; "your provider supports no
+space named 'x' for this token"; "cannot be listed: the provider
+refused this token access to it"; an id is named as an id; a space
+given by its id is listed under its name; ids go into paths through
+`id_segment`.
+
+**The external review found more of the same class**, partly in the
+answer itself: the advice named only the reason with the most files
+(three files elsewhere hid two being written); after a listing that
+stopped early, a declared file on an unread page was "not found" and
+`files: 1, ready_files: 1` looked complete; one refused hold made the
+advice call every hold failure a refusal; truncated examples were not
+marked; a missing space's hint suggested the very segment that was not
+found (`nosuch/sub`: "give a space name (e.g. 'nosuch')"); `/..` was
+answered "give a space name such as '..'"; a provider list of spaces
+that was not a list read as a dataset "not found"; a trailing slash
+failed the lookup. Now the advice names every reason in a fixed order;
+a file not seen on an incomplete listing is unknown, and a name seen
+once there is not taken; the counts are labelled (`resolved_files`,
+`ready_files`, `examples_not_shown`); hold failures are counted by
+cause; the hints list the spaces there are and a real example; a
+malformed list of spaces is an error; one leading and one trailing
+slash are dropped.
+
+The verification round found one more: when a hold's read-back timed
+out, the advice said the file "is not held there". It now says the
+hold "could not be confirmed", and "not held" only for a refusal, a
+rejection, a hold gone or one not placed in time.
+
+**Decision:** Fixed (this PR, after the external review and its
+verification).
+
+---
+
+## M-45. Duplicate holds after a server restart
+
+**Surface:** `ensure_readiness`, how it remembers the holds it placed.
+
+**Behaviour:** the tool remembers which QoS requirement holds each file
+in the server process only. A server restarted between two calls has
+forgotten them, so the next call on the same files places a second
+requirement on each, beside the first. Its answer lists only the new
+ones.
+
+**Why this matters:** the data stay held after the agent removes every
+id it was given, and each restart adds another requirement per file.
+The data are safe; storage at the site is held longer than the agent
+knows, and an agent that tries to release what it held cannot.
+
+**How it was found:** the review of the readiness tools' promotion
+(design/18, decision 3); no trial has shown it (the panel runs one
+server per run).
+
+**Evidence:** design/18 ("Not claimed"; the operator's decisions).
+
+**Fix (proposed, not made):** before placing a hold, read the file's
+QoS requirements and reuse one whose expression is this tool's own
+(`providerId=<local id> & anyStorage`, or the plain form). Cost: at
+least two more reads per file on a call that has not remembered its
+hold (the file's QoS summary, then each requirement it lists), so a
+2,000-file extent adds 4,000 reads or more, within the 16 in flight; and a requirement someone else made with the same expression
+would be taken for this tool's own.
+
+**Two more duplicates, found by the external review and fixed:** two
+calls at once on one file both found no remembered rule, both placed
+one, and both reported the second id while the first stayed; and a
+read-back that failed for a moment (a 500, a timeout) was taken for a
+rule that is gone, and a second was placed beside the first. Now a
+file's hold is read back or placed under a per-file lock, each call
+keeps the rule it confirmed in its own result, and only a provider's
+"not there" (a 404, a 4xx `enoent`) places a hold again; an unreadable
+read-back is reported with its id, never followed by a second hold. A
+create request that got no answer may still have made a rule no answer
+lists: the next call places another (the same cost as this finding's
+fix to find it).
+
+**Decision:** the duplicates between concurrent calls and after a failed
+read-back: Fixed (this PR, design/18, decision 6). After a restart: Open
+(the operator, 2026-11-23: not fixed now). Reopen
+the fix if a deployment restarts its server while agents hold data,
+or a trial shows a released hold still keeping its file.
+
+---
+
 ## M-46. Onedata's message after "Pass its id" said the opposite
 
 **Surface:** `schedule_file_replication` (experimental), its error for
@@ -1692,6 +2073,72 @@ trial draws it (design/10).
 *Numbering: master's last entry is M-38, and M-39 to M-45 are written
 on another branch (the readiness tools), so this is M-46, after the
 highest number present.*
+
+---
+
+## M-47. The panel read what a readiness call did from its arguments
+
+**Surface:** the validation panel's scoring of the readiness tools
+(`benchmark/k2val/scoring.py`, `readiness_oracles.py`, `recording.py`,
+`mcp_http.py`): the harness, not a tool.
+
+**Behaviour:** the external review's verification round found the
+scorer still inferring a call's writes and its coverage from the call's
+arguments, and placing what the call recorded by display path:
+- an empty record (a call that resolved nothing, such as a
+  configuration timeout) and a trace from before the record both
+  serialised as None; the scorer then read the extent, so a call that
+  checked no file met the required call, and a call that wrote nothing
+  was scored as a write outside the trial;
+- a removed hold was placed inside the trial by a LATER call's record;
+- an audited write was placed by its path alone: two spaces of one name
+  share relative paths, so a write to the other space read as inside;
+- a cancelled call (not ok, no error) had its recorded writes dropped,
+  and the in-process recorder let the cancellation through unrecorded;
+- RCi credited files that a name-addressed item resolved because
+  another item named a space by id; RCp dropped unchecked files before
+  its scope check;
+- a baseline without its rule ids read as "no rule".
+
+**Why this matters:** each one can certify a trial the evidence does
+not support: an outside write scored inside, a required call met by a
+call that checked nothing. The panel's verdict is what promotes a tool.
+
+**How it was found:** the external review's verification round
+(design/17, design/18, "External review").
+
+**Evidence:** the reproductions in `test/unit/k2val/
+test_readiness_scenarios.py` ("verification round"), each a failing
+test first.
+
+**Fix:** every readiness call's record starts with empty `resolved`
+and `writes` lists, set by the host before the call and kept through
+errors and cancellation; each entry names its file by the space's id
+and the file's id, and a resolved file by the extent items that
+selected it. An absent record means only a trace from before the
+record: never read from arguments, it is UNVERIFIED (a harness
+outcome). Recorded writes are read whatever the call's status and
+placed by file id and space id against the trial's own files. A removed
+hold is placed only by the call that created it or a record that ended
+before the removal began. A cancellation is recorded as an outcome not
+confirmed. RCi counts only files an id-addressed item resolved; RCp and
+REp check scope over every file selected. A baseline without rule ids
+is unusable.
+
+The second verification round found three more of the class, now
+fixed: a file the trial created elsewhere in the space was placed
+inside by its id (now: only when its known path is under the trial
+directory); a removal was placed by a call still running when it began,
+or by the first of conflicting records (now: a call that ended before
+it, and every record naming the same file); RCp's scope check skipped
+files of another space; and a call cancelled during the proxy's first
+await had no record (now made before that await). Answered in the
+record, no change: an RCi trace from before the per-item record would
+fail its required call on replay, but no RC trial has ever been run, so
+there is no such trace.
+
+**Decision:** Fixed (this PR). Stored artefacts made before the record
+rescore every readiness call as UNVERIFIED.
 
 ---
 

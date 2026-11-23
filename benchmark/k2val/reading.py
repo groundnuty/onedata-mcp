@@ -16,7 +16,14 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
-from benchmark.k2val import file_oracles, file_scenarios, oracles, sr_oracles, stable_oracles
+from benchmark.k2val import (
+    file_oracles,
+    file_scenarios,
+    oracles,
+    readiness_oracles,
+    sr_oracles,
+    stable_oracles,
+)
 from benchmark.k2val.rubrics import ANSWER_SPECS, Reading
 from benchmark.k2val.scenarios import SCENARIOS, V1_DAYS
 
@@ -86,6 +93,8 @@ READERS: dict[str, Reader] = {
     },
     # the stable tools' smoke scenarios (design/16)
     **stable_oracles.ST_READERS,
+    # the readiness tools' scenarios (design/17, design/18)
+    **readiness_oracles.READINESS_READERS,
 }
 
 
@@ -127,6 +136,7 @@ _RIGHT: dict[str, Reading] = {
     "SR1o": "SAYS_NOT_COPIED",
     # None for ST4: its right reading is the trial's own transfer id
     **stable_oracles.ST_RIGHT,
+    **readiness_oracles.READINESS_RIGHT,  # type: ignore[dict-item]
 }
 
 
@@ -142,21 +152,27 @@ def right_reading(sid: str) -> Reading:
 
 def is_right(sid: str, value: Reading) -> bool | None:
     """Whether a reading is a right answer's, as far as the label goes (the oracle may ask
-    more: the state when it was given). V5: the right label, with the two files being written
-    named exactly, or none named (the brief asks for neither). None where the right reading
-    depends on the trial (ST4: its own transfer id), so it cannot be told from the label."""
+    more: the state when it was given). V5: the right label, and whatever it says of the files
+    being written true: each file it names is one of the two, each count it states is two
+    (`oracles.writing_claim_problems`); naming or counting none is right (the brief asks for
+    neither). None where the right reading depends on the trial (ST4: its own transfer id), so
+    it cannot be told from the label."""
     from benchmark.k2val.rubrics import same_reading
 
     if sid in _RIGHT and _RIGHT[sid] is None:
         return None
     if sid == "V5":
+        # the other three are at the owner only in V5: "they are ready here" is a false claim
         return (
             isinstance(value, tuple)
             and value[0] == "NOT_READY_WRITING"
-            and set(value[1]) in (set(), {"log_20200102.dat", "log_20200104.dat"})
+            and not oracles.writing_claim_problems(frozenset(value[1]), oracles.S2_NAMES, 5)
+            and oracles.OTHERS_READY not in value[1]
         )
     if sid == "V4":
         return isinstance(value, tuple) and value[0] == "NOT_READY_ELSEWHERE"
+    if (right := readiness_oracles.is_right(sid, value)) is not None:
+        return right
     return same_reading(value, right_reading(sid))
 
 

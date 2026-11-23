@@ -1,7 +1,9 @@
 # Readiness tools: `check_readiness` and `ensure_readiness`
 
 Status: spec for implementation (2026-11-19). Two new tools at maturity
-`experimental`, origin `ours`. They implement a *readiness guarantee*: the agent
+`experimental`, origin `ours`. Superseded in part by their promotion records
+(design/17, design/18, 2026-11-23): neither tool's description or answer names
+the other; an unknown extent field is refused; one ensure call waits 150 s. They implement a *readiness guarantee*: the agent
 declares the data its analysis needs, and the server says whether they are
 ready, makes them ready, and holds them.
 
@@ -165,6 +167,18 @@ is `scheduled`, `enqueued`, `replicating` or `active`. Failed, cancelled,
 completed, skipped and aborting transfers do not count.
 
 ## `ensure_readiness(extent, deadline_s)` (write: places and holds data)
+
+> **Since 2026-11-23** (design/18, the operator's decisions): one call waits at
+> most 150 s by default and ends within 170 s (`ENSURE_GRACE_S` 20 s), under a
+> common MCP client's ~180 s; the env may only lower the wait. The answer's
+> `held` also lists the ids of the holds (`qos_requirement_ids`); neither
+> description names the other tool, and check's answer names `ensure_readiness`
+> only where it is offered, beside `ready_files`. After the external review
+> (design/17, design/18, "External review"): ensure's `ready` also needs every
+> hold confirmed (`data_ready` apart), every phase is bounded by
+> `min(deadline_s, cap)`, `files` is `resolved_files`, and empty selectors, a
+> name several files share and an ambiguous space are refused. The text below
+> is the original spec.
 
 `deadline_s` is an int, 1–86,400: how long the agent is willing to wait in
 total. **One call waits at most `min(deadline_s, MAX_WAIT_S)`, counted from the

@@ -78,14 +78,23 @@ class Scenario:
         ids: Mapping[str, str] | None = None,
         qos: Mapping[str, str] | None = None,
     ) -> str:
-        """`{dir}`, `{local}`, and `{files}`: the fixture's file names, for a brief that must
-        name what the offered tools cannot list. `{ids[<path>]}`: the file id of a fixture entry
-        or log file, `{ids[.]}` the trial directory's; `{qos[<file>]}`: the id of the rule the
-        fixture made on a file (both known only once it is built; before that, a placeholder)."""
+        """`{dir}`, `{dirname}` (its last segment), `{local}`, and `{files}`: the fixture's file
+        names, for a brief that must name what the offered tools cannot list. `{ids[<path>]}`:
+        the file id of a fixture entry or log file, `{ids[.]}` the trial directory's,
+        `{ids[space]}` the space's (when the fixture reads it); `{qos[<file>]}`: the id of the
+        rule the fixture made on a file (all known only once it is built; before that, a
+        placeholder)."""
         files = ", ".join(f.name for f in self.fixture.files)
         known = _IdsOrPlaceholder(ids or {})
         rules = _IdsOrPlaceholder(qos or {})
-        return self.brief.format(dir=directory, local=local, files=files, ids=known, qos=rules)
+        return self.brief.format(
+            dir=directory,
+            dirname=directory.rsplit("/", 1)[-1],
+            local=local,
+            files=files,
+            ids=known,
+            qos=rules,
+        )
 
 
 class _IdsOrPlaceholder(dict):
@@ -306,6 +315,26 @@ SCENARIOS.update(
     }
 )
 
+# --- the readiness tools' scenarios (RC*, RE*; design/17, design/18) ---------------------------
+# In readiness_scenarios.py (a leaf module). RCo and REo take V1's and SR1's brief and fixture
+# word for word (`same_as`); the others are offered their own sets (RC_TOOLS, RE_TOOLS).
+from benchmark.k2val.readiness_scenarios import READINESS_SCENARIOS  # noqa: E402
+
+for _r in READINESS_SCENARIOS.values():
+    _base = SCENARIOS[_r.same_as] if _r.same_as else None
+    SCENARIOS[_r.id] = Scenario(
+        _r.id,
+        _r.title,
+        "K2",
+        _base.brief if _base else _r.brief,
+        _base.fixture if _base else _r.fixture,  # type: ignore[arg-type]
+        settle=_r.settle,
+        tools=_r.tools,
+        restraint=_r.restraint,
+        settle_s=_r.settle_s,
+        excluded_tools=_r.excluded_tools,
+    )
+
 # --- the stable tools' smoke scenarios (ST*; design/16) ---------------------------------------
 # PPAM's scenarios ported to the panel, in stable_scenarios.py (a leaf module: no import cycle).
 from benchmark.k2val.stable_scenarios import ST_SCENARIOS  # noqa: E402
@@ -340,6 +369,7 @@ TOOL_UNDER_TEST: dict[str, str] = {
     **dict.fromkeys(("CD", "CDn", "CDo", "CDp"), "create_directory"),
     **dict.fromkeys(("V4", "V5"), "check_readiness"),
     **dict.fromkeys(("V6", "V7"), "ensure_readiness"),
+    **{s.id: s.tool for s in READINESS_SCENARIOS.values()},
     **{s.id: s.tool for s in ST_SCENARIOS.values()},
 }
 

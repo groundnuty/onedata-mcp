@@ -43,7 +43,9 @@ def pick_port() -> int:
 def make_recording_middleware(path: Path):
     from fastmcp.server.middleware import Middleware
 
+    from benchmark.k2val.recording import CANCELLED
     from benchmark.llm_adapters.openai_compat import _result_to_text
+    from onedata_mcp.api.readiness import CALL_RECORD, RECORDED_TOOLS, new_call_record
 
     class RecordingMiddleware(Middleware):
         async def on_call_tool(self, context, call_next):
@@ -56,15 +58,23 @@ def make_recording_middleware(path: Path):
                 "result_text": None,
                 "error": None,
             }
+            # what a readiness tool records of its own call (recording.py): always a record
+            audit: dict = new_call_record() if row["tool"] in RECORDED_TOOLS else {}
+            recording = CALL_RECORD.set(audit)
             try:
                 result = await call_next(context)
                 row["ok"] = True
                 row["result_text"] = _result_to_text(result)
                 return result
+            except asyncio.CancelledError:
+                row["error"] = CANCELLED
+                raise
             except Exception as e:
                 row["error"] = str(e)
                 raise
             finally:
+                CALL_RECORD.reset(recording)
+                row["audit"] = audit if row["tool"] in RECORDED_TOOLS else (audit or None)
                 row["ended_at"] = time.time()
                 with path.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
@@ -223,6 +233,7 @@ class McpHttpServer:
                     result_text=row.get("result_text"),
                     error=row.get("error"),
                     source="mcp",
+                    audit=row.get("audit"),
                 )
             )
         return out

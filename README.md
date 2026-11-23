@@ -55,14 +55,15 @@ The classification lives in [`onedata_mcp/tool_maturity.py`](onedata_mcp/tool_ma
 
 ### Readiness tools
 
-`check_readiness` and `ensure_readiness` answer one question: are the data an analysis declares complete and readable at the provider this server talks to? The agent declares them as an `extent`: per dataset (a space name or a directory path), optionally file names, or inclusive `YYYY-MM-DD` date ranges matched against the `YYYYMMDD` in each file name.
+`check_readiness` and `ensure_readiness` answer one question: are the data an analysis declares complete and readable at the provider this server talks to? The agent declares them as an `extent`: per dataset (a space by its name or id, or a directory path inside it), optionally file names or paths, or inclusive `YYYY-MM-DD` date ranges matched against the `YYYYMMDD` in each file name; with both, the files either selects. A selector given as `null` or `[]` is refused (left out, it means the whole dataset), and so is a file name that several files share (give it by path). A space name that is another space's id, or that two spaces share, is refused with both candidates.
 
 - `check_readiness` is read-only. It answers ready, or not ready with a reason per group of files:
   - `being_written`: no other provider holds the whole file yet;
   - `at_other_site`;
   - `in_transfer`;
   - `unreachable`: the file is only at a provider that is down.
-- `ensure_readiness` places one QoS requirement per file for this provider (`providerId=<local provider> & anyStorage`). Onedata then copies the file here and protects the replica from eviction. The tool waits up to `deadline_s`; one call waits at most 240 s (`ONEDATA_MCP_ENSURE_MAX_WAIT_S` changes the cap). Call it again if the answer is not ready.
+- `ensure_readiness` places one QoS requirement per file for this provider (`providerId=<local provider> & anyStorage`). Onedata then copies the file here and protects the replica from eviction. The requirements stay until they are removed; the answer lists their ids (`held.qos_requirement_ids`, at most 100, the rest counted; to list the others, call again with fewer files). Its `ready` is true only when the data are complete and readable here AND every file's hold is confirmed; `data_ready` says whether the data alone are, and `hold_failed` which holds are missing, counted by cause. Every phase of a call ends within `min(deadline_s, 150 s)`, then a final read-back takes at most 20 s: a call ends within 170 s, under the ~180 s many MCP clients allow a call. `ONEDATA_MCP_ENSURE_MAX_WAIT_S` may lower the wait (the read-back's 20 s shrinks with it), never raise it. Call it again if the answer is not ready.
+- Both answers count `resolved_files` and `ready_files`, name every reason a file is not ready, and say how many examples are not shown; a file not seen on a listing that stopped early is unknown, never "not found".
 
 A file counts as ready only when this provider holds all of it, and either another provider does too or the file was written here. A transfer's status or a QoS requirement's `fulfilled` is never taken as proof. Design: [`design/07-readiness-tools.md`](design/07-readiness-tools.md).
 

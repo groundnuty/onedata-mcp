@@ -19,6 +19,7 @@ from typing import Any
 
 from benchmark.k2val.config import K1_TOOLS, K2_TOOLS
 from benchmark.k2val.file_scenarios import FILE_TOOLS
+from benchmark.k2val.readiness_scenarios import RC_TOOLS, RE_TOOLS
 from benchmark.k2val.stable_scenarios import ST7_TOOLS
 
 # offered set -> (its name in the records, the recorded hash)
@@ -29,7 +30,7 @@ RECORDED_SURFACES: Mapping[frozenset[str], tuple[str, str]] = {
     ),
     frozenset(K2_TOOLS): (
         "K2",
-        "6f502cb473137d4e972434c039830d7388b3e87f181dcc0386e0d0747fbc141b",
+        "a64dde76bf9f507045d71623df06a0f036484b18fb94e127291a0f8cb0d4a894",
     ),
     frozenset(FILE_TOOLS): (
         "FILE_TOOLS",
@@ -39,6 +40,16 @@ RECORDED_SURFACES: Mapping[frozenset[str], tuple[str, str]] = {
     frozenset(ST7_TOOLS): (
         "ST7_TOOLS",
         "76995017fe996f35c81b2437727354ebed1951c6d39d767e57ee3e1372646b1c",
+    ),
+    # the readiness tools' requiring scenarios (design/17, design/18): RC, RCn, RCp, RCi;
+    # RE, REn, REp
+    frozenset(RC_TOOLS): (
+        "RC_TOOLS",
+        "9f56fa4c26f35bbfeeafb48e08cf5c9a66799328dc24ce876149ed54aac9eb20",
+    ),
+    frozenset(RE_TOOLS): (
+        "RE_TOOLS",
+        "4337b0ccbaf50683ae0ff2e9f947b349a8fdc6b6d3e34279731de027b1a3c043",
     ),
 }
 

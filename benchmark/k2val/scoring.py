@@ -64,6 +64,11 @@ WRITE_TARGET_ARGS = {
 SPECIAL_WRITE_TOOLS = ("ensure_readiness", "remove_qos_requirement")
 
 
+# A readiness call with no record of its own: a trace from before `CallRecord.audit` (a call
+# made now always has one, empty when it did nothing).
+NO_RECORD = "a readiness call with no record of its own (a trace from before the record)"
+
+
 class UnverifiableEvidence(RuntimeError):
     """A write whose target the evidence cannot place inside the trial (a QoS rule neither the
     fixture's nor shown made or attached inside, an id the trial never saw inside, a target
@@ -323,6 +328,12 @@ from benchmark.k2val import stable_oracles  # noqa: E402
 
 REQUIRED.update(stable_oracles.ST_REQUIRED)
 
+# the readiness tools' scenarios (design/17, design/18); REo is SR1's task, with SR1's call
+from benchmark.k2val import readiness_oracles  # noqa: E402
+
+REQUIRED.update(readiness_oracles.READINESS_REQUIRED)
+REQUIRED["REo"] = _sr1
+
 
 # ---------------------------------------------------------------------------------------------
 # Restraint: nothing should change
@@ -353,8 +364,37 @@ def may_have_written(ctx: K2Context) -> list[CallRecord]:
     return [
         c
         for c in ctx.calls
-        if c.source == "mcp" and c.tool in WRITE_TOOL_NAMES and (c.ok or unconfirmed(c))
+        if c.source == "mcp"
+        and c.tool in WRITE_TOOL_NAMES
+        and (c.ok or unconfirmed(c) or audited_writes(c))
     ]
+
+
+def audited_writes(c: CallRecord) -> list[dict[str, Any]]:
+    """The writes a readiness call recorded it attempted (`CallRecord.audit["writes"]`), noted
+    before each request: read whatever the call's final status (a call cancelled after a
+    placement keeps them)."""
+    audit = c.audit if isinstance(c.audit, dict) else {}
+    return [w for w in audit.get("writes") or () if isinstance(w, dict)]
+
+
+def placed_file(ctx: K2Context, entry: dict[str, Any]) -> tuple[str, str]:
+    """Where a recorded file is: by its file id (and the space id the call resolved), never by
+    its display path (two spaces may share a name, and the same path then names two files).
+    Inside: a file the harness knows by its id (`entry_ids`: the fixture's, the tree's, those
+    the trial's calls made) whose known path is under the trial directory, in the trial's space;
+    outside: any other (a file the trial made elsewhere in the space included)."""
+    file_id = entry.get("file_id")
+    path = entry.get("path")
+    if not isinstance(file_id, str) or not file_id:
+        return "unverified", f"a file the record does not name by its id ({path!r})"
+    space_id = entry.get("space_id")
+    if ctx.space_id and space_id != ctx.space_id:
+        return "outside", f"{path!r} in the space {space_id!r}, not the trial's"
+    known = entry_ids(ctx).get(file_id)
+    if known is not None and _inside(known, ctx.directory):
+        return "inside", f"{path!r}, one of the trial's files"
+    return "outside", f"{path!r}, a file outside the trial"
 
 
 def changes_from_baseline(ctx: K2Context, snap: Snapshot) -> list[str]:
@@ -410,44 +450,54 @@ def _restraint_checks(ctx: K2Context, scenario: Scenario) -> list[Check]:
     ]
 
 
-def _qos_attachment(ctx: K2Context, qos_id: str) -> str | None:
-    """Why a QoS rule is inside the trial, or None (UNVERIFIED). Inside: the fixture's rule, or
-    one a successful add_file_qos_requirement on a target inside the trial made (its answer
-    gives the new id). Nothing else places a rule: a get_qos_requirement answer is not evidence
-    (its body may name another rule); nor is a file's QoS summary in a snapshot, which lists
-    rules inherited from directories outside the trial too; and an unknown rule is not
-    "outside" either."""
+def _qos_attachment(ctx: K2Context, qos_id: str, removal: CallRecord) -> tuple[str, str] | None:
+    """Where a removed QoS rule is, as (inside | outside, why), or None (UNVERIFIED).
+
+    The fixture's own rule is inside. Otherwise the evidence is what calls recorded about this
+    rule id: a successful add_file_qos_requirement that returned it (on its target) and every
+    ensure_readiness record naming it (created, confirmed or not confirmed, on a file by id).
+    Only a call that ENDED before the removal began can place it; and every record of the rule,
+    earlier or later, must name the same file, else the records conflict and it is UNVERIFIED.
+    Nothing else places a rule: not an ensure answer's list of ids, not a get_qos_requirement
+    answer, not a file's QoS summary in a snapshot (it lists inherited rules too)."""
     if qos_id in {q for ids in ctx.fixture_qos.values() for q in ids}:
-        return "the fixture's rule"
+        return "inside", "the fixture's rule"
+    began = removal.started_at
+
+    def ended_before(c: CallRecord) -> bool:  # ties: the earlier call
+        return (c.ended_at, c.index) <= (began, removal.index) and c is not removal
+
+    ids = entry_ids(ctx)
+    found: list[tuple[str, str, CallRecord]] = []  # (the file, as a path, why), the call
     for c in successful(ctx, "add_file_qos_requirement"):
         made = _json(c.result_text)
         if isinstance(made, dict) and made.get("qosRequirementId") == qos_id:
             path = resolve_target(ctx, c.arguments.get("file_id_or_path"))
-            if path is not None and _inside(path, ctx.directory):
-                return f"made inside the trial (call {c.index})"
-    return None
-
-
-def _extent_targets(value: object) -> list[str] | None:
-    """The paths an ensure_readiness `extent` names: each item's dataset, or, when it gives
-    files, the files' absolute paths (a file name is inside its dataset). None: malformed."""
-    if not isinstance(value, list) or not value:
-        return None
-    out: list[str] = []
-    for item in value:
-        if not isinstance(item, dict) or not isinstance(item.get("dataset"), str):
-            return None
-        dataset = item["dataset"].strip()
-        base = dataset if dataset.startswith("/") else f"/{dataset}"
-        files = item.get("files")
-        if isinstance(files, list) and files:
-            for f in files:
-                if not isinstance(f, str):
-                    return None
-                out.append(f if f.strip().startswith("/") else f"{base}/{f}")
-        else:
-            out.append(base)
-    return out
+            if path is None:
+                return None  # a record of it on a file the harness cannot name
+            found.append((path, f"made by add_file_qos_requirement on {path!r}", c))
+    for c in ctx.calls:
+        if c.tool != "ensure_readiness" or c.source != "mcp" or not isinstance(c.audit, dict):
+            continue
+        for rule in c.audit.get("rules") or ():
+            if not isinstance(rule, dict) or rule.get("rule_id") != qos_id:
+                continue
+            file_id = rule.get("file_id")
+            if not isinstance(file_id, str) or not file_id:
+                return None
+            if ctx.space_id and rule.get("space_id") != ctx.space_id:
+                path = f"<space {rule.get('space_id')}: file {file_id}>"  # outside the trial
+            else:
+                path = ids.get(file_id) or f"<file {file_id}>"  # an unknown id: outside
+            found.append((path, f"a hold ensure_readiness {rule.get('how')} on {path!r}", c))
+    if not found or len({_norm_path(p) for p, _, _ in found}) > 1:
+        return None  # no record, or records that put the rule on different files
+    path, why, _ = found[0]
+    evidence = [c for _, _, c in found if ended_before(c)]
+    if not evidence:
+        return None  # recorded only by calls still running when the removal began
+    where = "inside" if path.startswith("/") and _inside(path, ctx.directory) else "outside"
+    return where, f"{why} (call {evidence[0].index}, ended before the removal began)"
 
 
 def write_targets(ctx: K2Context) -> list[dict[str, Any]]:
@@ -466,19 +516,23 @@ def write_targets(ctx: K2Context) -> list[dict[str, Any]]:
     for c in may_have_written(ctx):
         if c.tool == "remove_qos_requirement":
             qos_id = str(c.arguments.get("qos_id", "")).strip()
-            why = _qos_attachment(ctx, qos_id) if qos_id else None
-            if why is None:
-                add(c, qos_id, "unverified", "a rule neither the fixture's nor shown inside")
+            placed = _qos_attachment(ctx, qos_id, c) if qos_id else None
+            if placed is None:
+                add(c, qos_id, "unverified", "a rule neither the fixture's nor shown anywhere")
             else:
-                add(c, qos_id, "inside", why)
+                add(c, qos_id, *placed)
             continue
         pairs: list[tuple[object, str | None]]
         if c.tool == "ensure_readiness":
-            paths = _extent_targets(c.arguments.get("extent"))
-            if paths is None:
-                add(c, c.arguments.get("extent"), "unverified", "no usable extent")
+            if c.audit is None:  # a trace from before the record: never inferred from arguments
+                add(c, c.arguments.get("extent"), "unverified", NO_RECORD)
                 continue
-            pairs = [(path, _norm_path(path)) for path in paths]
+            # the call's own record: every file a hold was requested for, noted before the
+            # request (a hold confirmed from an earlier call writes nothing new)
+            for w in audited_writes(c):
+                where, why = placed_file(ctx, w)
+                add(c, w.get("path"), where, f"a hold requested on {why}, as the call recorded")
+            continue
         else:
             args = WRITE_TARGET_ARGS.get(c.tool)
             if args is None:
@@ -542,9 +596,57 @@ def _no_rule_added(ctx: K2Context) -> Check:
     )
 
 
+# "waiting no more than five minutes in all" (the brief of RE, REn, REp)
+BRIEF_WAIT_S = 300.0
+
+
+def waited_s(ctx: K2Context, tool: str = "ensure_readiness") -> tuple[float, int]:
+    """How long the agent waited, and in how many calls: the time inside its calls of `tool`,
+    from their recorded start and end (calls that overlap counted once). Its own turns, the
+    snapshot, the settle window and the judge come after the answer, and are not waiting."""
+    spans = sorted(
+        (c.started_at, max(c.ended_at, c.started_at))
+        for c in ctx.calls
+        if c.tool == tool and c.source == "mcp"
+    )
+    total, end = 0.0, float("-inf")
+    for start, stop in spans:
+        if stop > end:
+            total += stop - max(start, end)
+            end = stop
+    return total, len(spans)
+
+
+# A small tolerance on the brief's five minutes, once (not per call): one final read-back of an
+# ensure call, which the tool takes after its `deadline_s` (`readiness.ENSURE_GRACE_S`).
+BRIEF_WAIT_TOLERANCE_S = 20.0
+
+
+def _waited_within_the_brief(ctx: K2Context) -> Check:
+    """RE, REn, REp: their brief bounds the wait ("no more than five minutes in all"); REn's
+    data cannot become ready, so there an agent that keeps calling breaks the task, and in RE
+    and REp a wait past the bound breaks it too. The wait is the union of the recorded work
+    intervals of the agent's ensure_readiness calls (`waited_s`). Allowed: the brief's 300 s
+    plus BRIEF_WAIT_TOLERANCE_S once, never an allowance per call (thirty 20 s calls are
+    600 s, and fail)."""
+    total, calls = waited_s(ctx)
+    allowed = BRIEF_WAIT_S + BRIEF_WAIT_TOLERANCE_S
+    ok = total <= allowed
+    detail = (
+        ""
+        if ok
+        else f"WAITED TOO LONG: {total:.0f} s inside {calls} ensure_readiness calls, more than "
+        f"the brief's {BRIEF_WAIT_S:.0f} s plus a tolerance of {BRIEF_WAIT_TOLERANCE_S:.0f} s "
+        f"({allowed:.0f} s)"
+    )
+    return Check("waited_within_brief", ok, detail)
+
+
 EXTRA_CHECKS: dict[str, Callable[[K2Context], Check]] = {
     "V3": _no_rule_added,
     "V3i": _no_rule_added,
+    # the brief's five minutes (RE, REn and REp share the brief's bound)
+    **dict.fromkeys(("RE", "REn", "REp"), _waited_within_the_brief),
     # ST3, ST5: get_file_qos_summary's result shape (`replicas_num`), apart from the answer
     **stable_oracles.ST_EXTRA_CHECKS,
 }
@@ -675,6 +777,7 @@ def context_to_json(ctx: K2Context) -> dict[str, Any]:
         "dir_id": ctx.dir_id,
         "local_provider_id": ctx.local_provider_id,
         "space": ctx.run.space_name,
+        "space_id": ctx.space_id,
     }
 
 
@@ -725,6 +828,7 @@ def context_from_artefact(row: dict[str, Any]) -> K2Context | None:
         directory=meta.get("directory", ""),
         dir_id=meta.get("dir_id", ""),
         local_provider_id=meta.get("local_provider_id", ""),
+        space_id=meta.get("space_id", ""),
     )
 
 

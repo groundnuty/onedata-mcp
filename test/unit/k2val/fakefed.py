@@ -84,6 +84,8 @@ class FakeFed:
         # tool given a space NAME resolves it. Off by default: the earlier tests expect none.
         self.ended_order = "newest"
         self.list_spaces = False
+        # A space's id where it is not its name (RCi): name -> id, in `GET /spaces`.
+        self.space_ids: dict[str, str] = {}
         # the whole federation is stopped: every request is refused, as a stopped container does
         self.down = False
         self._seq = 0
@@ -173,6 +175,15 @@ class FakeFed:
             "/api/v3/onezone/configuration",
         ):
             return httpx.Response(200, json={"name": "zone"})
+        # Onezone's details of a provider (the readiness tools ask whether it is online)
+        if (
+            host == ZONE_HOST
+            and request.method == "GET"
+            and (mm := re.fullmatch(r"/api/v3/onezone/providers/([^/]+)", request.url.path))
+            and mm[1] in self.PROVIDER_NAMES
+        ):
+            name = self.PROVIDER_NAMES[mm[1]]
+            return httpx.Response(200, json={"providerId": mm[1], "name": name, "online": True})
         if host == ZONE_HOST and self.list_spaces:
             return self._zone(request)
         provider = {OWNER_HOST: OWNER_ID, LOCAL_HOST: LOCAL_ID}.get(host)
@@ -204,7 +215,11 @@ class FakeFed:
             # provider: none here, unless `list_spaces` (design/16). The owner, which only the
             # panel's own client asks (a space's id from its name), always lists them.
             listing = provider == OWNER_ID or self.list_spaces
-            listed = [{"spaceId": n, "name": n} for n in self.roots] if listing else []
+            listed = (
+                [{"spaceId": self.space_ids.get(n, n), "name": n} for n in self.roots]
+                if listing
+                else []
+            )
             return httpx.Response(200, json=listed)
         if m == "POST" and rest.startswith("/lookup-file-id/"):
             return self._lookup(provider, unquote(rest[len("/lookup-file-id/") :]))

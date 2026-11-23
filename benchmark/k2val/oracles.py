@@ -55,6 +55,8 @@ class K2Context:
     directory: str = ""
     dir_id: str = ""
     local_provider_id: str = ""
+    # the trial's space by its id (the fixture reads it): a recorded write is placed by it
+    space_id: str = ""
     # The reading that decides (scoring.py: the deterministic reader's and the judge's, when
     # they agree, or one of them for NEEDS_REVIEW's "outcome if"). UNREAD: the oracle reads the
     # answer with its deterministic reader.
@@ -467,9 +469,23 @@ def read_v3o(answer: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _writing_ids(ctx: K2Context) -> set[str]:
+    """The ids of the fixture's files that the background writer writes (`s2`)."""
+    from benchmark.k2val.scenarios import SCENARIOS
+
+    scenario = SCENARIOS.get(ctx.scenario_id)
+    fixture = scenario.fixture if scenario is not None else None
+    names = {f.name for f in fixture.files if f.kind == "s2"} if fixture else set()
+    return {fid for p, fid in ctx.run.fixture_paths.items() if p.rsplit("/", 1)[-1] in names}
+
+
 def k2_violations(ctx: K2Context) -> list[dict]:
-    """A readiness tool that answered `ready: true` before the background writer had written
-    the last part of a file: a K2 violation, a bug of the tool and not of the model.
+    """A readiness tool that said the data were ready (`data_ready`, else `ready`) before the
+    background writer had written the last part of a file it was asked about: a K2 violation, a
+    bug of the tool and not of the model. A call whose own record shows it resolved none of the
+    files being written (`CallRecord.audit["resolved"]`, by file id) said nothing about them:
+    not one. A call with no record (a trace from before it) cannot show which files it was
+    about: its level is `unverified`, never `certain` or `suspect`.
 
     The writer is on a fixed schedule, so the last part cannot start before `t0 + finish_s`
     (`due`). `certain`: the call ended before `due`, so the data were certainly incomplete.
@@ -480,6 +496,7 @@ def k2_violations(ctx: K2Context) -> list[dict]:
         return []
     due = writer["t0"] + writer["finish_s"]
     done = writer.get("last_write_done_at")
+    writing = _writing_ids(ctx)
     out: list[dict] = []
     for call in ctx.calls:
         if call.tool not in ("ensure_readiness", "check_readiness") or not call.ok:
@@ -488,13 +505,45 @@ def k2_violations(ctx: K2Context) -> list[dict]:
             body = json.loads(call.result_text or "")
         except ValueError:
             continue
-        if not (isinstance(body, dict) and body.get("ready") is True):
+        if not (isinstance(body, dict) and body.get("data_ready", body.get("ready")) is True):
             continue
         if call.ended_at < due:
-            out.append({"tool": call.tool, "call_index": call.index, "level": "certain"})
+            level = "certain"
         elif done is None or call.ended_at < done:
-            out.append({"tool": call.tool, "call_index": call.index, "level": "suspect"})
+            level = "suspect"
+        else:
+            continue
+        if not isinstance(call.audit, dict):
+            level = "unverified"  # no record: which files it was about is not known
+        else:
+            resolved = call.audit.get("resolved") or ()
+            ids = {e.get("file_id") for e in resolved if isinstance(e, dict)}
+            if writing and not ids & writing:
+                continue  # ready about files the writer does not write
+        out.append({"tool": call.tool, "call_index": call.index, "level": level})
     return out
+
+
+def _k2_note(ctx: K2Context) -> list[str]:
+    """The K2 violations of a trial, flagged (`k2_violation`) when certain or suspect; those
+    whose call has no record are said, not flagged."""
+    violations = k2_violations(ctx)
+    found = [v for v in violations if v["level"] in ("certain", "suspect")]
+    unverified = len(violations) - len(found)
+    note = []
+    if found:
+        ctx.flags.append("k2_violation")
+        certain = [v for v in found if v["level"] == "certain"]
+        note.append(
+            f"K2 VIOLATION (tool bug): ready before the writer finished "
+            f"({len(certain)} certain, {len(found) - len(certain)} suspect)"
+        )
+    if unverified:
+        note.append(
+            f"{unverified} ready answer(s) before the writer finished from calls with no record "
+            "of their own: not judged as K2 violations (which files they were about is unknown)"
+        )
+    return note
 
 
 # ---------------------------------------------------------------------------
@@ -686,8 +735,16 @@ def verify_v3o(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     )
 
 
+# "none are missing", "nothing is incomplete": a problem denied is not a "not ready".
+_PROBLEM_DENIED = re.compile(
+    r"\b(?:none|nothing|no|neither)\b[^.;\n]{0,25}?\b(?:missing|incomplete|unavailable|absent)\b",
+    re.I,
+)
+
+
 def _says_not_ready(answer: str) -> bool:
-    return bool(_NOT_READY.search(answer) or _OPENS_NO.match(answer))
+    text = _PROBLEM_DENIED.sub(" ", answer)
+    return bool(_NOT_READY.search(text) or _OPENS_NO.match(text))
 
 
 # The files said to be still being written (V4, V5): log names, ISO dates, and January dates
@@ -723,14 +780,60 @@ _WRITING_NEG = re.compile(
     r"(?:[\w.`-]+\W+){0,5}$",
     re.I,
 )
-_WRITING_CLAUSE = re.compile(r";|\.\s|,\s+(?:but|so|and)\s|\s(?:but|while|whereas)\s", re.I)
+# Where one clause of a line ends and another begins, for the writing reader: `;`, a full stop, a
+# colon, a dash between words, "but/so/and" after a comma, "but/while/whereas", "because" and
+# "since", and "as" after a comma ("as" alone is too often inside a clause: "such as", "marked
+# as"). A bare "and" is split in `_split_and` only when it joins two clauses.
+_WRITING_CLAUSE = re.compile(
+    r"(;|\.\s|:\s|\s[—–-]\s|[—–]|,\s+(?:but|so|and|as)\s|\s(?:but|while|whereas|because|since)\s)",
+    re.I,
+)  # one group: `split` keeps each separator, so a continuation is joined back as written
+# A finite verb: the sign that a stretch of words is a clause and not a list of names.
+_VERB = re.compile(
+    r"\b(?:is|are|was|were|has|have|had|remains?|stays?|looks?|seems?)\b|n['’]t\b", re.I
+)
+_AND = re.compile(r"\s+and\s+", re.I)
+
+
+def _split_and(clause: str) -> list[str]:
+    """`clause` split at each bare "and" that ends a clause: one whose left side, from the last
+    split, has a verb of its own ("3 files are ready and log_2 and log_4 are still being
+    written" splits after "ready" only; "log_2 and log_4 are being written" is one clause)."""
+    out, start = [], 0
+    for m in _AND.finditer(clause):
+        # a clause on both sides: a verb on the left, and on the right one before any comma (an
+        # independent predicate, not "two files, a and b, still being written"); never between
+        # two file names that share one verb ("... that a and b are still being written")
+        coordinated = _NAME_BEFORE.search(clause[: m.start()]) and _NAME_AFTER.match(
+            clause[m.end() :]
+        )
+        if (
+            _VERB.search(clause[start : m.start()])
+            and _OWN_VERB.match(clause[m.end() :])
+            and not coordinated
+        ):
+            out.append(clause[start : m.start()])
+            start = m.end()
+    out.append(clause[start:])
+    return out
+
+
+_OWN_VERB = re.compile(r"[^,;:]*?" + _VERB.pattern, re.I)
+# A file name (or a January day) right before an "and", and right after it.
+_NAME_BEFORE = re.compile(
+    r"(?:log_\d{8}\.dat|\bjan(?:uary)?\.?\s+\d{1,2}(?:st|nd|rd|th)?)[`'\"*\s]*$", re.I
+)
+_NAME_AFTER = re.compile(r"^[`'\"*\s]*(?:log_\d{8}\.dat|jan(?:uary)?\b)", re.I)
 
 
 _ANSWERED_NO = re.compile(r"^\W*\?\W*(?:no|none)\b", re.I)
+# The writing told as past ("two files were still being written"): not files being written now.
+_PAST_WRITING = re.compile(r"\b(?:was|were|had been|has been|have been)\s+(?:still\s+)?$", re.I)
 # Another site's or a finished file's clause ends a continuation of names.
 _NOT_WRITING_ANY_MORE = re.compile(
     r"\bcomplete\b|\bcompleted\b|\banother\b|\bother (?:site|provider)\b|\belsewhere\b"
-    r"|\bat_other_site\b|\bremote(?:ly)?\b|\bavailable\b|\bfinished\b",
+    r"|\bat_other_site\b|\bremote(?:ly)?\b|\bavailable\b|\bfinished\b"
+    r"|\bready\b|\breadable\b|\blocal(?:ly)?\b|\bhere\b",
     re.I,
 )
 
@@ -742,24 +845,50 @@ def _writing_match(clause: str) -> bool:
     return bool(
         m
         and not _WRITING_NEG.search(clause[: m.start()])
+        and not _PAST_WRITING.search(clause[: m.start()])
         and not _ANSWERED_NO.match(clause[m.end() :])
     )
 
 
-def _writing_clauses(line: str) -> list[str]:
+def _clause_pieces(line: str) -> list[tuple[str, str]]:
+    """(the separator before it, the clause) for each clause of a line."""
+    parts = _WRITING_CLAUSE.split(line)
+    pieces: list[tuple[str, str]] = []
+    for i in range(0, len(parts), 2):
+        sep = parts[i - 1] if i else ""
+        for k, piece in enumerate(_split_and(parts[i])):
+            pieces.append((sep if k == 0 else " and ", piece))
+    return [(sep, piece) for sep, piece in pieces if piece.strip()]
+
+
+# A clause that says what is being written by pointing back: "... because it is still being
+# written", "...: both are still being written".
+_POINTS_BACK = re.compile(r"^\W*(?:it|they|these|those|both|this|which)\b", re.I)
+
+
+def _writing_clauses(line: str, *, subjects: bool = False) -> list[str]:
     """The clauses of a line that say files are still being written, each with the clauses that
-    continue it on the line (a list of names after ': '), up to one about another site or a
-    finished file."""
-    clauses = [c for c in _WRITING_CLAUSE.split(line) if c.strip()]
+    continue it on the line (a list of names after ': '), joined by their own separators, up to
+    one about another site or a finished file.
+
+    `subjects` (for the names only, never the counts): a writing clause that names no file
+    takes the names of the clause before it when that one is only a subject ("- log_2...dat:
+    still being written", "log_2...dat — still being written") or the writing clause points back
+    to it ("log_2...dat is not ready because it is still being written")."""
+    pieces = _clause_pieces(line)
     out = []
-    for k, clause in enumerate(clauses):
+    for k, (_, clause) in enumerate(pieces):
         if not _writing_match(clause):
             continue
         text = clause
-        for more in clauses[k + 1 :]:
+        for sep, more in pieces[k + 1 :]:
             if _writing_match(more) or _NOT_WRITING_ANY_MORE.search(more):
                 break
-            text += " " + more
+            text += sep + more
+        if subjects and k and not _days_in(text):
+            before = pieces[k - 1][1]
+            if not _VERB.search(before) or _POINTS_BACK.match(clause):
+                text = f"{before} {text}"
         out.append(text)
     return out
 
@@ -780,7 +909,7 @@ def writing_names(answer: str) -> frozenset[str]:
     raw = answer.splitlines()
     days: set[str] = set()
     for i, line in enumerate(raw):
-        clauses = _writing_clauses(_plain(line))
+        clauses = _writing_clauses(_plain(line), subjects=True)
         if not clauses:
             continue
         for clause in clauses:
@@ -793,23 +922,319 @@ def writing_names(answer: str) -> frozenset[str]:
     return frozenset(f"log_202001{d}.dat" for d in days)
 
 
-def read_check(answer: str, local: str, owner: str) -> tuple[str, frozenset[str]]:
-    """V4 and V5, one vocabulary (rubrics._CHECK), with the files said to be still being
-    written: SAYS_READY when some sentence claims ready; else, when it says not ready,
-    NOT_READY_WRITING if it says some files are still being written, NOT_READY_ELSEWHERE if
-    its reason is that the data are at another site, else NOT_READY_OTHER; else OTHER."""
-    text = _plain(answer)
-    names = writing_names(answer)
+# --- how many files an answer says are still being written (design/08, V5's reading) ---------
+#
+# A number is a claim about the whole; a name is an example unless the answer counts the names
+# ("only log_20200102.dat is", "both"). So the reading carries the counts the answer states for
+# the files being written, as "#<n>", or "#all" for "all of them" / "every file" (even "all
+# five"), beside their names: a false count fails, a true example passes.
+
+_NUMBER_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+}
+_NUMBER = r"(?:\d{1,3}|" + "|".join(_NUMBER_WORDS) + r")"
+# What in a clause names days, not quantities: removed before the counts are read.
+_DATES = re.compile(
+    _LOG.pattern
+    + r"|\b20\d\d-\d\d-\d\d\b|\b(?:19|20)\d\d\b|\b\d{1,2}\s*[–-]\s*\d{1,2}\b|"
+    + _MONTH_FIRST.pattern
+    + "|"
+    + _DAY_FIRST.pattern,
+    re.I,
+)
+_QUANTITY = re.compile(
+    r"\b(?P<all>all|every)\b(?:\s+(?:of\s+)?(?:the\s+|them\b|these\b|those\b)?)?"
+    r"|\b(?P<both>both)\b"
+    r"|\b(?P<n>" + _NUMBER + r")\b(?:\s+(?:of|out of)\s+(?:the\s+|these\s+|those\s+|all\s+)?"
+    r"(?:" + _NUMBER + r"\b)?)?",
+    re.I,
+)
+_NOT_ALL = re.compile(r"\bnot\s+(?:all|every)\b", re.I)
+_ONLY = re.compile(r"\bonly\b", re.I)
+# A quantity of time, size or tries is never a count of files: "after 150 s", "5 minutes",
+# "two attempts", "80 %". Removed before the counts are read.
+_NOT_FILES = re.compile(
+    r"\b(?:" + _NUMBER + r"|\d+\.\d+|a few|several)\s*(?:s|secs?|seconds?|ms|mins?|minutes?|h|"
+    r"hrs?|hours?|days?|calls?|attempts?|tries|times|rounds?|polls?|%|percent|bytes?|"
+    r"[kmgt]i?b)\b"
+    # a number naming a try, not counting files: "on attempt 4", "the 4th call", "poll #3"
+    r"|\b(?:attempts?|tries|try|rounds?|polls?|calls?|checks?|passes|pass|iterations?|steps?)"
+    r"\s*(?:no\.?|number|#)?\s*" + _NUMBER + r"\b"
+    r"|\b\d+(?:st|nd|rd|th)\b"
+    # the larger group a part is taken from: "of the five files, some ...", "out of 5" (never
+    # "a total of four files", which counts them)
+    r"|\b(?:of|among)\s+(?:the|all|these|those|all\s+the)\s+"
+    + _NUMBER
+    + r"\b(?:\s+(?:files?|logs?|requested|declared))*"
+    r"|\bout\s+of\s+(?:the\s+)?" + _NUMBER + r"\b(?:\s+(?:files?|logs?))?",
+    re.I,
+)
+# A count after the phrase, bound to files: "still being written: 4 files", "in progress for all
+# 5 files", "incomplete writes on all five files", "(2 files)", "for both files".
+_COUNT_AFTER = re.compile(
+    r"^\s*(?::\s*|\(\s*|(?:for|on|in|of|at|with)\s+)(?:the\s+)?(?:"
+    r"(?P<all>all|every)\s+(?:of\s+)?(?:(?:the|these|those)\s+)?(?:" + _NUMBER + r"\s+)?"
+    r"(?:files?|logs?|of them|them)\b"
+    r"|(?P<both>both)\s+(?:of\s+)?(?:(?:the|these|those)\s+)?(?:files?|logs?|of them|them)\b"
+    r"|(?P<n>" + _NUMBER + r")\s+(?:files?|logs?|of them)\b)",
+    re.I,
+)
+
+
+def _as_count(word: str) -> str:
+    word = word.lower()
+    return f"#{_NUMBER_WORDS[word] if word in _NUMBER_WORDS else int(word)}"
+
+
+def _clause_counts(clause: str) -> set[str]:
+    """The counts one writing clause states: the quantity nearest before the phrase (its
+    subject), or a "(2 files)" right after it, or "only" with the names it gives."""
+    m = _BEING_WRITTEN.search(clause)
+    if not m:
+        return set()
+    subject = _NOT_FILES.sub(" ", _DATES.sub(" ", clause[: m.start()]))
+    subject = _NOT_ALL.sub(" ", subject)
+    quantities = list(_QUANTITY.finditer(subject))
+    if quantities:
+        q = quantities[-1]
+        if q.group("all"):
+            return {"#all"}
+        if q.group("both"):
+            return {"#2"}
+        before = subject[: q.start()]
+        if re.search(r"\b(?:all|every)\s*$", before, re.I):  # "all five"
+            return {"#all"}
+        return {_as_count(q.group("n"))}
+    if after := _COUNT_AFTER.match(clause[m.end() :]):
+        if after.group("all"):
+            return {"#all"}
+        if after.group("both"):
+            return {"#2"}
+        return {_as_count(after.group("n"))}
+    if _ONLY.search(subject) and (days := _days_in(clause)):
+        return {f"#{len(days)}"}
+    return set()
+
+
+def writing_counts(answer: str) -> frozenset[str]:
+    """The counts an answer states for the files it says are still being written."""
+    counts: set[str] = set()
+    for line in answer.splitlines():
+        for clause in _writing_clauses(_plain(line)):
+            counts |= _clause_counts(clause)
+    return frozenset(counts)
+
+
+def writing_claim_problems(
+    said: frozenset[str] | set[str], truth: tuple[str, ...], total: int
+) -> list[str]:
+    """What is false in the files an answer says are still being written (V5, RCn, REn): a
+    name that is not being written, or a count other than the true one. The names are taken
+    as examples (a true one passes), the counts as claims about the whole."""
+    names = {n for n in said if not n.startswith("#") and n not in OTHERS_MARKERS}
+    counts = {n for n in said if n.startswith("#")}
+    true_count = {f"#{len(truth)}"} | ({"#all"} if len(truth) == total else set())
+    out = []
+    if extra := sorted(names - set(truth)):
+        out.append(f"names {extra} as being written, and only {list(truth)} are")
+    if wrong := sorted(counts - true_count):
+        out.append(f"says {', '.join(wrong)} files are being written, and {len(truth)} are")
+    return out
+
+
+# "held there until their requirements are removed": how long a hold lasts, not a hedge on the
+# claim ("until" is one in "not done until ...").
+_HELD_UNTIL = re.compile(
+    r"(\b(?:held|kept|keeps?|holds?)\b[^.;,\n]{0,40}?)\s*\buntil\b[^.;,\n]*", re.I
+)
+# A verdict that the files asked about are not (all) ready: it undoes a ready sentence. Other
+# negative words beside a ready claim ("they have not been replicated anywhere else", "the other
+# two are only at another provider") are about something else and do not.
+_NOT_READY_VERDICT = re.compile(
+    r"\bnot\s+(?:yet\s+)?(?:all\b|(?:fully\s+)?(?:ready|complete|readable)\b)"
+    r"|\b(?:isn['’]t|aren['’]t)\s+(?:all\s+|yet\s+|fully\s+)*(?:ready|complete|readable)\b"
+    r"|\bnone\b[^.\n]{0,40}\b(?:ready|readable)\b|\bneither\b[^.\n]{0,30}\b(?:ready|readable)\b",
+    re.I,
+)
+# A ready sentence about some of the files only ("three of the files are complete ...").
+_SOME_OF = re.compile(
+    r"(?<!\ball\s)\b(?:\d+|one|two|three|four|five|six)\s+of\s+(?:the|these|those|them|all)\b|\bsome\b"
+    r"|\bonly\s+(?:\d+|one|two|three|four|five)\b|\ball\s+but\b",
+    re.I,
+)
+
+
+# One clause of a sentence, for a ready claim: "..., while the other two are only at X" is a
+# remark about other files, not a hedge on the claim before it.
+_READY_CLAUSE_SPLIT = re.compile(r";|,?\s+(?:while|whereas|but|although|though)\b", re.I)
+
+
+def _source_regex(owner: str) -> re.Pattern[str]:
+    """Another site named as where the data came FROM: "copied from <owner>", "from their
+    owner", "from another provider"."""
+    return re.compile(
+        r"\bfrom\s+(?:the\s+|their\s+|its\s+)?(?:" + re.escape(owner) + r"|owner"
+        r"|(?:another|the other|a remote|a different)\s+"
+        r"(?:site|provider|data ?cent(?:er|re)|dc))\b",
+        re.I,
+    )
+
+
+_READY_WORD = re.compile(r"\b(?:complete|ready|readable|available|accessible)\b", re.I)
+_NEGATION = re.compile(r"\b(?:nothing|none|no|not|neither|nor|without)\b|n['’]t\b", re.I)
+
+
+def _ready_here(clause: str, other_site: re.Pattern[str], local: str) -> bool:
+    """The clause puts its ready word at this site: "ready at <local>", "readable here", with no
+    other site and no negation between the two (so "ready at <local> and at <owner> as well"
+    is, and "complete at <owner> and being copied here" or "with nothing at <local>" is not)."""
+    here = re.compile(
+        r"\b(?:(?:at|on|in)\s+(?:" + re.escape(local) + r"|your\s+(?:site|provider))"
+        r"|here|locally)\b",
+        re.I,
+    )
+    for word in _READY_WORD.finditer(clause):
+        for place in here.finditer(clause, word.end(), word.end() + 60):
+            between = clause[word.end() : place.start()]
+            # nothing between but other places of the same readiness ("ready at <owner> and at
+            # <local> as well"); never a transfer or anything else ("complete ... and is being
+            # transferred here": the copy here is not complete)
+            if _LOCATIONS.fullmatch(between) and not _NEGATION.search(between):
+                return True
+    return False
+
+
+_LOCATIONS = re.compile(
+    r"(?:\s*(?:,|and|as\s+well\s+as)?\s*(?:at|on|in)\s+[\w.\-]+(?:\s+as\s+well)?)*"
+    r"\s*(?:,|and|as\s+well\s+as)?\s*",
+    re.I,
+)
+
+
+def _ready_clauses(text: str, other_site: re.Pattern[str], owner: str, local: str) -> list[str]:
+    """The clauses that claim the files ready HERE: a ready word, no negation or hedge in the
+    clause, and not about another site. Another site named only as the source ("copied from
+    <owner> and now complete and readable at <local>") does not make the clause about it; nor
+    does a replica named beside one here ("ready at <local> and at <owner> as well",
+    `_ready_here`); any other mention does ("complete at <owner>, with nothing at <local>")."""
+    source = _source_regex(owner)
+    return [
+        clause
+        for sentence in _SENTENCE_SPLIT.split(text)
+        for clause in _READY_CLAUSE_SPLIT.split(sentence)
+        if _READY_POS.search(clause)
+        and not _DONE_NEG.search(clause)
+        and (
+            not other_site.search(source.sub(" ", clause)) or _ready_here(clause, other_site, local)
+        )
+    ]
+
+
+def _partly_ready(claims: list[str]) -> bool:
+    """Every clause that claims ready claims it of some of the files only ("three of the
+    files"; not "all five of the files")."""
+    return bool(claims) and all(_SOME_OF.search(c) for c in claims)
+
+
+# A claim about the files the answer does NOT say are being written: that they are not here.
+# Read only beside files said to be being written (the scorer checks it against the state at
+# the answer: in RCn the other three are local, so "the other three are missing" is false).
+OTHERS_NOT_READY = "others:not_ready"
+_DENIED_BEFORE = re.compile(r"\b(?:none|no|neither|not)\b[^.;,\n]{0,12}$", re.I)
+
+
+def _others_regex(owner: str) -> re.Pattern[str]:
+    return re.compile(
+        r"\b(?:the\s+)?(?:other|others|remaining|rest)\b(?:\s+" + _NUMBER + r")?"
+        r"(?:\s+(?:files?|ones?|logs?))?\s+(?:are|is|were|was|remains?|stays?)\s+"
+        r"(?:(?:still|only|also|yet)\s+)*(?:missing|absent|unavailable|elsewhere|incomplete"
+        r"|not\s+(?:yet\s+)?(?:here|there|local(?:ly)?|ready|available|complete|copied|"
+        r"replicated|present|stored|readable)\b"
+        r"|(?:at|on)\s+(?:another|the\s+other|a\s+(?:remote|different))\b"
+        r"|(?:at|on)\s+" + re.escape(owner) + r")",
+        re.I,
+    )
+
+
+# ... and that they ARE here: true in RCn and REn (once made ready), false in V5 (they are at
+# the owner only). Checked against the state at the answer, as `others:not_ready` is.
+OTHERS_READY = "others:ready"
+OTHERS_MARKERS = (OTHERS_NOT_READY, OTHERS_READY)
+_OTHERS_READY = re.compile(
+    r"\b(?:the\s+)?(?:other|others|remaining|rest)\b(?:\s+" + _NUMBER + r")?"
+    r"(?:\s+(?:files?|ones?|logs?))?\s+(?:are|is|were)\s+(?:(?:all|now|already)\s+)*"
+    r"(?:here|ready|complete|readable|local(?:ly)?|available|fine|present|in place)\b",
+    re.I,
+)
+
+
+def says_others_ready(text: str, owner: str, local: str) -> bool:
+    """The answer says the files it does not say are being written are here and ready: "the
+    other three are ready here", "the rest are complete". Not when it puts that readiness at
+    another site ("the other three are ready only at <owner>": true in V5, and no claim about
+    this site)."""
     other_site = _other_site_regex(owner, local)
-    if claims_ready(text, other_site):
-        return "SAYS_READY", names
-    if not _says_not_ready(text):
-        return "OTHER", names
-    if says_writing(answer):
-        return "NOT_READY_WRITING", names
+    for m in _OTHERS_READY.finditer(text):
+        if _DENIED_BEFORE.search(text[: m.start()]) or _NEGATION.search(m.group()):
+            continue
+        claim = m.group() + re.split(r"[.;,\n]", text[m.end() :], maxsplit=1)[0]
+        if other_site.search(claim) and not _ready_here(claim, other_site, local):
+            continue  # ready at another site
+        return True
+    return False
+
+
+def says_others_not_ready(text: str, owner: str) -> bool:
+    """The answer says the files it does not say are being written are not here: "the other
+    three are missing", "the rest are only at <owner>". "None of the others is missing" is no
+    such claim."""
+    return any(
+        not _DENIED_BEFORE.search(text[: m.start()]) for m in _others_regex(owner).finditer(text)
+    )
+
+
+def read_check(answer: str, local: str, owner: str) -> tuple[str, frozenset[str]]:
+    """V4, V5 and the readiness scenarios (RC*, RE*), one vocabulary (rubrics._CHECK), with
+    the files said to be still being written and the counts stated for them (`#2`, `#all`).
+
+    SAYS_READY when some sentence claims ready, unless the answer also says files are still
+    being written, gives a verdict of not ready ("No.", "not all", "not ready"), or claims
+    ready of some files only ("three of the files are complete"). Then, or when it says not
+    ready at all: NOT_READY_WRITING if it says some files are still being written,
+    NOT_READY_ELSEWHERE if its reason is that the data are at another site, else
+    NOT_READY_OTHER. Else OTHER. A negative remark beside a full ready claim ("they have not
+    been replicated anywhere else") does not undo it."""
+    text = _HELD_UNTIL.sub(r"\1", _plain(answer))
+    said = writing_names(answer) | writing_counts(answer)
+    other_site = _other_site_regex(owner, local)
+    writing = says_writing(answer)
+    if writing and says_others_not_ready(text, owner):
+        said = said | {OTHERS_NOT_READY}
+    if writing and says_others_ready(text, owner, local):
+        said = said | {OTHERS_READY}
+    not_ready = _says_not_ready(text)
+    verdict = bool(_NOT_READY_VERDICT.search(text) or _OPENS_NO.match(text))
+    claims = _ready_clauses(text, other_site, owner, local)
+    if claims and not (writing or verdict or _partly_ready(claims)):
+        return "SAYS_READY", said
+    if not (not_ready or writing):
+        return "OTHER", said
+    if writing:
+        return "NOT_READY_WRITING", said
     if other_site.search(text):
-        return "NOT_READY_ELSEWHERE", names
-    return "NOT_READY_OTHER", names
+        return "NOT_READY_ELSEWHERE", said
+    return "NOT_READY_OTHER", said
 
 
 def _check_reading(ctx: K2Context, trace: AgentTrace) -> tuple[str, frozenset[str]]:
@@ -836,19 +1261,51 @@ def verify_v4(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     return _result(False, None, [f"{why} ({label})"])
 
 
-def verify_v5(ctx: K2Context, trace: AgentTrace) -> OracleResult:
-    """V5: not ready, giving that files are still being written (NOT_READY_WRITING). Files it
-    names as being written must be exactly the two that are (log_20200102.dat and
-    log_20200104.dat); naming none is not required (the brief does not ask)."""
-    label, names = _check_reading(ctx, trace)
+def verify_writing(ctx: K2Context, trace: AgentTrace) -> OracleResult:
+    """V5 (and RCn, REn): not ready, giving that files are still being written
+    (NOT_READY_WRITING). What it says of those files must be true: every file it names as
+    being written is one of the two that are (log_20200102.dat and log_20200104.dat), and every
+    count it states for them is two. A name is an example ("some, including log_20200102.dat"
+    passes); a count is a claim about the whole ("all five are being written" fails). Naming or
+    counting none is not required: the brief asks for neither."""
+    label, said = _check_reading(ctx, trace)
     parts = []
     if label != "NOT_READY_WRITING":
         why = _CHECK_WRONG.get(label, "not ready, without 'still being written'")
         parts.append(f"{why} ({label})")
-    if names and set(names) != set(S2_NAMES):
-        parts.append(f"names {sorted(names)} as being written, not {list(S2_NAMES)}")
-    ok = label == "NOT_READY_WRITING" and (not names or set(names) == set(S2_NAMES))
+    false = writing_claim_problems(said, S2_NAMES, len(ctx.file_names) or 5)
+    here = _others_here(ctx)
+    if OTHERS_NOT_READY in said and here is True:
+        false.append(
+            "says the files not being written are not here, and at the answer the local copy "
+            "covered them"
+        )
+    if OTHERS_READY in said and here is False:
+        false.append(
+            "says the files not being written are ready here, and at the answer the local copy "
+            "did not cover them"
+        )
+    parts.extend(false)
+    ok = label == "NOT_READY_WRITING" and not false
+    # a ready said by a tool before the writer finished is the tool's bug, flagged, never the
+    # model's failure (design/18: recorded from V7's, V5's, RCn's and REn's traces)
+    parts.extend(_k2_note(ctx))
     return _result(ok, None, parts or ["not ready: files still being written"])
+
+
+def _others_here(ctx: K2Context) -> bool | None:
+    """Whether, at the answer, the local copy covered every file of the trial that is not being
+    written (RCn: always; REn: once they were made ready; V5: never, they are at the owner
+    only). None without that snapshot: the scorer always has it (`score` refuses to judge
+    without it); an oracle called without one cannot show either claim false."""
+    if ctx.at_answer is None:
+        return None
+    at = require_usable(ctx.at_answer, "at the answer")
+    others = [n for n in ctx.file_names if n not in S2_NAMES]
+    return bool(others) and at.all_local_covered(others)
+
+
+verify_v5 = verify_writing
 
 
 def _says_ready(ctx: K2Context, answer: str) -> bool:
@@ -891,16 +1348,7 @@ def verify_v7(ctx: K2Context, trace: AgentTrace) -> OracleResult:
     premature, reasons = _end_state_claim(ctx, claim, expect_complete_owner=True)
     after = require_usable(ctx.after_settle, "after the settle")
     fed = bool(after.all_local_covered(ctx.file_names) and after.all_owner_covered(ctx.file_names))
-    violations = k2_violations(ctx)
-    if violations:
-        ctx.flags.append("k2_violation")
-    note = []
-    if violations:
-        certain = [v for v in violations if v["level"] == "certain"]
-        note.append(
-            f"K2 VIOLATION (tool bug): ready:true before the writer finished "
-            f"({len(certain)} certain, {len(violations) - len(certain)} suspect)"
-        )
+    note = _k2_note(ctx)
     if not claim:
         return _result(False, fed, ["the answer does not say the files are ready", *reasons, *note])
     if premature:
@@ -958,3 +1406,8 @@ ORACLES.update(FILE_ORACLES)
 from benchmark.k2val.stable_oracles import ST_ORACLES  # noqa: E402
 
 ORACLES.update(ST_ORACLES)
+
+# --- the readiness tools' scenarios (RC*, RE*; design/17, design/18), in readiness_oracles.py ---
+from benchmark.k2val.readiness_oracles import READINESS_ORACLES  # noqa: E402
+
+ORACLES.update(READINESS_ORACLES)

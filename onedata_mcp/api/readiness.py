@@ -30,16 +30,21 @@ helpers in `api/files.py`, `api/qos.py`, `api/spaces.py` and `api/transfers.py`.
 from __future__ import annotations
 
 import asyncio
+import bisect
+import functools
 import logging
 import os
 import re
 import time
+import weakref
 from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import Any
 
 from onedata_mcp.api.files import (
+    _file_id_parts,
     get_file_attributes,
     get_file_distribution,
     get_file_id,
@@ -48,7 +53,13 @@ from onedata_mcp.api.files import (
 from onedata_mcp.api.qos import add_qos_requirement, get_qos_requirement
 from onedata_mcp.api.transfers import get_transfer, list_space_transfers
 from onedata_mcp.config import get_oneprovider_config, get_onezone_config
-from onedata_mcp.utils import OnedataApiError, OnedataError, OnedataInvalidSpaceError, request
+from onedata_mcp.utils import (
+    OnedataApiError,
+    OnedataError,
+    OnedataInvalidSpaceError,
+    id_segment,
+    request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,22 +69,39 @@ logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_S = 5.0
 CHECK_BUDGET_S = 60.0  # check_readiness ends within this
-MAX_WAIT_DEFAULT_S = 240  # one ensure_readiness call waits at most this (env below) ...
-MAX_WAIT_CAP_S = 240  # ... and never more, whatever the env says: the harness bounds a call
+# One ensure_readiness call works and waits at most this (and at most its `deadline_s`). With
+# the grace, the whole call ends within 170 s, under the ~180 s a common MCP client allows a
+# call (design/18). The env below may lower the wait, never raise it: the description says "at
+# most about 2.5 minutes".
+MAX_WAIT_DEFAULT_S = 150
+MAX_WAIT_CAP_S = 150
 MAX_WAIT_ENV = "ONEDATA_MCP_ENSURE_MAX_WAIT_S"
-ENSURE_GRACE_S = 30.0  # the whole ensure call ends within max wait + this
-CLASSIFY_RESERVE_S = 20.0  # tail of an ensure call kept for the final classification
+# The final read-back of an ensure call (files and holds), after its budget: at the default cap
+# the whole call ends within 150 + 20 s. Scaled down with the cap (`ensure_timing`).
+ENSURE_GRACE_S = 20.0
 MAX_DEADLINE_S = 86_400
 MAX_EXTENT_ITEMS = 20
 MAX_FILES = 20_000  # files an extent may resolve to, and a dataset listing may hold
 MAX_FILES_PER_ITEM = 20_000  # names in one item's `files`
 MAX_DATE_RANGES_PER_ITEM = 400
+MAX_DATE_RANGES = 400  # date ranges in the whole extent (all items together)
+SELECT_CHECK_EVERY = 1024  # files or names looked at between two checks of the deadline
 LIST_PAGE_LIMIT = 1000
 CHECK_CONCURRENCY = 16
 PLACE_CONCURRENCY = 8
 MAX_TRANSFERS = 50
 MAX_EXAMPLES = 3
 MAX_UNRESOLVED_SHOWN = 10
+MAX_HOLD_IDS_SHOWN = 100  # ids of the holds an answer lists; the rest are counted
+# How the ids not listed are found (names no tool: design/10, gate 2). Not "each file's QoS
+# summary": that lists every requirement on the file, other people's and inherited ones too.
+HOLD_IDS_ELSEWHERE = (
+    "Not every id is listed here (the first ones, in the files' path order, are). To list the "
+    "others, call again with fewer files: a hold this server placed is read back and listed, "
+    "not placed again."
+)
+# The pointer to the other tool, given only where that tool is offered (decision 4, design/17).
+ENSURE_POINTER = "ensure_readiness can wait for {them} and place {them} at your provider."
 
 # The fixed expression form is the tag that marks this tool's placement rules.
 HOLD_EXPRESSION = "providerId={provider_id} & anyStorage"
@@ -104,6 +132,48 @@ REASONS = ("unreachable", "being_written", "in_transfer", "at_other_site")
 _monotonic = time.monotonic
 _sleep = asyncio.sleep
 
+# What one call resolved and wrote, for a host that records its calls: the validation panel's
+# harness (`benchmark/k2val/recording.py`, `mcp_http.py`) sets a record here per call of a tool
+# in RECORDED_TOOLS, made by `new_call_record` (so a call that resolved and wrote nothing has an
+# EMPTY record, never none: none means a trace from before the record), and its scorer reads from
+# it what a call did (design/18). Model-invisible: never part of an answer. None (production):
+# nothing is recorded. Each entry names its file by the space's id and the file's id (a path is
+# for reading only: two spaces may share a name):
+#   resolved: [{file_id, space_id, path, state, items}] the files the extent resolved to, with
+#             their final state and the indexes of the extent items that selected each
+#   writes:   [{file_id, space_id, path}] every file a hold was requested for, noted BEFORE the
+#             request
+#   rules:    [{file_id, space_id, path, rule_id, how}] each rule this call created, confirmed,
+#             or could not confirm ("created", "confirmed", "unconfirmed")
+CALL_RECORD: ContextVar[dict[str, Any] | None] = ContextVar(
+    "onedata_mcp_readiness_call_record", default=None
+)
+RECORDED_TOOLS = frozenset({"check_readiness", "ensure_readiness"})
+
+
+def new_call_record() -> dict[str, Any]:
+    """The record a host sets for one call of a tool in RECORDED_TOOLS, before the call."""
+    return {"resolved": [], "writes": []}
+
+
+def _note(key: str, entry: dict[str, Any]) -> None:
+    record = CALL_RECORD.get()
+    if record is not None:
+        record.setdefault(key, []).append(entry)
+
+
+def _where(file: FileInfo) -> dict[str, Any]:
+    return {"file_id": file.file_id, "space_id": file.space_id, "path": file.path}
+
+
+def _note_resolved(files: list[FileInfo]) -> None:
+    record = CALL_RECORD.get()
+    if record is not None:
+        record["resolved"] = [
+            {**_where(f), "state": f.state, "items": sorted(f.items)} for f in files
+        ]
+
+
 # Process-level state (reset by `reset_state`, which tests call).
 _local_provider_id: str | None = None
 _rules: dict[str, str] = {}  # file id -> id of the placement rule this process created
@@ -116,10 +186,11 @@ def reset_state() -> None:
     _local_provider_id = None
     _hold_plain = False
     _rules.clear()
+    _placing.clear()
 
 
 def max_wait_s() -> float:
-    """How long one ensure call waits at most: the env value, else 240 s, never above 240 s."""
+    """How long one ensure call waits at most: the env value, else 150 s, never above 150 s."""
     raw = os.environ.get(MAX_WAIT_ENV, "").strip()
     if raw:
         try:
@@ -143,6 +214,7 @@ def max_wait_s() -> float:
 _DATE_RE = re.compile(r"(?<!\d)\d{8}(?!\d)")
 
 
+@functools.lru_cache(maxsize=65_536)
 def name_date(name: str) -> date | None:
     """The date a file name carries: its first run of exactly 8 digits that is a real YYYYMMDD."""
     for match in _DATE_RE.finditer(name):
@@ -377,6 +449,7 @@ class FileInfo:
     local_bytes: int = 0
     dist: Distribution | None = None
     state: str | None = None  # "ready", a reason in REASONS, "unchecked", or None (not looked at)
+    items: set[int] = field(default_factory=set)  # the extent items that selected it
 
     @property
     def basename(self) -> str:
@@ -390,19 +463,111 @@ class FileInfo:
 @dataclass
 class _Item:
     dataset: str  # as declared
-    space: str  # space name
-    root: str  # absolute directory path: /<space>[/dir...]
+    space: str  # the space segment as declared: a space's name or its id
+    # absolute directory path, /<space>[/dir...], with one leading or trailing slash dropped
+    # (`my-dataset/sub` is read as /my-dataset/sub when its first segment is a space)
+    root: str
     files: list[str]  # as declared: matched exactly, never trimmed or normalised
     ranges: list[tuple[date, date]]
-    # A "/" but no leading one: read as /<dataset> when its first segment is a space.
-    misspelled: bool = False
+
+
+_ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+_ITEM_KEYS = ("dataset", "files", "date_ranges")
+_RANGE_KEYS = ("start", "end")
 
 
 def _parse_day(value: Any, where: str) -> date:
+    if not isinstance(value, str) or not _ISO_DAY.fullmatch(value):
+        raise ValueError(f"{where} must be a date in YYYY-MM-DD form, got {value!r}")
     try:
         return date.fromisoformat(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"{where} must be a date in YYYY-MM-DD form, got {value!r}") from None
+    except ValueError:
+        raise ValueError(
+            f"{where} {value!r} is not a calendar date: give a real day, as YYYY-MM-DD"
+        ) from None
+
+
+def _unknown_keys(raw: Mapping[str, Any], known: tuple[str, ...], where: str) -> None:
+    """A field the item does not have is refused: dropped silently, it would widen the item
+    (an item with no `files` and no `date_ranges` is the whole dataset)."""
+    unknown = sorted(str(key) for key in raw if key not in known)
+    if unknown:
+        raise ValueError(
+            f"{where} has no field {', '.join(repr(k) for k in unknown)}: "
+            f"its fields are {', '.join(known)}"
+        )
+
+
+_BAD_COMPONENTS = ("", ".", "..")
+
+
+def _dataset_root(dataset: str, where: str) -> tuple[str, str]:
+    """(the dataset's directory as an absolute path, its space segment).
+
+    One leading and one trailing slash are dropped (`/my-dataset/sub/` is `/my-dataset/sub`,
+    and `my-dataset/sub` is read as `/my-dataset/sub` when its first segment is a space). An
+    empty, `.` or `..` component is refused, and so is a second leading or trailing slash: the
+    provider would resolve such a path to another directory (`/my-dataset/..` is above every
+    space)."""
+    body = dataset[1:] if dataset.startswith("/") else dataset
+    body = body[:-1] if body.endswith("/") else body
+    parts = body.split("/")
+    if any(part in _BAD_COMPONENTS for part in parts):
+        space = parts[0] if parts[0] not in _BAD_COMPONENTS else "my-dataset"
+        raise ValueError(
+            f"{where}.dataset {dataset!r} has an empty, '.' or '..' component: give a space "
+            f"name such as '{space}', or an absolute directory path inside it such as "
+            f"'/{space}/sub/dir'"
+        )
+    return "/" + body, parts[0]
+
+
+def _check_file_path(name: str, where: str) -> None:
+    """A declared file path is matched exactly, so an empty, `.` or `..` component could only
+    ever select nothing (or, read loosely, another file): it is refused, with how to give it."""
+    parts = (name[1:] if name.startswith("/") else name).split("/")
+    if "/" in name and any(part in _BAD_COMPONENTS for part in parts):
+        raise ValueError(
+            f"{where} {name!r} has an empty, '.' or '..' component: give the file's exact "
+            "name, its path inside the dataset (such as 'sub/data_20180801.nc') or its "
+            "absolute path, without them"
+        )
+
+
+# How an explicitly empty selector is refused: it selects no file, and read as left out it
+# would mean the whole dataset (an empty search result passed on would hold every file).
+_EMPTY_SELECTOR = {
+    "files": "name the files you need",
+    "date_ranges": "give at least one date range",
+}
+
+
+def _selector(raw: Mapping[str, Any], key: str, where: str) -> list[Any]:
+    """`files` or `date_ranges`: [] when left out; refused when given as null or an empty list."""
+    if key not in raw:
+        return []
+    value = raw[key]
+    if value is None or (isinstance(value, list) and not value):
+        what = "null" if value is None else "empty"
+        raise ValueError(
+            f"{where}.{key} is {what}, so it selects no file: {_EMPTY_SELECTOR[key]}, or leave "
+            f"{key} out (an item with neither files nor date_ranges means its whole dataset)"
+        )
+    if not isinstance(value, list):
+        raise ValueError(f"{where}.{key} must be a list")
+    return value
+
+
+def check_extent_item(raw: Mapping[str, Any], where: str) -> None:
+    """What the MCP schema would refuse with a generic error, refused first with a hint: a field
+    the item (or a date range) does not have, and a selector given as null or empty."""
+    _unknown_keys(raw, _ITEM_KEYS, where)
+    for key in ("files", "date_ranges"):
+        _selector(raw, key, where)
+    ranges = raw.get("date_ranges")
+    for r_index, rng in enumerate(ranges if isinstance(ranges, list) else ()):
+        if isinstance(rng, Mapping):
+            _unknown_keys(rng, _RANGE_KEYS, f"{where}.date_ranges[{r_index}]")
 
 
 def _normalise_extent(extent: Sequence[Mapping[str, Any]]) -> list[_Item]:
@@ -410,51 +575,60 @@ def _normalise_extent(extent: Sequence[Mapping[str, Any]]) -> list[_Item]:
     if not isinstance(extent, list | tuple) or not 1 <= len(extent) <= MAX_EXTENT_ITEMS:
         raise ValueError(f"extent must be a list of 1 to {MAX_EXTENT_ITEMS} items")
     items: list[_Item] = []
+    named = 0
+    ranged = 0
     for index, raw in enumerate(extent):
         where = f"extent[{index}]"
         if not isinstance(raw, Mapping):
             raise ValueError(f"{where} must be an object")
+        _unknown_keys(raw, _ITEM_KEYS, where)
         dataset = raw.get("dataset")
-        if not isinstance(dataset, str) or not dataset:
+        if not isinstance(dataset, str) or not dataset.strip("/"):
             raise ValueError(f"{where}.dataset must be a space name or a path inside a space")
-        root = dataset if dataset.startswith("/") else "/" + dataset
-        space = root.split("/")[1]
-        if not space:
-            raise ValueError(f"{where}.dataset must be a space name or a path inside a space")
-        files = raw.get("files") or []
-        if not isinstance(files, list) or not all(isinstance(f, str) and f for f in files):
+        root, space = _dataset_root(dataset, where)
+        files = _selector(raw, "files", where)
+        if not all(isinstance(f, str) and f for f in files):
             raise ValueError(f"{where}.files must be a list of file names or paths")
+        for f_index, name in enumerate(files):
+            _check_file_path(name, f"{where}.files[{f_index}]")
         if len(files) > MAX_FILES_PER_ITEM:
             raise ValueError(f"{where}.files may name at most {MAX_FILES_PER_ITEM} files")
-        raw_ranges = raw.get("date_ranges") or []
-        if not isinstance(raw_ranges, list):
-            raise ValueError(f"{where}.date_ranges must be a list")
+        raw_ranges = _selector(raw, "date_ranges", where)
         if len(raw_ranges) > MAX_DATE_RANGES_PER_ITEM:
             raise ValueError(
                 f"{where}.date_ranges may hold at most {MAX_DATE_RANGES_PER_ITEM} ranges"
+            )
+        ranged += len(raw_ranges)
+        if ranged > MAX_DATE_RANGES:
+            raise ValueError(
+                f"The extent gives more than {MAX_DATE_RANGES} date ranges in all. Merge only "
+                "ranges that overlap or touch (that selects the same files), or split the ranges "
+                f"across calls of at most {MAX_DATE_RANGES}: a range that also spans the gaps "
+                "between them would select the files in those gaps too."
             )
         ranges: list[tuple[date, date]] = []
         for r_index, rng in enumerate(raw_ranges):
             r_where = f"{where}.date_ranges[{r_index}]"
             if not isinstance(rng, Mapping):
                 raise ValueError(f"{r_where} must be an object with start and end")
+            _unknown_keys(rng, _RANGE_KEYS, r_where)
             start = _parse_day(rng.get("start"), f"{r_where}.start")
             end = _parse_day(rng.get("end"), f"{r_where}.end")
             if start > end:
-                raise ValueError(f"{r_where}: start is after end")
+                raise ValueError(
+                    f"{r_where}: start {start.isoformat()} is after end {end.isoformat()}; "
+                    "give the earlier day as start"
+                )
             ranges.append((start, end))
-        misspelled = not dataset.startswith("/") and "/" in dataset
         # A name or a range declared twice is looked for once.
-        items.append(
-            _Item(
-                dataset,
-                space,
-                root,
-                list(dict.fromkeys(files)),
-                list(dict.fromkeys(ranges)),
-                misspelled,
+        unique = list(dict.fromkeys(files))
+        named += len(unique)
+        if named > MAX_FILES:
+            raise ValueError(
+                f"The extent names more than {MAX_FILES} files in all. "
+                "Declare a smaller extent, or select files by date range."
             )
-        )
+        items.append(_Item(dataset, space, root, unique, list(dict.fromkeys(ranges))))
     return items
 
 
@@ -498,6 +672,73 @@ class _Transfer:
     status: str | None
 
 
+@dataclass(frozen=True)
+class _Space:
+    """The one space an item's space segment names, chosen by its id or its name."""
+
+    space_id: str
+    name: str
+    # The name is a path's first segment for this space only: no other listed space has it as
+    # its name or its id. When it is not, no path is looked up by it (`_list_dataset`).
+    name_unique: bool
+    dir_id: str | None = None  # the space's own directory, when the provider's list gives it
+
+
+class _AmbiguousSpace(ValueError):
+    """An item's space segment names more than one space: refused, never guessed."""
+
+
+def _dir_id_of(entry: Mapping[str, Any]) -> str | None:
+    for key in ("dirId", "fileId"):  # the swagger's Space: dirId, and fileId (deprecated)
+        value = entry.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _space_label(entry: Mapping[str, Any]) -> str:
+    return f"the space '{entry.get('name')}' (id '{entry['spaceId']}')"
+
+
+def _choose_space(space: str, entries: list[dict[str, Any]]) -> _Space:
+    """The space `space` names among the provider's list: one whose id is exactly `space`, or
+    whose name is. Refused (ValueError, with the candidates) when no space or more than one does:
+    a name that is another space's id, or a name two spaces share. Pure."""
+    matches = {e["spaceId"]: e for e in entries if e["spaceId"] == space or e.get("name") == space}
+    if not matches:
+        names = sorted(e["name"] for e in entries if isinstance(e.get("name"), str))
+        # Only the spaces this provider supports for the token are listed: another space of
+        # that name may still exist, so "not found" says where it was looked for.
+        raise ValueError(
+            f"your provider supports no space named {space!r} for this token "
+            f"(the spaces it lists: {names})"
+        )
+
+    def names_one(value: object) -> bool:
+        return sum(value in (e["spaceId"], e.get("name")) for e in entries) == 1
+
+    if len(matches) > 1:
+        shown = " and ".join(_space_label(e) for e in matches.values())
+        forms = [
+            repr(form)
+            for e in matches.values()
+            for form in (e.get("name"), e["spaceId"])
+            if isinstance(form, str) and form and names_one(form)
+        ]
+        how = (
+            f"Give {' or '.join(dict.fromkeys(forms))} instead: each names one space only."
+            if forms
+            else "No name or id names one of them alone."
+        )
+        raise _AmbiguousSpace(
+            f"{space!r} names more than one space at your provider: {shown}. {how}"
+        )
+    (entry,) = matches.values()
+    name = entry.get("name")
+    name = name if isinstance(name, str) and name else entry["spaceId"]
+    return _Space(entry["spaceId"], name, names_one(name), _dir_id_of(entry))
+
+
 class _Run:
     """One tool call: its local provider, its time limit, its caches, its REST-call limit.
 
@@ -510,7 +751,7 @@ class _Run:
         self.local_id = local_id
         self.deadline = deadline
         self._rest = asyncio.Semaphore(CHECK_CONCURRENCY)
-        self._space_ids: dict[str, str] = {}
+        self._space_of: dict[str, _Space] = {}
         self._spaces: list[dict[str, Any]] | None = None
         self._online: dict[str, asyncio.Future[bool]] = {}
         self._transfers: dict[str, asyncio.Future[list[_Transfer] | None]] = {}
@@ -537,31 +778,56 @@ class _Run:
         """`call`, cut off by the budget (waiting for the limit counts against it)."""
         return await self.within(self.call(fn, *args, **kwargs))
 
+    async def space(self, space: str) -> _Space:
+        """The one space `space` names, by its exact id or its exact name (see `_choose_space`).
+        ValueError when none or more than one does; OnedataApiError when the provider's list
+        cannot be read as one."""
+        if space not in self._space_of:
+            self._space_of[space] = _choose_space(space, await self.within(self._space_list()))
+        return self._space_of[space]
+
     async def space_id(self, space: str) -> str:
-        if space not in self._space_ids:
-            self._space_ids[space] = await self.within(self._space_id_from_provider(space))
-        return self._space_ids[space]
+        return (await self.space(space)).space_id
 
-    async def _space_id_from_provider(self, space: str) -> str:
-        """A space's id from the local provider's own `GET /spaces`, matched by name or id.
+    async def _space_list(self) -> list[dict[str, Any]]:
+        """The local provider's own `GET /spaces`, read once per call.
 
-        One provider call per tool call and no Onezone lookup, so a token valid only at the
-        local provider resolves names too (the existing resolver also reads each space's
-        details from Onezone).
+        No Onezone lookup, so a token valid only at the local provider resolves names too (the
+        existing resolver also reads each space's details from Onezone). An answer that is not
+        a list is the provider's failure, not a missing space: OnedataApiError.
         """
         if self._spaces is None:
             response = await self.call(request, get_oneprovider_config(), "GET", "/spaces")
             body = response["body"]
             if not isinstance(body, list):
-                raise ValueError("the provider's list of spaces has an unexpected shape")
-            self._spaces = [entry for entry in body if isinstance(entry, dict)]
-        for entry in self._spaces:
-            if entry.get("name") == space or entry.get("spaceId") == space:
-                space_id = entry.get("spaceId")
-                if isinstance(space_id, str) and space_id:
-                    return space_id
-        names = sorted(e["name"] for e in self._spaces if isinstance(e.get("name"), str))
-        raise ValueError(f"Space {space!r} not found. Available names: {names}")
+                raise OnedataApiError(
+                    "Oneprovider's list of spaces (GET /spaces) is not a list, so no dataset's "
+                    "space can be resolved. Call again; if it persists, the provider is at fault.",
+                    response,
+                )
+            self._spaces = [
+                entry
+                for entry in body
+                if isinstance(entry, dict)
+                and isinstance(entry.get("spaceId"), str)
+                and entry["spaceId"]
+            ]
+        return self._spaces
+
+    async def space_dir_id(self, space: _Space) -> str | None:
+        """The id of the space's own directory, bound to the space's id: from the provider's list
+        when it gives one (`dirId`, or the deprecated `fileId`), else from `GET /spaces/{id}`.
+        None when neither says. TODO(first live run): what 25.0 lists here."""
+        if space.dir_id:
+            return space.dir_id
+        segment = id_segment(space.space_id, "space id")
+        response = await self.call_in_time(
+            request, get_oneprovider_config(), "GET", f"/spaces/{segment}"
+        )
+        body = response.get("body")
+        if not isinstance(body, dict) or body.get("spaceId") != space.space_id:
+            return None  # an answer about another space (or none) gives no directory
+        return _dir_id_of(body)
 
     async def provider_online(self, provider_id: str) -> bool:
         """Onezone's `online` for a provider, looked up once per call.
@@ -574,8 +840,11 @@ class _Run:
 
     async def _lookup_online(self, provider_id: str) -> bool:
         try:
+            # The id comes from a distribution answer: one encoded path segment, and an id
+            # that cannot be one (empty, `.`, `..`, a `/`) is not looked up (ValueError).
+            segment = id_segment(provider_id, "provider id")
             response = await self.call_in_time(
-                request, get_onezone_config(), "GET", f"/providers/{provider_id}"
+                request, get_onezone_config(), "GET", f"/providers/{segment}"
             )
             return response["body"].get("online") is not False
         except Exception:  # noqa: BLE001 - best effort: never fail a tool on this lookup
@@ -676,6 +945,10 @@ async def _local_id() -> str:
 class _Listing:
     files: list[FileInfo] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)  # why this is not the whole dataset
+    root: str = ""  # the dataset's directory, its space named by name (a space id replaced)
+    # False when the listing stopped before its end (time, a refusal, a page it could not read
+    # on, directories it may not list): a file not in `files` may still be there
+    complete: bool = True
 
 
 def _no_time(item: _Item) -> str:
@@ -686,25 +959,69 @@ def _no_time(item: _Item) -> str:
 
 
 def _no_such_directory(item: _Item) -> str:
+    # A bare 404 does not say why (no such directory, or one this token cannot see): the
+    # text names both and claims neither.
     return (
-        f"dataset '{item.dataset}' not found: no such directory. "
-        "Give a space name or an existing absolute directory path."
+        f"dataset '{item.dataset}' not found at your provider: no such directory, or one this "
+        "token cannot see. Give a space name or an existing absolute directory path."
     )
 
 
-def _misspelled(item: _Item) -> str:
+def _not_allowed(item: _Item) -> str:
     return (
-        f"dataset '{item.dataset}' not found: give a space name (e.g. '{item.space}') "
-        f"or an absolute directory path ('/{item.dataset}')."
+        f"dataset '{item.dataset}' cannot be listed: the provider refused this token access "
+        "to it. Declare data the token can read."
     )
+
+
+def _shared_name(item: _Item, space: _Space) -> str:
+    return (
+        f"dataset '{item.dataset}': the name of its space, '{space.name}', is also another "
+        "space's name or id at your provider, so no path inside it is looked up by that name. "
+        f"Declare the space itself by its id ('{space.space_id}') and name the files by their "
+        "path inside it."
+    )
+
+
+def _other_space(item: _Item, space: _Space, found: str) -> str:
+    return (
+        f"dataset '{item.dataset}' resolved to a directory of another space (id '{found}'), not "
+        f"of the space '{space.name}' (id '{space.space_id}'), so nothing there is checked. "
+        "Declare the space by its id, or an absolute directory path inside it."
+    )
+
+
+# An Onedata file or space id: a long run of hexadecimal digits. Given where a name or a path
+# is asked for, it is named as an id in the hint.
+_ID_LIKE = re.compile(r"[0-9A-Fa-f]{32,}")
+
+
+def _looks_like_id(value: str) -> bool:
+    return bool(_ID_LIKE.fullmatch(value.strip("/")))
+
+
+def _status(exc: OnedataError) -> int | None:
+    status = exc.response.get("status_code") if isinstance(exc.response, dict) else None
+    return status if isinstance(status, int) else None
 
 
 def _is_gone(exc: OnedataError) -> bool:
-    """The path does not exist (any more): enoent, a 404 or notFound, or an unsupported space."""
+    """The provider answered that the path is not there: an unsupported space, a structured
+    not-found (enoent, notFound) on a 4xx, or a bare 404. A 5xx is never read as gone."""
     if isinstance(exc, OnedataInvalidSpaceError):
         return True
-    status = exc.response.get("status_code") if isinstance(exc.response, dict) else None
-    return exc.errno == "enoent" or exc.error_id == "notFound" or status == 404
+    status = _status(exc)
+    client_error = status is not None and 400 <= status < 500
+    return status == 404 or (client_error and (exc.errno == "enoent" or exc.error_id == "notFound"))
+
+
+def _is_forbidden(exc: OnedataError) -> bool:
+    """A 403, or a 4xx with the `forbidden` error id or an `eacces`/`eperm` errno."""
+    status = _status(exc)
+    client_error = status is not None and 400 <= status < 500
+    return status == 403 or (
+        client_error and (exc.error_id == "forbidden" or exc.errno in {"eacces", "eperm"})
+    )
 
 
 _FILE_TYPES = frozenset({"REG", "DIR", "SYMLNK"})  # the swagger's FileType
@@ -719,31 +1036,62 @@ async def _list_dataset(run: _Run, item: _Item) -> _Listing:
     """
     listing = _Listing()
     try:
-        space_id = await run.space_id(item.space)
+        space = await run.space(item.space)
+    except _AmbiguousSpace as exc:
+        listing.problems.append(f"dataset '{item.dataset}': {exc}")
+        return listing
     except ValueError as exc:
-        listing.problems.append(
-            _misspelled(item)
-            if item.misspelled  # 'nosuch/sub': its first segment is not a space
-            else f"dataset '{item.dataset}' not found: {exc}. "  # names the existing spaces
-            "Give one of those names, or an absolute directory path inside one."
-        )
+        if _looks_like_id(item.space):
+            listing.problems.append(
+                f"dataset '{item.dataset}' not found: it looks like an id, and no space your "
+                "provider lists for this token has that id (a file's or a directory's id is not "
+                "taken here). Give a space's name or id, or an absolute directory path such as "
+                "'/my-dataset/sub'."
+            )
+        else:  # the message names the spaces the provider lists
+            listing.problems.append(
+                f"dataset '{item.dataset}' not found: {exc}. "
+                "Give one of those names, or an absolute directory path inside one."
+            )
         return listing
     except TimeoutError:
         listing.problems.append(_no_time(item))
         return listing
+    # Once chosen, the space is bound to its id: its name is put in a path only when no other
+    # space has that name or id, and the directory found is checked against the id.
+    rest = item.root[len(item.space) + 1 :]  # "" for the space itself, else "/sub/dir"
+    root = "/" + space.name + rest
+    listing.root = root
     try:
-        root_id = await run.within(get_file_id(item.root))
+        if space.name_unique:
+            root_id = await run.within(get_file_id(root))
+        elif rest:
+            listing.problems.append(_shared_name(item, space))
+            return listing
+        elif (dir_id := await run.space_dir_id(space)) is not None:
+            root_id = dir_id
+        else:
+            listing.problems.append(_shared_name(item, space))
+            return listing
     except (FileNotFoundError, OnedataInvalidSpaceError):
         listing.problems.append(_no_such_directory(item))
         return listing
     except OnedataApiError as exc:
-        if not _is_gone(exc):  # a plain 404 or notFound from the lookup is "no such directory"
+        if _is_forbidden(exc):
+            listing.problems.append(_not_allowed(item))
+            return listing
+        if not _is_gone(exc):  # a plain 404 or notFound from the lookup is "not found"
             raise
         listing.problems.append(_no_such_directory(item))
         return listing
     except TimeoutError:
         listing.problems.append(_no_time(item))
         return listing
+    parts = _file_id_parts(root_id)
+    if parts is not None and parts[1] != space.space_id:
+        listing.problems.append(_other_space(item, space, parts[1]))
+        return listing
+    space_id = space.space_id
 
     seen = 0
     incomplete = False
@@ -762,6 +1110,9 @@ async def _list_dataset(run: _Run, item: _Item) -> _Listing:
             listing.problems.append(_no_time(item))
             break
         except (OnedataApiError, OnedataInvalidSpaceError) as exc:
+            if _is_forbidden(exc):
+                listing.problems.append(_not_allowed(item))
+                break
             if not _is_gone(exc):
                 raise
             listing.problems.append(_no_such_directory(item))
@@ -803,7 +1154,7 @@ async def _list_dataset(run: _Run, item: _Item) -> _Listing:
             origin = entry.get("originProviderId")
             info = FileInfo(
                 file_id=file_id,
-                path=_absolute(item.root, rel),
+                path=_absolute(root, rel),
                 space_id=space_id,
                 size=size if size_known else 0,
                 size_known=size_known,
@@ -840,58 +1191,214 @@ async def _list_dataset(run: _Run, item: _Item) -> _Listing:
             f"dataset '{item.dataset}': listing incomplete, not every page arrived. "
             "Call again, or give a smaller directory."
         )
+    listing.complete = not (incomplete or inaccessible or listing.problems)
     for path in dict.fromkeys(inaccessible):
         listing.problems.append(
-            f"directory '{_absolute(item.root, path)}' in '{item.dataset}' is not listed "
+            f"directory '{_absolute(root, path)}' in '{item.dataset}' is not listed "
             "(no access), so files under it cannot be checked. "
             "Declare files outside it, or get access."
         )
     return listing
 
 
-def _select(item: _Item, files: list[FileInfo], unresolved: list[str]) -> list[FileInfo]:
-    """The files an item declares; whatever it names that is not there goes to `unresolved`."""
+MAX_SAME_NAME_SHOWN = 5  # paths listed for a file name that more than one file has
+
+
+def _same_name(item: _Item, name: str, matches: list[str]) -> str:
+    shown = sorted(matches)
+    listed = ", ".join(f"'{p}'" for p in shown[:MAX_SAME_NAME_SHOWN])
+    if len(shown) > MAX_SAME_NAME_SHOWN:
+        listed += f" and {len(shown) - MAX_SAME_NAME_SHOWN} more"
+    inside = shown[0][len(item.root.rstrip("/")) + 1 :]
+    return (
+        f"file '{name}' in '{item.dataset}' matches {len(shown)} files ({listed}), so none of "
+        f"them is taken: give the one you mean by its path inside the dataset (such as "
+        f"'{inside}') or its absolute path."
+    )
+
+
+def _ticker(out_of_time: Callable[[], bool] | None) -> Callable[[int], None]:
+    def tick(i: int) -> None:
+        # every SELECT_CHECK_EVERY files, not before the first batch: a small selection is
+        # done (it costs nothing), a large one stops within one batch of the deadline
+        if out_of_time is not None and i and i % SELECT_CHECK_EVERY == 0 and out_of_time():
+            raise TimeoutError("selection did not finish within the time budget")
+
+    return tick
+
+
+@dataclass
+class ListingIndex:
+    """One listing's files, indexed once for every item that selects from it: by path, by
+    name, and (the files whose name carries a date) sorted by that date."""
+
+    paths: list[str]
+    known: set[str]
+    by_name: dict[str, list[str]]
+    days: list[date]  # sorted, one per dated file
+    dated: list[str]  # the dated files, in the order of `days`
+
+    @classmethod
+    def of(
+        cls, paths: Sequence[str], out_of_time: Callable[[], bool] | None = None
+    ) -> ListingIndex:
+        tick = _ticker(out_of_time)
+        by_name: dict[str, list[str]] = {}
+        pairs: list[tuple[date, str]] = []
+        for i, path in enumerate(paths):
+            tick(i)
+            name = path.rsplit("/", 1)[-1]
+            by_name.setdefault(name, []).append(path)
+            if (day := name_date(name)) is not None:
+                pairs.append((day, path))
+        pairs.sort()
+        return cls(list(paths), set(paths), by_name, [d for d, _ in pairs], [p for _, p in pairs])
+
+
+def select_paths(
+    item: _Item,
+    paths: Sequence[str],
+    *,
+    complete: bool = True,
+    out_of_time: Callable[[], bool] | None = None,
+    index: ListingIndex | None = None,
+) -> tuple[list[str], list[str]]:
+    """The paths of `paths` (every file listed under the item's dataset, absolute, named by the
+    space's name) that an item selects, and a text for each thing it declares that selects no
+    file or that cannot say which one. Pure: the tool's `_select` and the validation panel's
+    scorer (`benchmark/k2val/readiness_oracles.extent_selects`) share this one rule.
+
+    - neither `files` nor `date_ranges`: every file of the dataset;
+    - `files`: each matched exactly as declared, by its absolute path, its path inside the
+      dataset, or its name; a name that more than one file has selects none of them (the text
+      lists them, to be given by path), never all of them;
+    - `date_ranges`: the files whose name carries a YYYYMMDD inside one of the ranges;
+    - both: the files that either one selects (their union).
+
+    `complete` False: `paths` is a listing that stopped early. A file or range not seen in it is
+    unknown, never "not found"; a name seen once is not taken (another file of that name may be
+    in the rest of the listing); a path seen is taken.
+
+    `out_of_time` (the tool's deadline): checked every SELECT_CHECK_EVERY files or names; once
+    true, TimeoutError (the caller reports the item as not selected in time). `index`: `paths`
+    indexed once (`ListingIndex`) for all the items of one listing; built here if not given.
+    Each date range is then a search of the sorted dates, not a scan of the files.
+    """
+    tick = _ticker(out_of_time)
+    unresolved: list[str] = []
     if not item.files and not item.ranges:
-        if not files:
+        if not paths:
             unresolved.append(
-                f"dataset '{item.dataset}' has no files: there is nothing to make ready."
+                f"dataset '{item.dataset}' holds no files. "
+                "Give a directory that holds the data, or name the files."
             )
-        return files
+        return list(paths), unresolved
 
-    by_path = {f.path: f for f in files}
-    by_name: dict[str, list[FileInfo]] = {}
-    for f in files:
-        by_name.setdefault(f.basename, []).append(f)
+    if index is None:
+        index = ListingIndex.of(paths, out_of_time)
+    known, by_name = index.known, index.by_name
 
-    chosen: dict[str, FileInfo] = {}
-    for name in item.files:
+    chosen: dict[str, None] = {}
+    for i, name in enumerate(item.files):
+        tick(i)
         # Names are matched exactly as declared: no trimming, no normalising.
         if name.startswith("/"):
-            found = by_path.get(name)
-            matches = [found] if found else []
+            matches = [name] if name in known else []
         elif "/" in name:
-            found = by_path.get(_absolute(item.root, name))
-            matches = [found] if found else []
+            full = _absolute(item.root, name)
+            matches = [full] if full in known else []
         else:
             matches = by_name.get(name, [])
-        if not matches:
+            if len(matches) > 1:
+                unresolved.append(_same_name(item, name, matches))
+                continue
+            if matches and not complete:
+                unresolved.append(
+                    f"file '{name}' in '{item.dataset}' is not taken: the listing stopped early, "
+                    "so another file of that name may be in the rest of it. Give it by its path "
+                    "inside the dataset or its absolute path."
+                )
+                continue
+        if not matches and not complete:
+            unresolved.append(
+                f"file '{name}' in '{item.dataset}' is unknown: it is not among the files listed "
+                "before the listing stopped, so whether it is there is not known."
+            )
+        elif not matches and _looks_like_id(name):
+            unresolved.append(
+                f"file '{name}' in '{item.dataset}' not found: it looks like a file id, and "
+                "files are given by their exact name or their absolute path."
+            )
+        elif not matches:
             unresolved.append(
                 f"file '{name}' in '{item.dataset}' not found: "
                 "give the exact file name, or its absolute path."
             )
-        chosen.update((f.file_id, f) for f in matches)
+        chosen.update(dict.fromkeys(matches))
 
-    dated = [(f, name_date(f.basename)) for f in files] if item.ranges else []
+    for start, end in _merged_ranges(item.ranges, out_of_time):
+        lo = bisect.bisect_left(index.days, start)
+        hi = bisect.bisect_right(index.days, end)
+        for k in range(lo, hi, SELECT_CHECK_EVERY):  # one batch of files between two checks
+            if k > lo and out_of_time is not None and out_of_time():
+                raise TimeoutError("selection did not finish within the time budget")
+            chosen.update(dict.fromkeys(index.dated[k : min(k + SELECT_CHECK_EVERY, hi)]))
     for start, end in item.ranges:
-        matches = [f for f, day in dated if day is not None and start <= day <= end]
-        if not matches:
+        k = bisect.bisect_left(index.days, start)
+        if k < len(index.days) and index.days[k] <= end:
+            continue
+        if not complete:
+            unresolved.append(
+                f"date range {start.isoformat()}..{end.isoformat()} in '{item.dataset}' is "
+                "unknown: it matched no file among those listed before the listing stopped."
+            )
+        else:
             unresolved.append(
                 f"date range {start.isoformat()}..{end.isoformat()} in '{item.dataset}' "
                 "matched no file: dates are read from the YYYYMMDD in file names. "
                 "Widen the range or name the files."
             )
-        chosen.update((f.file_id, f) for f in matches)
-    return list(chosen.values())
+    return list(chosen), unresolved
+
+
+def _merged_ranges(
+    ranges: Sequence[tuple[date, date]], out_of_time: Callable[[], bool] | None = None
+) -> list[tuple[date, date]]:
+    """The union of inclusive day ranges, as sorted, disjoint ranges."""
+    tick = _ticker(out_of_time)
+    merged: list[tuple[date, date]] = []
+    for i, (start, end) in enumerate(sorted(ranges)):
+        tick(i)
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _select(
+    item: _Item,
+    files: list[FileInfo],
+    unresolved: list[str],
+    *,
+    complete: bool = True,
+    out_of_time: Callable[[], bool] | None = None,
+    index: ListingIndex | None = None,
+    by_path: Mapping[str, FileInfo] | None = None,
+) -> list[FileInfo]:
+    """The files an item declares (`select_paths`); what selects nothing goes to `unresolved`.
+    `index` and `by_path`: the listing's, made once for all its items."""
+    by_path = by_path if by_path is not None else {f.path: f for f in files}
+    selected, problems = select_paths(
+        item, list(by_path), complete=complete, out_of_time=out_of_time, index=index
+    )
+    unresolved.extend(problems)
+    tick = _ticker(out_of_time)
+    out = []
+    for i, path in enumerate(selected):
+        tick(i)
+        out.append(by_path[path])
+    return out
 
 
 def _merge_file(into: FileInfo, other: FileInfo) -> None:
@@ -904,6 +1411,7 @@ def _merge_file(into: FileInfo, other: FileInfo) -> None:
     into.flag = False if False in flags else (True if flags else None)
     into.origin = into.origin or other.origin
     into.local_bytes = min(into.local_bytes, other.local_bytes)
+    into.items |= other.items
 
 
 async def _resolve(run: _Run, items: list[_Item]) -> tuple[list[FileInfo], list[str]]:
@@ -911,14 +1419,42 @@ async def _resolve(run: _Run, items: list[_Item]) -> tuple[list[FileInfo], list[
     unresolved: list[str] = []
     resolved: dict[str, FileInfo] = {}
     listings: dict[str, _Listing] = {}
-    for item in items:
-        if item.root not in listings:
+    indexed: dict[str, tuple[ListingIndex, dict[str, FileInfo]]] = {}
+    for index, item in enumerate(items):
+        cached = item.root in listings
+        if not cached:
             listings[item.root] = await _list_dataset(run, item)
             unresolved.extend(listings[item.root].problems)
         listing = listings[item.root]
         if not listing.files and listing.problems:
             continue  # nothing to pick from; the problems are reported above
-        for f in _select(item, listing.files, unresolved):
+        named = replace(item, root=listing.root) if listing.root else item
+        not_in_time = (
+            f"dataset '{item.dataset}': its files were not selected within the time budget. "
+            "Call again, or declare fewer files or date ranges."
+        )
+        if cached and run.out_of_time():  # a cached listing costs no request: check here
+            unresolved.append(not_in_time)
+            continue
+        try:
+            if item.root not in indexed:
+                by_path = {f.path: f for f in listing.files}
+                indexed[item.root] = (ListingIndex.of(list(by_path), run.out_of_time), by_path)
+            listing_index, by_path = indexed[item.root]
+            selected = _select(
+                named,
+                listing.files,
+                unresolved,
+                complete=listing.complete,
+                out_of_time=run.out_of_time,
+                index=listing_index,
+                by_path=by_path,
+            )
+        except TimeoutError:
+            unresolved.append(not_in_time)
+            continue
+        for f in selected:
+            f.items.add(index)
             if f.file_id in resolved:
                 _merge_file(resolved[f.file_id], f)
             else:
@@ -1058,6 +1594,45 @@ def _phrase(reason: str, n: int, *, ensure: bool) -> str:
     return f"the only copies of {_noun(n)} are at a provider that is down."
 
 
+# Why a file's hold is missing, as far as the provider's answers show, in the order the advice
+# names them. Only a refusal (403, `forbidden`, `eacces`, `eperm`) is called one.
+HOLD_CAUSES = ("refused", "rejected", "no_answer", "not_confirmed", "gone", "out_of_time")
+
+
+def _hold_sentence(cause: str, n: int) -> str:
+    files = _noun(n)
+    if cause == "refused":
+        return (
+            f"A hold could not be placed for {files}: the provider refused this token the right "
+            "to add QoS requirements."
+        )
+    if cause == "rejected":
+        return (
+            f"A hold could not be placed for {files}: the provider rejected the request; the "
+            "next call tries again."
+        )
+    if cause == "no_answer":
+        return (
+            f"For {files}, the request to place a hold got no answer in time: a hold may have "
+            "been placed, and is not listed; the next call places one again."
+        )
+    if cause == "not_confirmed":
+        return (
+            f"For {files}, the hold could not be read back to confirm it (its id is under "
+            "hold_failed); the next call reads it again."
+        )
+    if cause == "gone":
+        return (
+            f"For {files}, the hold was removed before this answer; the next call places it again."
+        )
+    return f"For {files}, no hold was placed: the time ran out first; the next call places it."
+
+
+_CAN_WAIT_FOR = ("being_written", "in_transfer", "at_other_site")
+# Causes after which a hold may well be there: never said to be "not held" (only not confirmed).
+_UNKNOWN_HOLD = ("no_answer", "not_confirmed")
+
+
 def _advice(
     *,
     ready: bool,
@@ -1065,57 +1640,97 @@ def _advice(
     unresolved: int,
     unchecked: int,
     waited_s: int | None,
-    hold_failed: int,
+    data_ready: bool = False,
+    hold_causes: Mapping[str, int] | None = None,
+    ensure_offered: bool = False,
 ) -> str:
-    """One or two plain sentences: what the answer means and how the other tool is used.
+    """Plain sentences: what the answer means. Every reason a file is not ready is named, in
+    REASONS order, then what was not resolved or checked, then why holds are missing (ensure),
+    in HOLD_CAUSES order. It names a tool only where that tool is offered (design/10, gate 2):
+    check's answer points to ensure_readiness when the caller says it is offered
+    (`ensure_offered`), for files whose reason ensure_readiness can act on.
 
     Never advice on what the agent does with the data.
     """
     ensure = waited_s is not None
     if ready:
         text = "Ready: all declared files are complete and readable at your provider now"
-        if not ensure:
-            return text + "."
-        if hold_failed:
-            return f"{text}. A placement rule could not be created for {_noun(hold_failed)}."
-        return text + ", and held there."
+        return text + (", and each is held there." if ensure else ".")
 
+    hold_causes = hold_causes or {}
     sentences: list[str] = []
-    dominant = max(counts, key=lambda r: (counts[r], -REASONS.index(r))) if counts else None
-    if dominant is not None:
-        sentences.append(_phrase(dominant, counts[dominant], ensure=ensure))
+    if data_ready:  # ensure only: the data are, the holds are not (or are not confirmed)
+        missing = sum(hold_causes.get(c, 0) for c in HOLD_CAUSES if c not in _UNKNOWN_HOLD)
+        unknown = sum(hold_causes.get(c, 0) for c in _UNKNOWN_HOLD)
+        halves = []
+        if missing:
+            halves.append(f"{_noun(missing)} {'is' if missing == 1 else 'are'} not held there")
+        if unknown:
+            halves.append(f"the hold of {_noun(unknown)} could not be confirmed")
+        sentences.append(
+            "the data are complete and readable at your provider now (data_ready), but "
+            f"{' and '.join(halves)}."
+        )
+    for reason in REASONS:
+        if counts.get(reason):
+            sentences.append(_phrase(reason, counts[reason], ensure=ensure))
     if unresolved:
         what = "item was" if unresolved == 1 else "items were"
         sentences.append(f"{unresolved} declared {what} not resolved (see unresolved).")
     if unchecked:
         sentences.append(f"{_noun(unchecked)} could not be checked.")
-    if hold_failed:
-        sentences.append(f"A placement rule could not be created for {_noun(hold_failed)}.")
-    if dominant is not None and dominant != "unreachable":
-        if ensure:
-            sentences.append("Call ensure_readiness again to keep waiting.")
-        else:
-            them = "it" if counts[dominant] == 1 else "them"
-            sentences.append(
-                f"ensure_readiness can wait for {them} and place {them} at your provider."
-            )
+    for cause in HOLD_CAUSES:
+        if hold_causes.get(cause):
+            sentences.append(_hold_sentence(cause, hold_causes[cause]))
+    waitable = sum(counts.get(reason, 0) for reason in _CAN_WAIT_FOR)
+    if ensure and waitable:
+        sentences.append("Call again to keep waiting.")
+    elif ensure_offered and waitable:
+        sentences.append(ENSURE_POINTER.format(them="it" if waitable == 1 else "them"))
     lead = f"Not ready after {waited_s} s:" if ensure else "Not ready:"
     return f"{lead} {' '.join(sentences)}"
 
 
 @dataclass
 class _Hold:
-    expression: str
-    held_ids: set[str]  # files whose rule was confirmed to exist, or created
-    failed: list[FileInfo]
+    """What one ensure call holds: kept in the call's own result, never re-read from what the
+    process remembers (another call may have changed that meanwhile)."""
 
-    @property
-    def held(self) -> int:
-        return len(self.held_ids)
+    expression: str
+    held: dict[str, str] = field(default_factory=dict)  # file id -> the rule confirmed for it
+    failed: dict[str, tuple[FileInfo, str]] = field(default_factory=dict)  # id -> (file, cause)
+    # rules this call could not read back, but may well exist: file id -> rule id
+    unconfirmed: dict[str, str] = field(default_factory=dict)
+
+    def fail(self, file: FileInfo, cause: str, rule_id: str | None = None) -> None:
+        self.held.pop(file.file_id, None)
+        self.failed[file.file_id] = (file, cause)
+        if rule_id is not None:
+            self.unconfirmed[file.file_id] = rule_id
+
+    def ids(self, files: list[FileInfo]) -> list[str]:
+        """The ids of the rules that hold the files, in the files' path order."""
+        return [
+            self.held[f.file_id]
+            for f in sorted(files, key=lambda f: f.path)
+            if f.file_id in self.held
+        ]
+
+    def causes(self) -> dict[str, int]:
+        found = [cause for _, cause in self.failed.values()]
+        return {cause: found.count(cause) for cause in HOLD_CAUSES if cause in found}
 
 
 def _examples(files: Iterable[FileInfo]) -> list[str]:
     return sorted(f.path for f in files)[:MAX_EXAMPLES]
+
+
+def _with_examples(files: list[FileInfo]) -> dict[str, Any]:
+    """A count and at most MAX_EXAMPLES paths; how many are not shown, when any are not."""
+    out: dict[str, Any] = {"files": len(files), "examples": _examples(files)}
+    if len(files) > MAX_EXAMPLES:
+        out["examples_not_shown"] = len(files) - MAX_EXAMPLES
+    return out
 
 
 def _answer(
@@ -1124,8 +1739,13 @@ def _answer(
     *,
     hold: _Hold | None = None,
     waited_s: int | None = None,
+    ensure_offered: bool = False,
 ) -> dict[str, Any]:
-    ready = bool(files) and not unresolved and all(f.state == "ready" for f in files)
+    """The answer of either tool. `resolved_files` counts the files the extent resolved to (not
+    those unresolved), `ready_files` those of them confirmed ready. ensure's `ready` asks more
+    than its `data_ready`: every resolved file also held, its hold confirmed for this answer."""
+    data_ready = bool(files) and not unresolved and all(f.state == "ready" for f in files)
+    ready = data_ready and (hold is None or len(hold.held) == len(files))
     by_reason: dict[str, list[FileInfo]] = {}
     unchecked = 0
     for f in files:
@@ -1134,16 +1754,19 @@ def _answer(
         elif f.state != "ready":
             unchecked += 1
 
-    answer: dict[str, Any] = {
-        "ready": ready,
-        "files": len(files),
-        "bytes": sum(f.size for f in files),
-    }
-    if not ready:
+    answer: dict[str, Any] = {"ready": ready}
+    if hold is not None:
+        answer["data_ready"] = data_ready
+    answer["resolved_files"] = len(files)
+    # How many of them are ready: the examples per reason are at most three, so the count says
+    # how many the answer is about (design/17, decision 5).
+    answer["ready_files"] = sum(f.state == "ready" for f in files)
+    answer["bytes"] = sum(f.size for f in files)
+    if not data_ready:
         answer["bytes_local"] = sum(min(f.local_bytes, f.size) for f in files)
         if by_reason:
             answer["not_ready"] = {
-                reason: {"files": len(by_reason[reason]), "examples": _examples(by_reason[reason])}
+                reason: _with_examples(by_reason[reason])
                 for reason in REASONS
                 if reason in by_reason
             }
@@ -1159,13 +1782,32 @@ def _answer(
         unresolved=len(unresolved),
         unchecked=unchecked,
         waited_s=waited_s,
-        hold_failed=len(hold.failed) if hold else 0,
+        data_ready=data_ready,
+        hold_causes=hold.causes() if hold else None,
+        ensure_offered=ensure_offered and hold is None,
     )
     if hold is not None:
         answer["waited_s"] = waited_s
-        answer["held"] = {"files": hold.held, "rule": hold.expression}
+        ids = hold.ids(files)
+        # Each id is a QoS requirement that keeps its file here until it is removed: the
+        # answer says which, so the holds can be released (design/18, decision 3).
+        answer["held"] = {
+            "files": len(hold.held),
+            "rule": hold.expression,
+            "qos_requirement_ids": ids[:MAX_HOLD_IDS_SHOWN],
+        }
+        if len(ids) > MAX_HOLD_IDS_SHOWN:
+            answer["held"]["qos_requirement_ids_not_shown"] = len(ids) - MAX_HOLD_IDS_SHOWN
+            answer["held"]["note"] = HOLD_IDS_ELSEWHERE
         if hold.failed:
-            answer["hold_failed"] = {"files": len(hold.failed), "examples": _examples(hold.failed)}
+            failed = [f for f, _ in hold.failed.values()]
+            answer["hold_failed"] = {**_with_examples(failed), "causes": hold.causes()}
+            if hold.unconfirmed:
+                answer["hold_failed"]["unconfirmed_qos_requirement_ids"] = [
+                    hold.unconfirmed[f.file_id]
+                    for f in sorted(failed, key=lambda f: f.path)
+                    if f.file_id in hold.unconfirmed
+                ][:MAX_HOLD_IDS_SHOWN]
     return answer
 
 
@@ -1176,13 +1818,10 @@ def _answer(
 
 def _config_unavailable(waited_s: int | None = None) -> dict[str, Any]:
     """The answer when the provider's own id could not be read in time: nothing was checked."""
-    answer: dict[str, Any] = {
-        "ready": False,
-        "files": 0,
-        "bytes": 0,
-        "bytes_local": 0,
-        "unresolved": [],
-    }
+    answer: dict[str, Any] = {"ready": False}
+    if waited_s is not None:
+        answer["data_ready"] = False
+    answer.update(resolved_files=0, ready_files=0, bytes=0, bytes_local=0, unresolved=[])
     if waited_s is None:
         answer["advice"] = (
             "Not ready: provider configuration unavailable, so nothing could be checked. "
@@ -1191,15 +1830,24 @@ def _config_unavailable(waited_s: int | None = None) -> dict[str, Any]:
         return answer
     answer["advice"] = (
         f"Not ready after {waited_s} s: provider configuration unavailable, so nothing could "
-        "be placed or checked. Call ensure_readiness again."
+        "be placed or checked. Call again."
     )
     answer["waited_s"] = waited_s
-    answer["held"] = {"files": 0, "rule": HOLD_EXPRESSION.format(provider_id="<local provider>")}
+    answer["held"] = {
+        "files": 0,
+        "rule": HOLD_EXPRESSION.format(provider_id="<local provider>"),
+        "qos_requirement_ids": [],
+    }
     return answer
 
 
-async def check_readiness(extent: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Whether the declared data are ready at the local provider, or why not. Read-only."""
+async def check_readiness(
+    extent: Sequence[Mapping[str, Any]], *, ensure_offered: bool = False
+) -> dict[str, Any]:
+    """Whether the declared data are ready at the local provider, or why not. Read-only.
+
+    `ensure_offered`: ensure_readiness is offered beside this tool, so the answer may point to
+    it (the MCP wrapper says, from the server's own tool list)."""
     items = _normalise_extent(extent)
     deadline = _monotonic() + CHECK_BUDGET_S
     try:
@@ -1209,7 +1857,8 @@ async def check_readiness(extent: Sequence[Mapping[str, Any]]) -> dict[str, Any]
     run = _Run(local_id, deadline)
     files, unresolved = await _resolve(run, items)
     await _assess(run, files)
-    return _answer(files, unresolved)
+    _note_resolved(files)
+    return _answer(files, unresolved, ensure_offered=ensure_offered)
 
 
 # ---------------------------------------------------------------------------
@@ -1232,10 +1881,16 @@ def _hold_expression(local_id: str) -> str:
     return (HOLD_EXPRESSION_PLAIN if _hold_plain else HOLD_EXPRESSION).format(provider_id=local_id)
 
 
-async def _place_one(run: _Run, file: FileInfo) -> bool:
-    """Add the placement rule for a file; falls back to the plain expression on a 400."""
+async def _place_one(run: _Run, file: FileInfo) -> tuple[str, str | None]:
+    """Add the placement rule for a file; falls back to the plain expression on a 400.
+
+    ("held", the new rule's id), remembered for the file; else (the cause, None), a cause of
+    HOLD_CAUSES: "refused" (403, `forbidden`, `eacces`, `eperm`), "no_answer" (no answer in
+    time, or the connection failed after sending: a rule may have been made), "rejected"
+    (another error, or an answer without an id)."""
     global _hold_plain
     templates = [HOLD_EXPRESSION_PLAIN] if _hold_plain else [HOLD_EXPRESSION, HOLD_EXPRESSION_PLAIN]
+    _note("writes", _where(file))
     for index, template in enumerate(templates):
         try:
             created = await run.within(
@@ -1244,98 +1899,139 @@ async def _place_one(run: _Run, file: FileInfo) -> bool:
                 )
             )
         except TimeoutError:
-            return False
+            return "no_answer", None
         except OnedataApiError as exc:
             status = exc.response.get("status_code") if exc.response else None
+            if _is_forbidden(exc):
+                return "refused", None
             if status == 400 and index + 1 < len(templates):
                 continue  # Onedata rejected the expression form: try the plain one
-            return False
+            return ("no_answer" if exc.kind is not None else "rejected"), None
         rule_id = created.get("qosRequirementId") if isinstance(created, dict) else None
         if not isinstance(rule_id, str) or not rule_id:
-            return False
+            return "rejected", None
         _rules[file.file_id] = rule_id
+        _note("rules", {**_where(file), "rule_id": rule_id, "how": "created"})
         if index == 1:
             _hold_plain = True  # the primary form was rejected, the plain one accepted
-        return True
-    return False
+        return "held", rule_id
+    return "rejected", None
 
 
-async def _rule_confirmed(run: _Run, file: FileInfo) -> bool:
-    """The remembered rule of a file exists: `GET /qos_requirements/{id}` answered 200 with
-    a JSON object that names that rule, or that file. A redirect, a page of HTML, an empty
-    answer or any other shape does not confirm it."""
-    rule_id = _rules.get(file.file_id)
-    if rule_id is None:
-        return False
+# What a read-back of a remembered rule showed.
+CONFIRMED, ABSENT, UNREADABLE = "confirmed", "absent", "unreadable"
+
+
+async def _rule_state(run: _Run, file: FileInfo, rule_id: str) -> str:
+    """Whether the rule `rule_id` is there and holds `file`, read from `GET /qos_requirements/{id}`.
+
+    CONFIRMED: a 200 JSON object that names that rule or that file, and names no other rule or
+    file. ABSENT: the provider said it is not there (a 404, or a 4xx with `enoent` or
+    `notFound`), or the id cannot be one path segment (it names no rule). UNREADABLE: anything
+    else (a timeout, a 5xx, a refusal, a redirect, another shape, an answer that names another
+    file or rule): the rule may well be there, so it is not placed again."""
+    try:
+        # One encoded path segment; an id that cannot be one names no rule (ValueError).
+        segment = id_segment(rule_id, "QoS requirement id")
+    except ValueError:
+        return ABSENT
     try:
         response = await run.call_in_time(
-            request, get_oneprovider_config(), "GET", f"/qos_requirements/{rule_id}"
+            request, get_oneprovider_config(), "GET", f"/qos_requirements/{segment}"
         )
-    except (OnedataApiError, TimeoutError):
-        return False
+    except TimeoutError:
+        return UNREADABLE
+    except OnedataApiError as exc:
+        return ABSENT if exc.kind is None and _is_gone(exc) else UNREADABLE
     body = response.get("body") if isinstance(response, dict) else None
-    return (
-        response["status_code"] == 200
-        and isinstance(body, dict)
-        and (body.get("qosRequirementId") == rule_id or body.get("fileId") == file.file_id)
-    )
+    if response.get("status_code") != 200 or not isinstance(body, dict):
+        return UNREADABLE
+    named_rule, named_file = body.get("qosRequirementId"), body.get("fileId")
+    if named_rule not in (None, rule_id) or named_file not in (None, file.file_id):
+        return UNREADABLE  # it names another rule or another file: not this file's hold
+    return CONFIRMED if (named_rule, named_file) != (None, None) else UNREADABLE
 
 
 async def _reconfirm_holds(run: _Run, files: list[FileInfo], hold: _Hold) -> None:
     """Read every rule counted as held once more, for the answer: `held` counts only the
-    rules confirmed here. A rule that is gone, unreadable or not read in time is listed with
-    the failed ones. Never raises."""
-    held = [f for f in files if f.file_id in hold.held_ids]
+    rules confirmed here. A rule that is gone is listed as failed ("gone"); one unreadable or
+    not read in time as not confirmed, with its id. Never raises."""
+    held = [f for f in files if f.file_id in hold.held]
     results = await _bounded(
-        CHECK_CONCURRENCY, held, lambda f: _rule_confirmed(run, f), run.deadline
+        CHECK_CONCURRENCY, held, lambda f: _rule_state(run, f, hold.held[f.file_id]), run.deadline
     )
-    for f, ok in zip(held, results, strict=True):
-        if ok is not True:
-            hold.held_ids.discard(f.file_id)
-            hold.failed.append(f)
+    for f, state in zip(held, results, strict=True):
+        if state == ABSENT:
+            hold.fail(f, "gone")
+        elif state != CONFIRMED:
+            hold.fail(f, "not_confirmed", hold.held[f.file_id])
+
+
+# One lock per file while its hold is read back or placed (process-wide): two calls at once on
+# one file must not both find no rule and both place one. Weak, so a file's lock goes with the
+# last call that uses it.
+_placing: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+
+
+async def _hold_one(run: _Run, file: FileInfo, hold: _Hold) -> None:
+    """Hold one file, under its lock (waiting for it is cut off by the budget): a remembered
+    rule is read back and kept when confirmed, placed again only when the provider said it is
+    gone, and neither when its read-back was unreadable (it may be there: no duplicate)."""
+    lock = _placing.setdefault(file.file_id, asyncio.Lock())
+    try:
+        await run.within(lock.acquire())
+    except TimeoutError:
+        hold.fail(file, "out_of_time")
+        return
+    try:
+        remembered = _rules.get(file.file_id)
+        if remembered is not None:
+            state = await _rule_state(run, file, remembered)
+            how = {CONFIRMED: "confirmed", UNREADABLE: "unconfirmed"}.get(state)
+            if how is not None:
+                entry = {**_where(file), "rule_id": remembered}
+                _note("rules", {**entry, "how": how})
+            if state == CONFIRMED:
+                hold.held[file.file_id] = remembered
+                return
+            if state == UNREADABLE:
+                hold.fail(file, "not_confirmed", remembered)
+                return
+            if _rules.get(file.file_id) == remembered:
+                del _rules[file.file_id]  # the provider says it is gone: forget it
+        if run.out_of_time():
+            hold.fail(file, "out_of_time")
+            return
+        outcome, rule_id = await _place_one(run, file)
+        if outcome == "held" and rule_id is not None:
+            hold.held[file.file_id] = rule_id
+        else:
+            hold.fail(file, outcome)
+    finally:
+        lock.release()
 
 
 async def _place(run: _Run, files: list[FileInfo]) -> _Hold:
-    """Hold every file: a placement rule that is known to exist.
+    """Hold every file: a placement rule that is known to exist, kept in this call's result.
 
-    A rule remembered from an earlier call is read back first (concurrently, within the
-    limit): an agent with `remove_qos_requirement` may have deleted it. If it is gone, or
-    cannot be read, the rule is created again. `held` counts only rules confirmed or
-    created in this call; files not confirmed or created (failed, or out of time) are listed
-    as failed.
+    The first file settles which expression form Onedata takes; the others follow it,
+    PLACE_CONCURRENCY at a time. A file not reached in time is "out_of_time".
     """
-    held: set[str] = set()
-    failed: list[FileInfo] = []
-    cached = [f for f in files if f.file_id in _rules]
-
-    confirmed = await _bounded(
-        CHECK_CONCURRENCY, cached, lambda f: _rule_confirmed(run, f), run.deadline
-    )
-    todo = [f for f in files if f.file_id not in _rules]
-    for f, result in zip(cached, confirmed, strict=True):
-        if result is True:
-            held.add(f.file_id)
-        elif result is _SKIPPED:
-            failed.append(f)
+    hold = _Hold("")
+    if files:
+        first, rest = files[0], files[1:]
+        if run.out_of_time():
+            hold.fail(first, "out_of_time")
         else:
-            todo.append(f)
-
-    if todo:
-        # The first rule settles which expression form Onedata takes; the rest follow it.
-        first, rest = todo[0], todo[1:]
-        if await _place_one(run, first):
-            held.add(first.file_id)
-        else:
-            failed.append(first)
+            await _hold_one(run, first, hold)
         results = await _bounded(
-            PLACE_CONCURRENCY, rest, lambda f: _place_one(run, f), run.deadline
+            PLACE_CONCURRENCY, rest, lambda f: _hold_one(run, f, hold), run.deadline
         )
-        for f, ok in zip(rest, results, strict=True):
-            if ok is True:
-                held.add(f.file_id)
-            else:
-                failed.append(f)
-    return _Hold(_hold_expression(run.local_id), held, failed)
+        for f, result in zip(rest, results, strict=True):
+            if result is _SKIPPED:
+                hold.fail(f, "out_of_time")
+    hold.expression = _hold_expression(run.local_id)
+    return hold
 
 
 async def _poll_round(run: _Run, pending: list[FileInfo]) -> None:
@@ -1378,13 +2074,22 @@ async def _poll_round(run: _Run, pending: list[FileInfo]) -> None:
     await _bounded(CHECK_CONCURRENCY, pending, one, run.deadline)
 
 
+def ensure_timing(deadline_s: float) -> tuple[float, float]:
+    """(budget, grace) of one ensure call: every phase (the provider's id, resolving, placing,
+    waiting) ends within `budget`, the caller's effective budget `min(deadline_s, cap)`; the
+    final read-back of files and holds then takes at most `grace`, ENSURE_GRACE_S scaled down
+    with the cap when the operator lowers it (150 s and 20 s by default: 170 s in all)."""
+    cap = max_wait_s()
+    return min(float(deadline_s), cap), ENSURE_GRACE_S * cap / MAX_WAIT_DEFAULT_S
+
+
 async def ensure_readiness(extent: Sequence[Mapping[str, Any]], deadline_s: int) -> dict[str, Any]:
     """Make the declared data ready at the local provider and hold them there.
 
-    One call waits at most `min(deadline_s, max_wait_s())`, counted from the call's start
-    (resolving and placing use up part of it), and the whole call ends within
-    `max_wait_s() + ENSURE_GRACE_S`, with `max_wait_s()` never above 240 s. On one clock:
-    resolve, place, poll, re-confirm, classify, answer.
+    On one clock: the provider's id, resolve, place, poll, all within the caller's effective
+    budget (`ensure_timing`: `min(deadline_s, max_wait_s())`, never above 150 s); then the
+    final pass (re-confirm the files and the holds, classify the rest) within the grace (20 s
+    at the default cap). The answer's `waited_s` is the call's time, measured at return.
     """
     if (
         not isinstance(deadline_s, int)
@@ -1394,38 +2099,40 @@ async def ensure_readiness(extent: Sequence[Mapping[str, Any]], deadline_s: int)
         raise ValueError(f"deadline_s must be an integer from 1 to {MAX_DEADLINE_S}")
     items = _normalise_extent(extent)
     start = _monotonic()
-    max_wait = max_wait_s()
-    hard_end = start + max_wait + ENSURE_GRACE_S
-    work_end = hard_end - CLASSIFY_RESERVE_S  # no new work after this, only the final look
-    wait_end = min(start + min(deadline_s, max_wait), work_end)
+    budget, grace = ensure_timing(deadline_s)
+    work_end = start + budget  # no new work after this, only the final look
+    hard_end = work_end + grace
+
+    def elapsed() -> int:
+        return int(round(_monotonic() - start))
 
     try:
         local_id = await _local_id_within(work_end)
     except TimeoutError:
-        return _config_unavailable(int(round(_monotonic() - start)))
+        return _config_unavailable(elapsed())
     run = _Run(local_id, work_end)
     files, unresolved = await _resolve(run, items)
+    _note_resolved(files)  # kept even if the call fails later
     hold = await _place(run, files)
 
-    # Wait: poll every file not yet confirmed ready.
-    run.deadline = wait_end
+    # Wait: poll every file not yet confirmed ready, until the budget is used up.
     pending = list(files)
     while pending:
         await _poll_round(run, pending)
         pending = [f for f in pending if f.state != "ready"]
         now = _monotonic()
-        if not pending or now >= wait_end:
+        if not pending or now >= work_end:
             break
-        await _sleep(min(POLL_INTERVAL_S, wait_end - now))
-    waited_s = int(round(_monotonic() - start))
+        await _sleep(min(POLL_INTERVAL_S, work_end - now))
 
     # A file confirmed ready during the wait is not ready for good: read every one of them
     # again in one final pass, and judge what failed it (and what was never confirmed) anew.
     # Every rule counted as held is read again too. This pass never raises: a read that
-    # fails leaves its file unchecked.
-    run.deadline = hard_end - CLASSIFY_RESERVE_S / 2
+    # fails leaves its file unchecked, or its hold not confirmed.
+    run.deadline = work_end + grace / 2
     await _reconfirm(run, [f for f in files if f.state == "ready"])
     await _reconfirm_holds(run, files, hold)
-    run.deadline = hard_end - 1
+    run.deadline = hard_end - grace / 20
     await _assess(run, [f for f in files if f.state is None], raise_errors=False)
-    return _answer(files, unresolved, hold=hold, waited_s=waited_s)
+    _note_resolved(files)
+    return _answer(files, unresolved, hold=hold, waited_s=elapsed())
