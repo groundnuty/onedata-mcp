@@ -125,13 +125,16 @@ def _required(
         covered: set[str] = set()
         used: list[int] = []
         for c in successful(ctx, tool):
-            entries = [
-                e
-                for e in call_resolution(c)
-                if not ctx.space_id or e.get("space_id") == ctx.space_id
-            ]
-            if exact and not {e.get("file_id") for e in entries} <= want:
+            everything = call_resolution(c)
+            # the exact scope is over every file the call selected, in any space, checked or not
+            if exact and not all(
+                e.get("file_id") in want and (not ctx.space_id or e.get("space_id") == ctx.space_id)
+                for e in everything
+            ):
                 continue
+            entries = [
+                e for e in everything if not ctx.space_id or e.get("space_id") == ctx.space_id
+            ]
             if by_id:
                 id_items = _id_items(ctx, c)
                 entries = [e for e in entries if id_items & set(e.get("items") or ())]

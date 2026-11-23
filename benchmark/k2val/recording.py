@@ -78,14 +78,18 @@ class RecordingApp:
         record = CallRecord(
             index=len(self.calls), tool=name, arguments=dict(arguments), started_at=self._clock()
         )
-        self.calls.append(record)
-        # The tools see what the model was offered, not every tool the app registers nor every
-        # name allowed: a tool's text names another tool only when it is offered
-        # (`tool_maturity.OFFERED_TOOLS`).
-        offered = OFFERED_TOOLS.set(await self.offered())
+        # the record exists before the first await: a call cancelled while it waits still has
+        # one (empty), and an end time (`finally` below)
         audit: dict = new_call_record() if name in RECORDED_TOOLS else {}
+        record.audit = audit if name in RECORDED_TOOLS else None
+        self.calls.append(record)
         recording = CALL_RECORD.set(audit)
+        offered = None
         try:
+            # The tools see what the model was offered, not every tool the app registers nor
+            # every name allowed: a tool's text names another tool only when it is offered
+            # (`tool_maturity.OFFERED_TOOLS`).
+            offered = OFFERED_TOOLS.set(await self.offered())
             if name not in self.allowed:
                 raise ToolError(f"tool {name!r} is not offered in this scenario")
             try:
@@ -108,6 +112,7 @@ class RecordingApp:
             raise
         finally:
             CALL_RECORD.reset(recording)
-            OFFERED_TOOLS.reset(offered)
+            if offered is not None:
+                OFFERED_TOOLS.reset(offered)
             record.audit = audit if name in RECORDED_TOOLS else (audit or None)
             record.ended_at = self._clock()

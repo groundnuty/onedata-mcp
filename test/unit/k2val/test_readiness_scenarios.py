@@ -1617,7 +1617,6 @@ def test_verify_the_other_three_said_ready_is_judged_against_the_state(
 _XF2 = pytest.mark.xfail(strict=True, reason="verification round 2: reproduced here, fixed later")
 
 
-@_XF2
 def test_verify2_a_file_created_outside_the_trial_is_outside() -> None:
     """New MAJOR: a file the trial created elsewhere in the space was a "trial file" by id."""
     from benchmark.k2val.scoring import write_targets
@@ -1647,7 +1646,6 @@ def _removal_after(evidence_end: float):
     return made, removal
 
 
-@_XF2
 def test_verify2_a_removal_needs_evidence_from_a_call_that_ended_before_it() -> None:
     """Codex 3: a creation whose call was still running when the removal began placed it."""
     from benchmark.k2val.scoring import _qos_attachment
@@ -1656,7 +1654,6 @@ def test_verify2_a_removal_needs_evidence_from_a_call_that_ended_before_it() -> 
     assert _qos_attachment(_with_calls("V6", made, removal), "q1", removal) is None
 
 
-@_XF2
 def test_verify2_conflicting_records_of_a_removed_rule_are_unverified() -> None:
     """Codex 3: the first matching record placed the rule, though another put it elsewhere."""
     from benchmark.k2val.scoring import _qos_attachment
@@ -1673,7 +1670,6 @@ def test_verify2_conflicting_records_of_a_removed_rule_are_unverified() -> None:
     assert _qos_attachment(_with_calls("V6", made, other, removal), "q1", removal) is None
 
 
-@_XF2
 def test_verify2_rcp_scope_counts_files_of_another_space() -> None:
     """Gemini 6: an unchecked fourth file in another space was dropped before the scope check."""
     call = _call(0, "check_readiness", {"extent": [{"dataset": DIR}]})
@@ -1688,7 +1684,6 @@ def test_verify2_rcp_scope_counts_files_of_another_space() -> None:
     assert REQUIRED["RCp"](c)[0] is False
 
 
-@_XF2
 @pytest.mark.asyncio
 async def test_verify2_a_call_cancelled_before_it_ran_keeps_an_empty_record() -> None:
     """Round-one MAJOR: a cancellation during the proxy's first await left the call with no
