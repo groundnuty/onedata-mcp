@@ -163,7 +163,7 @@ _V3O = AnswerSpec(
         "and does not say it removed it.",
     },
 )
-# V4, V5 and the readiness scenarios (RC, RCn, RCp; RE, REn, REp): one vocabulary, with the
+# V4, V5 and the readiness scenarios (RC, RCn, RCp, RCi; RE, REn, REp): one vocabulary, with the
 # files said to be still being written and the counts stated for them; which reading passes is
 # the scorer's business alone (V4: NOT_READY_ELSEWHERE; V5, RCn, REn: NOT_READY_WRITING; RC, RCp,
 # RE, REp: SAYS_READY). No passing label is listed first.
@@ -308,7 +308,7 @@ ANSWER_SPECS: dict[str, AnswerSpec] = {
 # V4's and V5's brief word for word), V1's (RCo has V1's brief) and SR1's (REo has SR1's).
 ANSWER_SPECS.update(
     {
-        **dict.fromkeys(("RC", "RCn", "RCp", "RE", "REn", "REp"), _CHECK),
+        **dict.fromkeys(("RC", "RCn", "RCp", "RCi", "RE", "REn", "REp"), _CHECK),
         "RCo": ANSWER_SPECS["V1"],
         "REo": _SR1,
     }

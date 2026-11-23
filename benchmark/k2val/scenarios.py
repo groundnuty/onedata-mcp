@@ -78,14 +78,23 @@ class Scenario:
         ids: Mapping[str, str] | None = None,
         qos: Mapping[str, str] | None = None,
     ) -> str:
-        """`{dir}`, `{local}`, and `{files}`: the fixture's file names, for a brief that must
-        name what the offered tools cannot list. `{ids[<path>]}`: the file id of a fixture entry
-        or log file, `{ids[.]}` the trial directory's; `{qos[<file>]}`: the id of the rule the
-        fixture made on a file (both known only once it is built; before that, a placeholder)."""
+        """`{dir}`, `{dirname}` (its last segment), `{local}`, and `{files}`: the fixture's file
+        names, for a brief that must name what the offered tools cannot list. `{ids[<path>]}`:
+        the file id of a fixture entry or log file, `{ids[.]}` the trial directory's,
+        `{ids[space]}` the space's (when the fixture reads it); `{qos[<file>]}`: the id of the
+        rule the fixture made on a file (all known only once it is built; before that, a
+        placeholder)."""
         files = ", ".join(f.name for f in self.fixture.files)
         known = _IdsOrPlaceholder(ids or {})
         rules = _IdsOrPlaceholder(qos or {})
-        return self.brief.format(dir=directory, local=local, files=files, ids=known, qos=rules)
+        return self.brief.format(
+            dir=directory,
+            dirname=directory.rsplit("/", 1)[-1],
+            local=local,
+            files=files,
+            ids=known,
+            qos=rules,
+        )
 
 
 class _IdsOrPlaceholder(dict):

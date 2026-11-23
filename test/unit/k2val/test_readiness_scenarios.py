@@ -40,7 +40,7 @@ from test.unit.k2val.fakefed import LOCAL_ID
 from test.unit.k2val.file_tool_support import result_of
 from test.unit.k2val.test_runner import make_deps
 
-IDS = ("RC", "RCn", "RCo", "RCp", "RE", "REn", "REo", "REp")
+IDS = ("RC", "RCn", "RCo", "RCp", "RCi", "RE", "REn", "REo", "REp")
 DIR = "/sp/logs-abcdefabcdef"
 FIVE = [f"log_2020010{d}.dat" for d in range(1, 6)]
 ASKED = ["log_20200101.dat", "log_20200103.dat", "log_20200105.dat"]
@@ -78,7 +78,7 @@ def test_identical_tasks_share_the_brief_and_vocabulary_of_the_earlier_scenarios
         SCENARIOS["SR1"].brief,
         SCENARIOS["SR1"].fixture,
     )
-    for group in (("V4", "V5", "RC", "RCn", "RCp"), ("RE", "REn", "REp"), ("V1", "RCo")):
+    for group in (("V4", "V5", "RC", "RCn", "RCp", "RCi"), ("RE", "REn", "REp"), ("V1", "RCo")):
         assert len({id(ANSWER_SPECS[s]) for s in group}) == 1, group
     same = brief("RC")
     assert rubric(ANSWER_SPECS["RC"], brief=same, local=LOCAL) == rubric(
@@ -138,7 +138,7 @@ def test_the_requiring_sets_offer_no_other_way_to_do_the_job() -> None:
     assert "check_readiness" not in RE_TOOLS and "check_readiness" in RE_EXCLUDED
     # the restraint checks mean something: write tools are offered beside check_readiness
     assert makers <= set(RC_TOOLS)
-    for sid in ("RC", "RCn", "RCp"):
+    for sid in ("RC", "RCn", "RCp", "RCi"):
         assert SCENARIOS[sid].tools == RC_TOOLS and SCENARIOS[sid].restraint, sid
     for sid in ("RE", "REn", "REp"):
         assert SCENARIOS[sid].tools == RE_TOOLS and not SCENARIOS[sid].restraint, sid
@@ -1207,3 +1207,42 @@ def test_review_the_other_three_said_missing_fails_where_they_are_here() -> None
 )
 def test_review_a_ready_claim_per_clause_and_its_pairs(sid: str, answer: str, label: str) -> None:
     assert read_answer(sid, answer)[0] == label
+
+
+# --- RCi: the id form of the extent (Codex 14) ------------------------------------------------
+
+
+def test_rci_gives_the_directory_under_its_spaces_id() -> None:
+    text = SCENARIOS["RCi"].render_brief(
+        directory=DIR, local=LOCAL, ids={"space": "0123456789abcdef0123456789abcdef"}
+    )
+    assert text == (
+        "Are the log files in `/0123456789abcdef0123456789abcdef/logs-abcdefabcdef` for 1–5 "
+        "January 2020 complete and readable at your site? If not, why not?"
+    )
+    assert SCENARIOS["RCi"].fixture.space_by_id
+
+
+@pytest.mark.asyncio
+async def test_rci_a_check_by_the_spaces_id_passes_and_one_by_its_name_misses_the_call(
+    cfg, api, fed, clock, tmp_path, ready_tools
+) -> None:
+    fed.space_ids = {"k2val-glm": "0123456789abcdef0123456789abcdef"}
+
+    async def by_id(app, brief_text):
+        directory = _dir_of(brief_text)
+        assert directory.startswith("/0123456789abcdef0123456789abcdef/"), brief_text
+        answer = await result_of(app, "check_readiness", {"extent": _by_dates(directory)})
+        assert answer["ready"] is True and answer["resolved_files"] == 5, answer
+        return "Yes: all five log files are complete and readable at vistula-dc."
+
+    art = await _trial(cfg, api, clock, tmp_path / "id", ready_tools, "RCi", by_id)
+    assert art.outcome == "PASS", art.oracle_diagnosis
+
+    async def by_name(app, brief_text):
+        directory = "/k2val-glm/" + _dir_of(brief_text).rsplit("/", 1)[-1]
+        await result_of(app, "check_readiness", {"extent": _by_dates(directory)})
+        return "Yes: all five log files are complete and readable at vistula-dc."
+
+    art = await _trial(cfg, api, clock, tmp_path / "name", ready_tools, "RCi", by_name)
+    assert art.outcome == "FAIL" and "required_call_missing" in art.flags

@@ -1,4 +1,4 @@
-"""The oracles of the readiness tools' scenarios: RC, RCn, RCo, RCp, RE, REn, REo, REp
+"""The oracles of the readiness tools' scenarios: RC, RCn, RCo, RCp, RCi, RE, REn, REo, REp
 (design/17, design/18). Each scenario's brief, fixture, tools, right answer and rules are in
 `readiness_scenarios.py`. Here:
 
@@ -98,11 +98,24 @@ def call_selection(ctx: K2Context, call: Any) -> set[str]:
     return extent_selects(call.arguments.get("extent"), ctx.run.fixture_paths)
 
 
-def _required(tool: str, *, exact: bool = False) -> Callable[[K2Context], tuple[bool, str]]:
+def _by_space_id(ctx: K2Context, call: Any) -> bool:
+    """The call's extent gives a dataset by a space segment other than the space's name: by
+    its id (the only other form the tool takes for a space)."""
+    try:
+        items = _normalise_extent(call.arguments.get("extent"))
+    except (ValueError, TypeError):
+        return False
+    return any(item.space != ctx.run.space_name for item in items)
+
+
+def _required(
+    tool: str, *, exact: bool = False, by_id: bool = False
+) -> Callable[[K2Context], tuple[bool, str]]:
     """Successful calls of `tool` that, between them, established the state of every file the
     brief asks about (`call_selection`). `exact` (RCp, REp, whose brief names three of five
     files): only a call whose selection is within the files asked about counts, so that the
-    evidence is about those files, not read off a wider call by subtraction."""
+    evidence is about those files, not read off a wider call by subtraction. `by_id` (RCi):
+    only a call that gives the dataset by the space's id counts."""
 
     def predicate(ctx: K2Context) -> tuple[bool, str]:
         from benchmark.k2val.scoring import successful
@@ -111,6 +124,8 @@ def _required(tool: str, *, exact: bool = False) -> Callable[[K2Context], tuple[
         covered: set[str] = set()
         used: list[int] = []
         for c in successful(ctx, tool):
+            if by_id and not _by_space_id(ctx, c):
+                continue
             selected = call_selection(ctx, c)
             if not selected or (exact and not selected <= want):
                 continue
@@ -120,7 +135,13 @@ def _required(tool: str, *, exact: bool = False) -> Callable[[K2Context], tuple[
         if want <= covered:
             return True, f"{tool} established every file asked about (calls {used})"
         missing = sorted(p.rsplit("/", 1)[-1] for p in want - covered)
-        scope = " in calls scoped to the files asked about" if exact else ""
+        scope = (
+            " in calls scoped to the files asked about"
+            if exact
+            else " in calls giving the dataset by the space's id"
+            if by_id
+            else ""
+        )
         return False, f"NO SUCCESSFUL {tool} established {missing}{scope}"
 
     return predicate
@@ -274,6 +295,7 @@ READINESS_ORACLES: dict[str, Callable[[K2Context, AgentTrace], OracleResult]] = 
     "RCn": oracles.verify_writing,
     "RCo": oracles.verify_v1,
     "RCp": verify_ready,
+    "RCi": verify_ready,
     "RE": verify_ensured,
     "REn": verify_ren,
     "REo": sr_oracles.verify_sr1,
@@ -284,6 +306,7 @@ READINESS_REQUIRED: dict[str, Callable[[K2Context], tuple[bool, str]]] = {
     "RC": _required("check_readiness"),
     "RCn": _required("check_readiness"),
     "RCp": _required("check_readiness", exact=True),
+    "RCi": _required("check_readiness", by_id=True),
     "RE": _required("ensure_readiness"),
     "REn": _required("ensure_readiness"),
     "REp": _required("ensure_readiness", exact=True),
@@ -298,7 +321,7 @@ def _check(answer: str, who: Any) -> object:
 
 
 READINESS_READERS: dict[str, Callable[[str, Any], object]] = {
-    **dict.fromkeys(("RC", "RCn", "RCp", "RE", "REn", "REp"), _check),
+    **dict.fromkeys(("RC", "RCn", "RCp", "RCi", "RE", "REn", "REp"), _check),
     "RCo": lambda a, w: oracles.read_v1(a, tuple(w.file_names) or oracles.V1_EXPECTED),
     "REo": lambda a, w: sr_oracles.read_copy_answer(a, w.local_name, w.owner_name),
 }
@@ -307,6 +330,7 @@ _READY = (SAYS_READY, frozenset())
 READINESS_RIGHT: Mapping[str, object] = {
     "RC": _READY,
     "RCp": _READY,
+    "RCi": _READY,
     "RE": _READY,
     "REp": _READY,
     "RCn": ("NOT_READY_WRITING", frozenset(WRITING_NAMES)),
@@ -320,7 +344,7 @@ def is_right(sid: str, value: object) -> bool | None:
     """Whether a reading is a right answer's (the oracle may ask more: the state when it was
     given). The ready scenarios: SAYS_READY, whatever names. RCn, REn: V5's rule. None for the
     others (the caller compares the readings)."""
-    if sid in ("RC", "RCp", "RE", "REp"):
+    if sid in ("RC", "RCp", "RCi", "RE", "REp"):
         return isinstance(value, tuple) and value[0] == SAYS_READY
     if sid in ("RCn", "REn"):
         # the other three are here at a right answer (RCn: built so; REn: made ready), so a

@@ -90,7 +90,7 @@ class ExtentItem(BaseModel):
     dataset: str = Field(
         description=(
             "A space's name such as 'my-dataset' or its id, or an absolute directory path "
-            "inside a space such as '/my-dataset/sub/dir'"
+            "inside a space, starting with the space's name or id, such as '/my-dataset/sub/dir'"
         )
     )
     files: list[str] = Field(

@@ -84,6 +84,8 @@ class FakeFed:
         # tool given a space NAME resolves it. Off by default: the earlier tests expect none.
         self.ended_order = "newest"
         self.list_spaces = False
+        # A space's id where it is not its name (RCi): name -> id, in `GET /spaces`.
+        self.space_ids: dict[str, str] = {}
         # the whole federation is stopped: every request is refused, as a stopped container does
         self.down = False
         self._seq = 0
@@ -213,7 +215,11 @@ class FakeFed:
             # provider: none here, unless `list_spaces` (design/16). The owner, which only the
             # panel's own client asks (a space's id from its name), always lists them.
             listing = provider == OWNER_ID or self.list_spaces
-            listed = [{"spaceId": n, "name": n} for n in self.roots] if listing else []
+            listed = (
+                [{"spaceId": self.space_ids.get(n, n), "name": n} for n in self.roots]
+                if listing
+                else []
+            )
             return httpx.Response(200, json=listed)
         if m == "POST" and rest.startswith("/lookup-file-id/"):
             return self._lookup(provider, unquote(rest[len("/lookup-file-id/") :]))

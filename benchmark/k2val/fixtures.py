@@ -180,6 +180,9 @@ class FixtureSpec:
     # Every snapshot records each rule on a file with its evaluated storages (ST1, whose oracle
     # judges the rules the agent made by their meaning).
     rules_in_snapshots: bool = False
+    # The brief gives the space by its id (RCi, design/17): the build reads the id, and `ids()`
+    # holds it as `space`.
+    space_by_id: bool = False
 
 
 @dataclass
@@ -325,9 +328,11 @@ class BuiltFixture:
 
     def ids(self) -> dict[str, str]:
         """File ids by relative path, for a brief that gives an id (`{ids[log_20200102.dat]}`):
-        the entries, the log files, and the trial directory itself (`.`); and the id of the
-        transfer that copied a log file, as `{ids[transfer:log_20200116.dat]}`."""
+        the entries, the log files, and the trial directory itself (`.`); the id of the
+        transfer that copied a log file, as `{ids[transfer:log_20200116.dat]}`; and the space's
+        id, as `{ids[space]}`, when the build read it."""
         return {
+            **({"space": self.space_id} if self.space_id else {}),
             ".": self.dir_id,
             **{n: bf.file_id for n, bf in self.files.items()},
             **self.entries,
@@ -516,7 +521,7 @@ class FixtureBuilder:
             await self._wait_local_sees(bf)
 
         role_ids = {"owner": owner_id, "local": local_id}
-        if spec.rules_detail or spec.rules_in_snapshots:
+        if spec.rules_detail or spec.rules_in_snapshots or spec.space_by_id:
             fixture.rules_in_snapshots = spec.rules_in_snapshots
             fixture.space_id = await self.fed.space_id("owner", self.space)
         for fs in spec.files:

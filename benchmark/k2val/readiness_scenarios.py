@@ -17,16 +17,18 @@ REQUIRES a readiness tool (design/10, gate 4). The scenarios here do, by what th
 Each scenario is one `ReadinessScenario` literal holding what a reviewer needs: the brief, the
 fixture, the tools, the coverage kind design/10 asks for, the right answer and the rules. The
 answer readers and oracles are in `readiness_oracles.py`; `scenarios.py` registers these
-scenarios. Ids: RC, RCn, RCo, RCp (check_readiness); RE, REn, REo, REp (ensure_readiness).
+scenarios. Ids: RC, RCn, RCo, RCp, RCi (check_readiness); RE, REn, REo, REp
+(ensure_readiness).
 
 Briefs are neutral: they name no tool and give no advice on how to work. Identical briefs share
 one vocabulary (`rubrics._CHECK`, with V4 and V5), whose passing label is never listed first.
 
-The id form of the extent cannot apply to either tool: `extent` takes names and paths only (a
-dataset by space name or directory path, files by name or path, or date ranges), never an id.
-The variants exercise its other forms: a date range over a directory (RC, RCn, RE, REn) and
-files given one by one by absolute path (RCp, REp), where the files not asked about are in
-another state, so that only a scoped extent gives the right answer.
+The id form of the extent is a space's id: a dataset may be given as a space by its id, or as a
+directory path whose first segment is the space's id (a file's or a directory's id is not taken,
+and gets a hint). RCi gives the trial directory so, `/<space id>/<dir>`; the extent is shared by
+both tools, so one id variant serves both. The other variants: a date range over a directory
+(RC, RCn, RE, REn) and files given one by one by absolute path (RCp, REp), where the files not
+asked about are in another state, so that only a scoped extent gives the right answer.
 
 This module imports only the fixture types, so the registries can import it without a cycle.
 """
@@ -77,6 +79,11 @@ WRITER_AFTER_THE_TRIAL_S = 40 * 60.0
 BRIEF_CHECK = (
     "Are the log files in `{dir}` for 1–5 January 2020 complete and readable at your site? "
     "If not, why not?"
+)
+# RC's brief with the directory given by its space's id (RCi).
+BRIEF_CHECK_BY_ID = (
+    "Are the log files in `/{ids[space]}/{dirname}` for 1–5 January 2020 complete and readable "
+    "at your site? If not, why not?"
 )
 BRIEF_CHECK_FILES = (
     "Are `{dir}/log_20200101.dat`, `{dir}/log_20200103.dat` and `{dir}/log_20200105.dat` "
@@ -215,7 +222,25 @@ RCP = ReadinessScenario(
     restraint=True,
     asked=_names(ASKED),
 )
-READINESS_SCENARIOS.update({s.id: s for s in (RC, RCN, RCO, RCP)})
+RCI = ReadinessScenario(
+    id="RCi",
+    title="are the files ready, the directory given under its space's id (they are)",
+    tool="check_readiness",
+    coverage="variant: the dataset given by its space's id, `/<space id>/<dir>` (the id form of "
+    "`extent`; a file's or directory's id is not taken)",
+    answer="yes: all five are complete and readable at vistula-dc",
+    rules=(
+        "Pass when the answer reads SAYS_READY. Required: a successful check_readiness whose "
+        "extent gives the dataset by the space's id (not its name) and that established every "
+        "file asked about." + _RESTRAINT
+    ),
+    brief=BRIEF_CHECK_BY_ID,
+    fixture=FixtureSpec(_files(**{f"d{d}": "s0_local" for d in FIVE}), space_by_id=True),
+    tools=RC_TOOLS,
+    excluded_tools=RC_EXCLUDED,
+    restraint=True,
+)
+READINESS_SCENARIOS.update({s.id: s for s in (RC, RCN, RCO, RCP, RCI)})
 
 # --- ensure_readiness (design/18) --------------------------------------------------------------
 

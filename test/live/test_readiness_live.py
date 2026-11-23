@@ -24,7 +24,9 @@ Since the promotion package (design/17, design/18; not yet run, marked TODO(firs
 - a failure path of each tool: a declared file that is not there is an unresolved item with its
   hint, and a dataset above its space is refused before any request;
 - the answer of ensure_readiness lists the ids of the holds it placed, each is the file's QoS
-  requirement, and removing it by that id releases the hold (the cleanup uses those ids).
+  requirement, and removing it by that id releases the hold (the cleanup uses those ids);
+- since the external review: an ensure call that fails (a file that is not there, an empty
+  selector) writes nothing: no rule is placed on the probe file.
 
 Not covered here, on purpose: whether a rule keeps up with a file still being written, and
 whether eviction is refused. Those need a second provider writing; run them by hand on the
@@ -167,3 +169,31 @@ async def test_the_answer_lists_the_hold_ids_and_removing_one_releases_its_hold(
     await remove_qos_requirement(hold_id)
     readiness.reset_state()  # nothing left for the fixture's cleanup
     assert hold_id not in (await get_file_qos_summary(path))["requirements"]
+
+
+@pytest.mark.asyncio
+async def test_an_ensure_that_resolves_nothing_writes_nothing(
+    space: str, probe_file: tuple[str, str]
+) -> None:
+    """A failure path of ensure_readiness (gate 3; the external review, Codex 14).
+    TODO(first live run): the answer as 25.0 leads to it, and no rule on the probe file."""
+    _, path = probe_file
+    before = (await get_file_qos_summary(path))["requirements"]
+    missing = "readiness-live-no-such-file.txt"
+
+    result = await readiness.ensure_readiness([{"dataset": space, "files": [missing]}], 30)
+
+    print(f"answer: {result!r}")
+    assert result["ready"] is False and result["data_ready"] is False
+    assert result["resolved_files"] == 0
+    assert result["held"] == {
+        "files": 0,
+        "rule": result["held"]["rule"],
+        "qos_requirement_ids": [],
+    }
+    assert readiness._rules == {}
+    assert (await get_file_qos_summary(path))["requirements"] == before
+
+    with pytest.raises(ValueError, match=r"extent\[0\]\.files is empty"):
+        await readiness.ensure_readiness([{"dataset": space, "files": []}], 30)
+    assert (await get_file_qos_summary(path))["requirements"] == before
