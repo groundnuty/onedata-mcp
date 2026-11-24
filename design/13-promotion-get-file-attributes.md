@@ -230,7 +230,7 @@ SSL_CERT_FILE=$VALFED_HOME/tls/ca-bundle.pem \
     K2VAL_MODELS=sonnet-medium,haiku-low,glm,qwen36,qwencoder,deepseek
 ```
 
-- **FAi at K=8 on the full panel (the mis-copied-id guard).** 1 scenario × 6 configs × 8 = 48 trials, run in batches of two configs as the main run was. The operator's reading (2026-11-23): the full panel and K=8, not the smoke pair, because the mis-copies came from Qwen3.6 and GLM, which the smoke pair lacks, and because the record's FAi row then compares like with like. Passes when every control trial passes and no new tool-attributable failure appears: an id that was not the brief's is refused with "not a complete file id", or reaches Onedata and draws a hint that says the id may be mis-copied.
+- **FAi at K=8 on the full panel (the mis-copied-id guard).** 1 scenario × 6 configs × 8 = 48 trials, run in batches of two configs as the main run was. The operator's reading (2026-11-23): the full panel and K=8, not the smoke pair, because the mis-copies came from Qwen3.6 and GLM, which the smoke pair lacks, and because the record's FAi row then compares like with like. Passes when every control trial passes and no new tool-attributable failure appears: an id that was not the brief's is refused before any request with "not a complete file id", or reaches Onedata and draws a hint that leads with the provider's refusal and asks for the file's id to be copied exactly or its path given. After the review of the id guard (below), FAi runs again at K=8 on the full panel with the stricter check, together with LCi, SR1 and SR1i (run `rerun2-k8`); promotion waits for it.
 
 ## External review (2026-11-20)
 

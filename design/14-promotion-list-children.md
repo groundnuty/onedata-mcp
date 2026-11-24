@@ -221,7 +221,7 @@ SSL_CERT_FILE=$VALFED_HOME/tls/ca-bundle.pem \
 ```
 
 - **LCp at K=8 (F3).** 1 scenario × 6 configs × 8 = 48 trials. Passes when every control trial passes and no new tool-attributable finding appears. F3 is closed when no config's answer stops paging while `isLast` is false, or each that does is classified. DeepSeek LCp #4 (a deployment artefact in the first run) is run again with the rest.
-- **LCi at K=8 on the full panel (the guard).** 1 scenario × 6 configs × 8 = 48 trials; the same reading and pass test as design/13's FAi re-run. It may share one invocation with LCp and FAi (`K2VAL_SCENARIOS=LCp,LCi,FAi`).
+- **LCi at K=8 on the full panel (the guard).** 1 scenario × 6 configs × 8 = 48 trials; the same reading and pass test as design/13's FAi re-run. It may share one invocation with LCp and FAi (`K2VAL_SCENARIOS=LCp,LCi,FAi`). After the review of the id guard (below), LCi runs again at K=8 with the stricter check, in run `rerun2-k8`; promotion waits for it.
 
 ## External review (2026-11-20)
 
