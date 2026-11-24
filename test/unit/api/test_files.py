@@ -6,6 +6,7 @@ from pytest_httpx import HTTPXMock
 
 from onedata_mcp.api import files
 from onedata_mcp.utils import OnedataApiError, OnedataInvalidSpaceError
+from test.unit.object_ids import object_id
 
 
 def _set_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -21,10 +22,10 @@ def _lookup_url(path: str) -> str:
 
 
 def _whole_id(space_id: str = "s0") -> str:
-    """A file id of the 25.0 shape (an 8-byte header whose sixth byte is the payload's length,
-    then `guid#<uuid>#<space id>`, in hex): what `list_children` accepts as an id."""
+    """A file id as Onedata's encoder writes it (`test/unit/object_ids.py`), of
+    `guid#<uuid>#<space id>`: what `list_children` accepts as an id."""
     payload = f"guid#0cb444f249735948f20eaf93a2dfe54bch3e33#{space_id}".encode()
-    return (bytes([0, 0, 0, 0, 0, len(payload), 0x52, 0x73]) + payload).hex().upper()
+    return object_id(payload)
 
 
 def _mock_available_spaces(httpx_mock: HTTPXMock, names: list[str]) -> None:
@@ -296,9 +297,9 @@ async def test_list_children_formats_invalid_space_error_with_hints(
     )
 
     # design/14: list_children says what this provider established, not that the space is gone;
-    # for an id the model copied, that the id may be mis-copied
+    # for an id the model copied, what to do if it is another file's id
     with pytest.raises(
-        OnedataApiError, match="does not support the space in the id. The id may be mis-copied"
+        OnedataApiError, match="the space may still exist. If it is not the id of the file you mean"
     ) as exc:
         await files.list_children(directory, limit=10, offset=0)
 

@@ -320,7 +320,7 @@ async def test_sr1n_a_refusal_after_the_tools_hint_passes_and_waits_the_whole_wi
     assert art.outcome == "PASS", art.oracle_diagnosis
     assert art.oracle_federation_pass is True
     (hint,) = seen
-    assert "Cannot replicate to 'oder-dc'" in hint
+    assert "Onedata reports that no provider with the id 'oder-dc', the target, supports" in hint
     assert f"vistula-dc (id '{LOCAL_ID}')" in hint and f"nordic-marine-dc (id '{OWNER_ID}')" in hint
     waited = art.snapshot_after_settle["taken_at"] - art.snapshot_at_answer["taken_at"]
     assert waited >= cfg.limits.settle_s  # "quiet": the whole window

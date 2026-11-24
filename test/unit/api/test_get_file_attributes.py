@@ -20,6 +20,7 @@ from onedata_mcp.api import files
 from onedata_mcp.modules import files as files_module
 from onedata_mcp.tool_maturity import ALL_KNOWN, FLAG_GATED
 from onedata_mcp.utils import OnedataApiError
+from test.unit.object_ids import object_id
 
 API = "https://provider.example/api/v3/oneprovider"
 FID = "0000000000AbCdEf0123456789"  # opaque: the API function takes an id as given
@@ -30,10 +31,10 @@ OTHER_SPACE = "9JO5__9nL1b01YEvwnft1r20gwgwlkIp19ND_n8hgxs"
 def whole_id(
     space_id: str = SEEN_SPACE, uuid: str = "0cb444f249735948f20eaf93a2dfe54bch3e33"
 ) -> str:
-    """A file id of the 25.0 shape: an 8-byte header whose sixth byte is the payload's length,
-    then `guid#<uuid>#<space id>`, all in hex. What the tool takes from a model."""
+    """A file id as Onedata's encoder writes it (`test/unit/object_ids.py`): the hex of an
+    8-byte header and `guid#<uuid>#<space id>`. What the tool takes from a model."""
     payload = f"guid#{uuid}#{space_id}".encode()
-    return (bytes([0, 0, 0, 0, 0, len(payload), 0x52, 0x73]) + payload).hex().upper()
+    return object_id(payload)
 
 
 WHOLE = whole_id()
@@ -130,14 +131,12 @@ async def test_an_id_is_used_as_is_without_a_lookup(httpx_mock: HTTPXMock) -> No
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("value", "encoded"),
-    [("ab?c", "ab%3Fc"), ("ab#c", "ab%23c"), ("ab/children", "ab%2Fchildren"), ("a b", "a%20b")],
+    ("value", "encoded"), [("ab?c", "ab%3Fc"), ("ab#c", "ab%23c"), ("a b", "a%20b")]
 )
 async def test_an_id_is_percent_encoded_so_it_cannot_change_the_request(
     httpx_mock: HTTPXMock, value: str, encoded: str
 ) -> None:
-    """Unencoded, `?` and `#` cut the path short (the attributes of another file come back) and
-    `/` turns the call into another endpoint (`/data/ab/children`)."""
+    """Unencoded, `?` and `#` cut the path short (the attributes of another file come back)."""
     httpx_mock.add_response(method="GET", json={"name": "x"})
 
     await files.get_file_attributes(value, attributes=["name"])
@@ -145,6 +144,43 @@ async def test_an_id_is_percent_encoded_so_it_cannot_change_the_request(
     (sent,) = attrs_requests(httpx_mock)
     assert sent.url.raw_path.decode() == f"/api/v3/oneprovider/data/{encoded}"
     assert sent.url.query == b""
+
+
+@pytest.mark.asyncio
+async def test_an_id_with_a_slash_is_refused_before_any_request(httpx_mock: HTTPXMock) -> None:
+    """`/data/ab/children` would be another endpoint: the shared segment guard
+    (`utils.id_segment`) refuses an id with a `/`."""
+    with pytest.raises(ValueError, match="contains '/'"):
+        await files.get_file_attributes("ab/children", attributes=["name"])
+
+    assert attrs_requests(httpx_mock) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("copied_id", [False, True])
+async def test_the_id_a_lookup_returns_goes_through_the_shared_segment_guard(
+    httpx_mock: HTTPXMock, copied_id: bool
+) -> None:
+    """A path resolves to Onedata's id, which is not checked as a copy; it still goes into the
+    next request through `_file_id_segment`, which refuses a `/` rather than encoding it."""
+    httpx_mock.add_response(method="POST", url=lookup_url("/Alpha/a.dat"), json={"fileId": "ab/cd"})
+
+    with pytest.raises(ValueError, match="contains '/'"):
+        await files.get_file_attributes("/Alpha/a.dat", attributes=["name"], copied_id=copied_id)
+
+    assert attrs_requests(httpx_mock) == []  # no `/data/ab%2Fcd`
+
+
+@pytest.mark.asyncio
+async def test_a_looked_up_id_is_not_checked_as_a_copy(httpx_mock: HTTPXMock) -> None:
+    """The copy check is for an id the caller gave: Onedata's own answer passes as it is."""
+    lookup = lookup_url("/Alpha/a.dat")
+    httpx_mock.add_response(method="POST", url=lookup, json={"fileId": "0000ab"})
+    httpx_mock.add_response(method="GET", url=f"{API}/data/0000ab", json={"name": "a.dat"})
+
+    out = await files.get_file_attributes("/Alpha/a.dat", attributes=["name"], copied_id=True)
+
+    assert out == {"name": "a.dat"}
 
 
 @pytest.mark.asyncio
@@ -587,21 +623,24 @@ async def test_the_callers_that_pass_ids_from_onedata_keep_their_handling(
     [onedata_error(403, "forbidden"), onedata_error(400, "posix", "eacces")],
     ids=["403", "eacces"],
 )
-async def test_a_permission_refusal_of_a_copied_id_says_it_may_be_mis_copied(
+async def test_a_permission_refusal_of_a_copied_id_leads_with_the_refusal(
     mcp: FastMCP, httpx_mock: HTTPXMock, error: dict
 ) -> None:
+    """The id passed the check on a whole id, so it is one Onedata wrote: the refusal first, and
+    what to do if it is another file's id as a condition. No claim that a missing or changed
+    character gives this answer: such an id is refused before any request."""
     httpx_mock.add_response(method="GET", url=f"{API}/data/{WHOLE}", **error)
 
     is_error, text = await call(mcp, {"file_id_or_path": WHOLE})
 
     assert is_error is True
     assert (
-        f"Could not read the attributes of file id {files._shown(WHOLE)}: the id may be "
-        "mis-copied (an id with a missing or changed character is refused like this), or the "
-        "token may have no access to the file. Copy the id exactly from the earlier answer, "
-        "or give the path, /<space_name>/<path>."
+        f"Not allowed to read the attributes of file id {files._shown(WHOLE)}: the token has no "
+        "access to it. If it is not the id of the file you mean, copy that file's id exactly "
+        "from the earlier answer, or give the path, /<space_name>/<path>."
     ) in text
-    assert "will not help" not in text and "Not allowed" not in text
+    assert "will not help" not in text
+    assert "missing or changed" not in text and "mis-copied" not in text
     assert "not one this token sees" not in text  # its space is the one the token sees
     assert "(Onedata's own text)" in text
 
@@ -617,12 +656,12 @@ async def test_a_copied_id_whose_space_the_token_does_not_see_says_so(
 
     is_error, text = await call(mcp, {"file_id_or_path": unseen})
 
-    assert "the id may be mis-copied" in text
+    assert "If it is not the id of the file you mean" in text
     assert "The space in the id is not one this token sees at this provider." in text
 
 
 @pytest.mark.asyncio
-async def test_an_unsupported_space_of_a_copied_id_says_it_may_be_mis_copied(
+async def test_an_unsupported_space_of_a_copied_id_leads_with_the_provider(
     mcp: FastMCP, httpx_mock: HTTPXMock
 ) -> None:
     unseen = whole_id(OTHER_SPACE)
@@ -633,13 +672,14 @@ async def test_an_unsupported_space_of_a_copied_id_says_it_may_be_mis_copied(
     is_error, text = await call(mcp, {"file_id_or_path": unseen})
 
     assert (
-        f"Could not read the attributes of file id {files._shown(unseen)}: this provider "
-        "reports that it does not support the space in the id. The id may be mis-copied"
+        f"This provider does not support the space of file id {files._shown(unseen)}, so it "
+        "cannot read the attributes of it here; the space may still exist. If it is not the id "
+        "of the file you mean, copy that file's id exactly from the earlier answer, or give the "
+        "path, /<space_name>/<path>."
     ) in text
-    assert "copy it exactly from the earlier answer, or give the path" in text
     assert "The space in the id is not one this token sees at this provider." in text
     assert 'Spaces this token sees at this provider: "Alpha".' in text
-    assert "so it cannot read" not in text  # the old claim about the provider
+    assert "missing or changed" not in text and "mis-copied" not in text
 
 
 @pytest.mark.asyncio
