@@ -116,28 +116,38 @@ async def test_a_schedule_answers_the_transfer_id(
 
 
 @pytest.mark.asyncio
-async def test_the_schedule_answer_says_scheduled_is_not_copied_and_names_no_tool(
+async def test_the_schedule_answer_says_how_to_tell_the_copy_is_complete_and_names_no_tool(
     transfers_mcp: FastMCP, httpx_mock: HTTPXMock
 ) -> None:
-    """F2 (design/12): a model that read only the transfer's status answered "done". The result
-    repeats what the description says, where the model reads it at the moment it acts, and
-    names no tool, as the description does not: the one that reads the blocks may not be offered."""
+    """F2, M-33 and M-49 (design/12): models answered "done" from the transfer's status, stopped
+    right after scheduling, or handed the waiting back to the user. The result says what to do
+    next (re-check the target's blocks) and when the copy is complete (they cover all of the
+    file), where the model reads it at the moment it acts. It does not say the copy has not
+    happened, which can be false (the target may already hold every block). It names no tool,
+    as the description does not: the one that reads the blocks may not be offered."""
     _the_spaces_are_read_if_asked(httpx_mock)
     httpx_mock.add_response(method="POST", url=f"{BASE}/transfers", json={"transferId": "t1"})
 
     result, text = await _call(transfers_mcp, FILE_ID)
     note = result.structured_content["note"]
 
-    assert note.startswith("Scheduled, not yet copied")
-    assert "target provider's blocks of the file" in note and "not by the transfer's status" in note
-    assert "note" in text and "Scheduled, not yet copied" in text  # in the text a client shows too
+    # neutral: the copy may or may not be complete by the time the reply is read
+    assert note.startswith("Replication scheduled; the copy may not be complete yet.")
+    assert "not yet copied" not in note
+    # what to do next, and when to stop
+    assert "re-check the target provider's blocks of the file until they cover all of it" in note
+    # the transfer's status alone is not the signal
+    assert "a transfer's 'completed' status alone does not show that" in note
+    assert "note" in text and "Replication scheduled;" in text  # in the text a client shows too
     assert [name for name in (ALL_KNOWN | FLAG_GATED) if name in note] == []
-    # consistent with the description: the same test of completion, in the same words
+    # consistent with the description: the same instruction, in the same words, and the same
+    # reason that a transfer's status is not the signal
     async with Client(transfers_mcp) as client:
         tool = next(t for t in await client.list_tools() if t.name == TOOL)
     description = " ".join(tool.description.split())
-    assert "judge the copy by those blocks, not by the transfer's status" in description
-    assert "not by the transfer's status" in note
+    instruction = "re-check the target provider's blocks of the file until they cover all of it"
+    assert instruction in description and instruction in note
+    assert "can read completed before the copied blocks show" in description
 
 
 @pytest.mark.asyncio
