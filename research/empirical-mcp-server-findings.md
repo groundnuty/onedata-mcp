@@ -1131,7 +1131,12 @@ in a note: scheduled is not copied, and completion is judged by the
 target's blocks, not the transfer's status. The note names no tool.
 Then SR1 and SR1i are re-run.
 
-**Decision:** Fixed (PR #46), re-run pending (design/12).
+**Decision:** Fixed (PR #46). Re-run `rerun-k8` (2026-11-23;
+supporting only, since it predates PR #52): the note reached the
+model in 95 of the 96 SR1 and SR1i trials, and completion was still
+claimed off the transfer's status in 2 (Qwen3-Coder SR1i #2, #7),
+down from 8; both claims were true at the answer, and Qwen3.6 made
+none. One family, as before. `rerun2-k8` decides (design/12).
 
 ---
 
@@ -1163,7 +1168,14 @@ since the description is what tells a model to page.
 **Fix:** while `isLast` is false, the result itself says that more
 entries follow and how to get them. Then LCp is re-run.
 
-**Decision:** Fixed (PR #46), re-run pending (design/14).
+**Decision:** Fixed (PR #46), and the re-run held. `rerun-k8`
+(2026-11-23), LCp at K=8 on the six-config panel: every trial got the
+note (207 notes), 46 of 48 read the listing to its end, Qwen3.6 in 8
+of 8 and Qwen3-Coder in 7 of 8. One answer still stopped after a page
+that said more entries follow (Qwen3-Coder #2): one family, with the
+note in the answer it acted on, so model capability. DeepSeek #1 knew
+that more entries followed and failed on another tool's listing
+(M-48). design/14: gate 4 passed.
 
 ---
 
@@ -1205,7 +1217,13 @@ mis-copied id, but the same fix applies). No check catches all: GLM
 FAi #7 spliced one id's 8-byte header onto another file's payload,
 and Onedata returned that other file.
 
-**Decision:** Fixed (PR #46), re-run pending (design/13).
+**Decision:** Fixed (PR #46). Re-run `rerun-k8` (2026-11-23): the
+refusal before any request was drawn by 32 calls (28 in FAi, 4 in
+SR1) in 9 trials, and in 7 of them a later call succeeded, by the id
+copied again or by the path; the 2 that never recovered are Qwen's
+(M-35). The reworded `403` and `spaceNotSupportedBy` hints were drawn
+by no call: NOT VERIFIED. No LCi call passed a mis-copied id. Two
+edges remain open: M-50. design/13: gate 4 passed.
 
 ---
 
@@ -1345,6 +1363,13 @@ SR1i trials, and no call that passed the id exactly as given failed
 because of it. It would reopen on a failure of an exact id, or a trace
 from a tool's error to the switch to the path (the id hints do offer
 the path form).
+Re-run `rerun-k8` (2026-11-23): the reopen clause is met in its
+letter. Qwen3.6 FAi #4's copy of one id was refused as incomplete,
+it read that file by path, as the refusal offers, and answered
+rightly; FAi's rule failed it. The tool did what it should; whether
+FAi counts such a read is the operator's call (design/13). The same
+run has four SR1i trials of the plain shape (GLM #1, Qwen3.6 #2, #6,
+DeepSeek #6).
 
 **Accommodation candidate:** none. The models did the task right; the
 path is a valid way to name the file, and only the scenario's rule,
@@ -1380,6 +1405,12 @@ each step: `get_file_attributes` says its default answer includes
 description says scheduled is not copied and to re-check until whole.
 The records show no other config stopping this way. It would reopen on
 the same stop in a second family or at the control.
+Re-run `rerun-k8` (2026-11-23): Qwen3-Coder again read FAi's modes
+without `name` (4 of 8 trials) and stopped after scheduling (SR1 #1,
+#2, #3, #5; SR1i #6). Haiku stopped the same way after one partial
+read (SR1 #3, #5; SR1i #6): a second family, so the reopen condition
+is met for the stop after scheduling (M-49). Returning `name` with
+every answer is the operator's call (design/13).
 
 **Accommodation candidate:**
 - After scheduling: F2's result note (M-26) also says the job is not
@@ -1461,6 +1492,12 @@ FAi #0 and #7 lost all four ids and answered "none".
 the cause, and Haiku and GLM re-copied after a hint and passed (FAi
 #1, #4). It would reopen if, after M-28's re-run, other families
 failed the same way after the new hint.
+Re-run `rerun-k8` (2026-11-23): after the new refusal ("not a
+complete file id; copy it exactly …, or give the path"), Qwen3.6
+FAi #1 and Qwen3-Coder FAi #2 still never copied an id again; Haiku
+did, both times (FAi #0, #4). The failures stay in one family, so
+the condition is not met. DeepSeek SR1i #1 failed the same way after
+the not-found hint, which the guard did not change (M-50).
 
 **Accommodation candidate:** M-28's fix is the accommodation: refuse
 an id that cannot be whole before any request, say it may be
@@ -2139,6 +2176,142 @@ there is no such trace.
 
 **Decision:** Fixed (this PR). Stored artefacts made before the record
 rescore every readiness call as UNVERIFIED.
+
+---
+
+## M-48. A files-only listing taken for the whole directory
+
+**Surface:** `list_files_recursively` (stable), used in place of
+`list_children` (experimental).
+
+**Behaviour:** LCp asks for the subdirectories of a directory of 113
+entries. DeepSeek read four pages of `list_children`, each saying that
+more entries follow, then: "Let me use a recursive listing with a
+larger limit to be more efficient." It read `list_files_recursively`
+to its end, asking for `name` and `type` only, and answered "All
+entries are regular files … There are no subdirectories". One of the
+files it saw, `log_20200112.dat`, is inside `calib_runs`.
+
+**Why this matters:** a listing of files cannot show a directory, an
+empty one least of all. Read as the directory's entries, it makes
+every subdirectory disappear, and the answer sounds complete.
+
+**How it was found:** gate 4 re-run of `list_children`, `rerun-k8-*`.
+
+**Evidence:** design/14, the re-run: DeepSeek LCp #1.
+
+**Root cause:** the description says "Recursively list non-directory
+files"; the model read the listing as the directory's entries anyway,
+and did not ask for `path`, which would have shown `calib_runs/`.
+
+**Decision:** Not changed: model capability. The description says
+what the tool lists. One trial in one family; the other 47 LCp trials
+of the re-run, and every LC trial of the first run, asked
+`list_children` for the directories. It would reopen if a second
+family, or the control, read a recursive file listing as a
+directory's entries.
+
+**Accommodation candidate:** `list_files_recursively`'s answer says
+that it lists files only, so directories, empty ones included, are
+not in it. Cost: a stable tool's result, so a K=3 smoke re-run. On
+`list_children`'s side, its `more` note could say that a page holds
+up to 100 entries (`limit`); not proposed, since DeepSeek set `limit`
+to 100 itself in 6 of its other 7 LCp trials.
+
+---
+
+## M-49. Haiku hands the wait for a copy back
+
+**Surface:** `schedule_file_replication` (experimental), with its
+result note (M-26), in SR1 and SR1i.
+
+**Behaviour:** Haiku at low effort read the target's blocks once after
+scheduling, found the copy partial, said so, and stopped: "I can't
+wait for the transfer to finish from here. To confirm completion,
+check that the local provider's block distribution covers `[0,
+134217728]`, or ask me to check again." (SR1 #3; also SR1 #5, SR1i
+#6). The answers were true when given.
+
+**Why this matters:** the brief asks to be told when the data are
+fully there; a true "not yet" leaves the waiting to the user. M-33
+records the same stop for Qwen3-Coder, so this is a second family.
+
+**How it was found:** gate 4 re-run, `rerun-k8-*` (supporting for
+this tool: it predates PR #52).
+
+**Evidence:** design/12, "`rerun-k8`: supporting only". After a
+partial first read Haiku polled to the whole file in 12 of 15 trials
+here, and in 6 of 6 in the first run, which had no note. But the
+transfers were slower in the re-run (Haiku's first read after
+scheduling was already whole in 1 of 16 trials, against 10 of 16), so
+the note's share cannot be told apart. The hand-backs restate the
+note's test for the user, as Qwen3-Coder SR1i #6 does ("As noted, …
+we should judge the completion by checking the target provider's
+blocks … you should check the file's distribution").
+
+**Root cause:** not established. The note gives the test of
+completion ("judge completion by the target provider's blocks"), not
+the description's instruction to re-check the blocks until they cover
+the file.
+
+**Decision:** Fixed (the note reworded, 2026-11-24): "Replication scheduled; the copy may not be complete yet. To know when it is, re-check the target provider's blocks of the file until they cover all of it; a transfer's 'completed' status alone does not show that." `rerun2-k8` pending. Originally open, to be decided with `rerun2-k8`'s classification
+(design/12). M-33's reopen condition ("the same stop in a second
+family") is met.
+
+**Accommodation candidate:** the note carries the description's
+instruction: "Scheduled, not yet copied: re-check the target
+provider's blocks of the file until they cover all of it, and judge
+completion by them, not by the transfer's status." Free (the tool is
+experimental), but `rerun2-k8` runs with the present note, so SR1 and
+SR1i would run again.
+
+---
+
+## M-50. The id guard's edges: a whole mis-copy, an id with a space
+
+**Surface:** `get_file_attributes`, `list_children` and
+`schedule_file_replication`, for a file given by id (M-28's guard).
+
+**Behaviour:**
+- A copy of the brief's id with one uuid digit changed is whole in
+  shape, so the guard lets it through. 25.0 answers `400 posix
+  enoent`. `get_file_attributes` then says "This provider reports
+  nothing at file id '…': it may have been deleted, or the value is
+  not a file id. Give a path, /<space_name>/<path>, or a file id.",
+  and `schedule_file_replication` "Onedata found nothing for the
+  replication of '…' to '…', and did not say which argument it means.
+  Check both: …". Neither says the id may be mis-copied. DeepSeek
+  (SR1i #1) searched the space's transfers for the file, never copied
+  the id again, and ran out of tokens.
+- A copy with a space inside (`00000000005 2D11F…`, Haiku FAi #4) is
+  neither a path nor hex, so the tool resolves it as a relative path
+  under the client's root and answers that the path is not found.
+  Haiku copied the id again and passed.
+
+**Why this matters:** M-28's fix says that the id may be mis-copied
+for a `403` and a `spaceNotSupportedBy`, but not for the not-found
+answer a whole-shaped mis-copy draws, so the guard's own test in the
+records (refused, or a hint that says the id may be mis-copied) fails
+for it. The relative-path reading answers about a path the model
+never gave.
+
+**How it was found:** gate 4 re-run, `rerun-k8-*`.
+
+**Evidence:** design/12 and design/13, the re-run.
+
+**Root cause:** the not-found hint predates the guard and was left
+as it was; the guard checks only hex values, and the relative-path
+resolution takes everything else.
+
+**Decision:** Open (operator; design/13, "Decisions for the
+operator"). One trial each, in two families, neither tool-attributable
+by the bar; both are modest changes the Aim prefers.
+
+**Accommodation candidate:** for an id given through the tool, the
+not-found hint adds that the id may be mis-copied and to copy it
+exactly, or give the path; a value of hex digits with whitespace is
+refused as an incomplete id. Free while the tools are experimental
+(with FAi and SR1i run again); for a stable tool, a K=3 smoke re-run.
 
 ---
 
