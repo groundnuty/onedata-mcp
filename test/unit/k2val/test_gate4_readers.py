@@ -116,6 +116,37 @@ def test_sr1_scheduled_successfully_is_not_a_whole_copy(answer: str, label: str)
     assert read_copy_answer(answer, "vistula-dc", "nordic-marine-dc") == label
 
 
+# --- SR1 (the K=8 re-run): "no ongoing ..." says nothing is under way -----------------------------
+#
+# Two whole claims, each read from the blocks after the schedule, were read OTHER: the "ongoing" of
+# "No ongoing action is needed" and of "there's no ongoing placement requirement" counted as a
+# copy still under way (design/12, the re-run's SR1 #7 and #3). The site is `local` there.
+
+SR1_RERUN_WHOLE = [
+    "Done. The copy is **fully in place now** — the data are already there.\n\n- **What was done:** a one-off replication transfer (`<id>`) of `/omcp-x/logs-x/log_20200110.dat` to provider `local` (`<id>`). No QoS/placement rule was created.\n- **Verification:** by block distribution (not just transfer status), the `local` provider's storage backend `<id>` holds the entire file — block range `[0, 134217728]`, i.e. all 128 MiB of the 134,217,728-byte file.\n- The original copy at provider `owner` remains untouched.\n\nNo ongoing action is needed; the data are fully present at your local site.",
+    "The replication is complete. Let me verify the state:\n\n- **Transfer status**: `completed` — 134,217,728 bytes replicated (all 128 MB).\n- **Distribution at `local`**: Now shows `physicalSize: 134217728` with blocks `[[0, 134217728]]` covering the entire file, and `holds_whole_file: true`.\n\nThe file's data is fully present at my site `local`. I did **not** set up any QoS placement rule — this was a one-off replication, so there's no ongoing placement requirement keeping it there.\n\n## Summary\n\nI made a copy of `/omcp-x/logs-x/log_20200110.dat` at my site `local` (provider `<id>`) via a one-off replication transfer (ID `<id>`), without setting up any placement/QoS rule.\n\nThe data was **fully present** at `local` once the transfer completed — the distribution showed `local` holding the entire file (all 134,217,728 bytes, block range `[0, 134217728]`, `holds_whole_file: true`). The transfer reported completion and all 128 MB were replicated successfully.",
+    "No pending transfer remains, and the file is fully present at local.",
+]
+
+# Paired negatives: a copy under way is still one, beside a "no ongoing ..." or alone.
+SR1_RERUN_NOT_YET = [
+    "There is no ongoing transfer, but the copy is not complete yet.",
+    "No pending action on your side; the replication is still ongoing.",
+    "Transfer ongoing: 40 MB of 128 MB are at local so far.",
+    "The copy is still pending at local; no queued work is left elsewhere.",
+]
+
+
+@pytest.mark.parametrize("answer", SR1_RERUN_WHOLE)
+def test_sr1_no_ongoing_is_not_a_copy_under_way(answer: str) -> None:
+    assert read_copy_answer(answer, "local", "owner") == "SAYS_WHOLE"
+
+
+@pytest.mark.parametrize("answer", SR1_RERUN_NOT_YET)
+def test_sr1_a_copy_under_way_is_still_not_yet_beside_no_ongoing(answer: str) -> None:
+    assert read_copy_answer(answer, "local", "owner") == "SAYS_NOT_YET"
+
+
 # --- FA, FAi, FAn ------------------------------------------------------------------------------
 
 FA_REAL = [
