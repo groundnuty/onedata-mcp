@@ -1205,7 +1205,28 @@ mis-copied id, but the same fix applies). No check catches all: GLM
 FAi #7 spliced one id's 8-byte header onto another file's payload,
 and Onedata returned that other file.
 
-**Decision:** Fixed (PR #46), re-run pending (design/13).
+**Review of the guard (2026-11-24):** an external review found that
+PR #46's check (the length byte and the payload's shape) let a
+same-length splice through, so `schedule_file_replication` could copy
+the file the payload names; that it refused valid trash and archives
+root ids under a longer key length (a 128-character cap per part);
+that the tools' wrappers took a long plain name for an id and sent a
+copied id with punctuation to path lookup under an MCP root; that a
+looked-up id escaped the shared segment guard; and that the hints
+named a copy before the provider's refusal, and said a missing
+character gives them. Fixed, from ctool's own encoder
+(`src/utils/file_id.erl`): an id must be one `build_objectid/2` could
+write, its CRC-16 included (25.0 writes it and never checks it), for
+every form. That splice is now refused. All 534 distinct ids 25.0
+returned in the recorded runs pass; of the 52 distinct values
+beginning with the header's ten zeros that the models passed and 25.0
+did not write, the old check accepted 4 and this one refuses all. For an id that passes, a 403 or
+`spaceNotSupportedBy` now gives the refusal first (for replication,
+the provider and space the error names) and the copy as a condition
+after it. Details: design/13, "Review of the id guard".
+
+**Decision:** Fixed (PR #46, tightened after the review of
+2026-11-24), re-run pending (design/13).
 
 ---
 
