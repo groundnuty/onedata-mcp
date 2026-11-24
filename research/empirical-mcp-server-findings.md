@@ -2277,7 +2277,7 @@ completion ("judge completion by the target provider's blocks"), not
 the description's instruction to re-check the blocks until they cover
 the file.
 
-**Decision:** Open, to be decided with `rerun2-k8`'s classification
+**Decision:** Fixed (the note reworded, 2026-11-24): "Replication scheduled; the copy may not be complete yet. To know when it is, re-check the target provider's blocks of the file until they cover all of it; a transfer's 'completed' status alone does not show that." `rerun2-k8` pending. Originally open, to be decided with `rerun2-k8`'s classification
 (design/12). M-33's reopen condition ("the same stop in a second
 family") is met.
 

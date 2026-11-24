@@ -196,10 +196,15 @@ async def create_transfer(
 
 _SHOWN_MAX = 80
 # In the result of a schedule (F2, design/12): gate 4 had models answer "done" from the
-# transfer's status. It names no tool: the tool that reads the blocks may not be offered.
+# transfer's status, and some stop right after scheduling or hand the waiting back to the user
+# (M-33, M-49). So it says what to do next and when the copy is complete, in the words of the
+# description's own instruction. It does not say the copy has not happened: the target may
+# already hold every block, or the copy may finish before the reply is read. It names no tool:
+# the tool that reads the blocks may not be offered.
 SCHEDULED_NOTE = (
-    "Scheduled, not yet copied: judge completion by the target provider's blocks of the "
-    "file, not by the transfer's status."
+    "Replication scheduled; the copy may not be complete yet. To know when it is, re-check the "
+    "target provider's blocks of the file until they cover all of it; a transfer's 'completed' "
+    "status alone does not show that."
 )
 _PATH_FORM = "a path starting with '/': /<space_name>/<path_to_file>"
 _ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
@@ -683,7 +688,8 @@ async def schedule_file_replication(
             either way.
 
     Returns: ``{"transferId": "<id>", "note": SCHEDULED_NOTE}``. The note repeats, where a
-    model reads the result, what the tool's description says: scheduled is not copied.
+    model reads the result, what the tool's description says: scheduling is not copying, and
+    the target's blocks, re-checked until they cover the file, show when the copy is complete.
     """
     file_arg, target = file_id_or_path.strip(), target_provider_id.strip()
     _check_replication_args(file_arg, target)
