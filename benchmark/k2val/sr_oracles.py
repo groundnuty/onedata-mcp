@@ -85,11 +85,14 @@ _NO_RULE_RESTATED = re.compile(
     re.I,
 )
 # Narration of what was ("the transfer was in progress") or is no more ("no longer pending") is
-# not a claim that the copy is not complete now.
+# not a claim that the copy is not complete now. Nor is "no ongoing ..." / "no pending ...": it
+# says nothing is under way ("No ongoing action is needed", "there's no ongoing placement
+# requirement").
 _PAST_STATUS = re.compile(
     r"\b(?:was|were|had been|no longer|not)\s+(?:still\s+)?(?:in progress|pending|queued|"
     r"ongoing|running|being (?:copied|replicated|transferred))\b"
-    r"|\bwhile\b[^.\n]{0,40}\b(?:in progress|running|ongoing)\b",
+    r"|\bwhile\b[^.\n]{0,40}\b(?:in progress|running|ongoing)\b"
+    r"|\bno\s+(?:ongoing|pending|queued)\b",
     re.I,
 )
 

@@ -1,6 +1,6 @@
 # Promotion record: `get_file_attributes`
 
-Status: **in progress** (updated 2026-11-23). Gates 1 to 3 are done: the live test passed against Onedata 25.0 (2026-11-21, 10 passed). Gate 4 ran 2026-11-22 and passes (results below); FAi is being re-run at K=8 after the mis-copied-id guard (PR #46) before promotion.
+Status: **gate 4 passed** (updated 2026-11-24). Gates 1 to 3 are done: the live test passed against Onedata 25.0 (2026-11-21, 10 passed). Gate 4 ran 2026-11-22 and passed (results below); FAi was re-run at K=8 on the six-config panel on 2026-11-23, after the mis-copied-id guard (PR #46), and the re-run leaves no tool-attributable finding open ("Re-run after the 2026-11-23 decisions", below).
 
 The short commit ids below are **branch commits** on `feat/promote-file-tools`. A squash merge leaves them unreachable from `master`. **The anchor is the surface hash.**
 
@@ -80,9 +80,9 @@ Checked against the protocol's rules; `test_the_description_follows_the_surface_
 - **Errors tell the caller how to fix the call:** done in gate 1.
 - **`make conformance`: passed** on the integrated server (the integration branch `feat/promotion-harness` at `501c867`, which carries all five packages), run 2026-11-21 (`conformance-results/20261121T010707Z`) with `@modelcontextprotocol/conformance@0.1.16`, the version `make conformance` now pins: 12 passed, 20 failed, every failure expected (`conformance-baseline.yaml`: scenarios that need prompts, resources, completion, sampling, elicitation or the suite's own test tools, none of which this server has), and the baseline check passed. Conformance tests the protocol, not one tool, so this one run serves design/11–15.
 - **Reported, not changed:** two stable tools' texts name this tool: `get_file_metadata`'s description, and `list_files_recursively`'s `attributes` field ("Use the same allowed values as in get_file_attributes"). Under `ONEDATA_MCP_MATURITY=stable` they point to a tool that is not offered; promoting this tool fixes that for the stable tier. Changing their wording would cost them a smoke re-run.
-- **Not stated:** the unit of the times. The swagger says seconds, but its examples have 13 digits. The live test prints a real value before anything is said.
+- **Not stated:** the unit of the times. The swagger says seconds, but its examples have 13 digits. The first live run printed seconds (gate 3); the description still does not say.
 
-## Gate 3: live check (built in branch commits `b7cd89a` and `ab05369`, not run)
+## Gate 3: live check (built in branch commits `b7cd89a` and `ab05369`; done, first live run 2026-11-21: 10 passed)
 
 [`test/live/test_files_live.py`](../test/live/test_files_live.py), section `get_file_attributes`, calls the tools through an in-process MCP client, as a model would, in a fresh probe directory under the live space. It covers:
 
@@ -102,11 +102,16 @@ Like the other live tests, it is skipped unless `ONEDATA_MCP_LIVE_FILES=1`, and 
 
 **And:** `make valfed-check` now also builds FA's fixture: modes set at the owner provider, and the build waits until the local provider shows them. A mode that never shows is a `FixtureError`.
 
-**Results: TODO.** Record here:
+**Results (2026-11-21, `make valfed-files-live`, Onedata 25.0, 10 passed),** from the run's printout:
 
-- the form of `posixPermissions` (`"600"`, `"0600"`, or other). If it is not an octal string, change `fixtures.same_mode` and the fake before the run;
-- the unit of the times;
-- the error texts and statuses of the missing path, the made-up id and the unknown name. If the made-up id's status is not 400 or 404, or its error id is not `badValueIdentifier`, adjust the hint mapping and the unit tests' bodies before the run.
+- **`posixPermissions`** is an octal string with no leading zero: `"600"` after setting 600, read by path and by id; a directory reads `"775"`. `fixtures.same_mode` needed no change.
+- **The times are in seconds:** `creationTime` 1795287699; `mtime` and `atime` alike.
+- **The default attributes** of a file: `type`, `size`, `posixPermissions`, `path`, `name`, `mtime`, `atime`, as the description says. A directory's `type` is `DIR`.
+- **`attributes` as JSON text** reached Onedata as a list (the test passed).
+- **A missing path:** the lookup answered `400 posix enoent`; the tool's answer: `Path "<path>/no-such-file.dat" not found`.
+- **An unknown name** (`owner`): `400 badValueNotAllowed`, key `attributes`, listing the 34 allowed names (`xattr.*` among them). The tool passes Onedata's message on.
+- **A made-up id** (32 hex digits): `400 spaceNotSupportedBy`, with the value itself as the space id, so the tool answered "This provider does not support the space of file id …", one of the two hints M-28 found misleading. **Superseded by the guard (PR #46):** such a value is now refused before any request as "not a complete file id".
+- **Not run live:** the cases the guard added to the live test (a real id with its last two digits dropped; a whole id with one uuid digit changed) have not run against the federation since. The K=8 re-run met both live: the refusal before any request (28 calls in FAi), and, for a changed uuid digit, `400 posix enoent` and the not-found hint (design/12, the re-run, DeepSeek SR1i #1). `make valfed-files-live` would record them.
 
 ## Gate 4: validation run (scenarios built in branch commit `c69fb6b`; run 2026-11-22, results below)
 
@@ -214,23 +219,47 @@ PASS per config and scenario, after classification (K=8):
   - **Fixed 2026-11-23 (operator's decision), with the code on this branch.** The two parts of the fix above, for an id given through the tool (gate 1, the rows added after gate 4). The check is a stricter test than "decodes to `guid#<uuid>#<space id>`": it also reads the header's sixth byte as the payload's length, which is what shows a byte dropped from an otherwise well-formed id. Over the 383 distinct ids that 25.0 returned in the validation runs, trash and archive roots included, it refuses none. The recorded calls of the three tools passed 35 distinct id values (in 55 calls) that were not an id Onedata or a brief had given; it refuses 33. The other 2 are whole in shape: 180 digits with one changed digit, in the header's checksum bytes in one and in the uuid in the other, and they are Onedata's to refuse. It also accepts the two other id shapes that the 25.0 swagger and its README show: the older id whose payload is the Erlang term `{guid, Uuid, SpaceId}` (the README's example; its length byte is checked), and the id of a file seen through a share, `shareGuid#<uuid>#<space id>#<share id>` (the swagger shows only its first characters, so its layout is unverified and its length byte is not checked). The swagger's other long hex strings that read as ids are examples cut short, and are refused as incomplete. The id handling is only for the tool's own calls (gate 1). Unit tests: `test/unit/api/test_file_ids.py` and the mis-copy cases of `test_get_file_attributes.py`, `test_list_children.py` and `test_transfers.py`. The FAi re-run is a TODO below. **Tightened 2026-11-24** after an external review: the two ids "whole in shape" above are refused now, by the CRC, with a header spliced onto another file's payload; see "Review of the id guard".
 - **The run passes when** (design/10, gate 4): every control trial passes, with control trials lost to a harness bug or deployment artefact re-run after the fix, so each scenario ends with K passing control trials; and no tool-attributable finding is open (fixed and re-run, or accepted only with its cause outside the tool and the operator's sign-off).
 
-**Verdict: PASSES gate 4 as recorded, pending the FAi re-run after the id guard (below).** The control passes all 32 trials and no tool-attributable finding is open. The hint on a mis-copied id is a gate-1 defect, not L3a (operator's call, 2026-11-23); it is fixed (above), and FAi is re-run on the smoke pair at K=3 before the promotion PR.
+**Verdict of the first run: PASSES gate 4 as recorded, pending the FAi re-run after the id guard.** The control passes all 32 trials and no tool-attributable finding is open. The hint on a mis-copied id is a gate-1 defect, not L3a (operator's call, 2026-11-23); it is fixed (above), and FAi was re-run (below).
 
-### Re-run after the 2026-11-23 decisions (TODO, not run)
+### Re-run after the 2026-11-23 decisions (run 2026-11-23)
 
-Nothing here has run. Before starting, check `$VALFED_HOME/HOLD` and the study coordinator's limits: the federation is on a shared host. `K2VAL_ARTEFACT_ROOT` (new in the Makefile) passes `--artefact-root`. The panel and K are this record's reading of "the smoke pair at K=3" (design/10, "The standing panel"; design/10, "Staying stable"): Qwen3-Coder and Haiku at effort low. The operator did not fix them for this re-run.
+FAi ran at K=8 on the six-config panel (the operator's reading: the full panel, since the mis-copies came from Qwen3.6 and GLM, which the smoke pair lacks), in one invocation with design/14's LCp and LCi and design/12's SR1 and SR1i: the command, the run ids (`rerun-k8-*`), the runner (master `e2697c2`, after PR #46; `get_file_attributes` is the same at master `2ce1182`), and the records are in [design/14's re-run](14-promotion-list-children.md#re-run-after-the-2026-11-23-decisions-run-2026-11-23). FAi's 48 trials have one record each, none superseded. The offered surface in every counted FAi trial is K1, `9192d3f502ebbd04a4d17ef787c27f7193df0fb89bac5eafa1ea618ae1324df3`, as above. Re-scored offline at master `2ce1182` with the stored verdicts (`rejudge --cached-only`), every stored outcome is reproduced, and this round's reader fix (SR1 only) changes no FAi reading.
 
-```
-make valfed-up && make valfed-reset
-SSL_CERT_FILE=$VALFED_HOME/tls/ca-bundle.pem \
-  make k2val K2VAL_CONFIG=benchmark/k2val/k2val.valfed.toml \
-    K2VAL_ARTEFACT_ROOT=$VALFED_HOME/evidence/k2val \
-    K2VAL_RID=fa-guard-k8 \
-    K2VAL_SCENARIOS=FAi K2VAL_K=8 \
-    K2VAL_MODELS=sonnet-medium,haiku-low,glm,qwen36,qwencoder,deepseek
-```
+PASS per config (K=8; the first run's in brackets where it differs):
 
-- **FAi at K=8 on the full panel (the mis-copied-id guard).** 1 scenario × 6 configs × 8 = 48 trials, run in batches of two configs as the main run was. The operator's reading (2026-11-23): the full panel and K=8, not the smoke pair, because the mis-copies came from Qwen3.6 and GLM, which the smoke pair lacks, and because the record's FAi row then compares like with like. Passes when every control trial passes and no new tool-attributable failure appears: an id that was not the brief's is refused before any request with "not a complete file id", or reaches Onedata and draws a hint that leads with the provider's refusal and asks for the file's id to be copied exactly or its path given. After the review of the id guard (below), FAi runs again at K=8 on the full panel with the stricter check, together with LCi, SR1 and SR1i (run `rerun2-k8`); promotion waits for it.
+| Config | FAi |
+|---|---|
+| sonnet-medium (control) | 8/8 |
+| haiku-low | 8/8 |
+| glm | 8/8 (6/8) |
+| qwen36 | 6/8 (4/8) |
+| qwencoder | 3/8 (2/8) |
+| deepseek | 8/8 |
+
+41 of 48 pass; the control passes all 8. Two NEEDS_REVIEW (Qwen3-Coder #1, #5) fail under either reading.
+
+- **The pass test, as set before the run:** every control trial passes and no new tool-attributable failure appears; an id that was not the brief's is refused with "not a complete file id", or reaches Onedata and draws a hint that says the id may be mis-copied. **Against it:** the control passes, and no new tool-attributable failure appears (below). Thirty FAi calls passed an id that was not the brief's. 28 were refused as incomplete; two meet the id sentence not to its letter, both in trials that passed: Haiku #2 [3], whose changed header digits Onedata did not check (it returned the right file, with no hint at all), and Haiku #4 [3], an id with a space inside, answered as a relative path that was not found. Outside FAi, DeepSeek SR1i #1 [0] does not meet it either (design/12): findings log M-50. Nine more calls passed `<dir>/<file id>` as a path (Qwen3-Coder #2, #6, #7, the first run's watch item): a path is not checked, and each drew "Path … not found"; #6 and #7 then passed the ids and passed.
+
+- **The guard: its refusal was exposed and worked; its reworded hints were not exposed.**
+  - **Refused before any request, "not a complete file id": 28 calls in 6 trials.** Haiku #0 [3] (181 digits) and #4 [4] (179); Qwen3-Coder #1 [0] (190: `guid#` written twice) and #2 [0], [2] (178); Qwen3.6 #4 [1] (179) and #1 (22 calls: its four ids at 178 digits, later cut to 40).
+  - **After the refusal:** Haiku #0, #4 and Qwen3-Coder #1 copied the id again and passed; Qwen3.6 #4 read the file by path, as the refusal offers (a right answer; see below); Qwen3.6 #1 and Qwen3-Coder #2 never recovered.
+  - **The reworded `403` and `spaceNotSupportedBy` hints: NOT VERIFIED.** No mis-copied id reached Onedata in FAi, so no model was shown them.
+  - **What the check cannot see, as recorded above:** Haiku #2 [3] passed an id with four header digits changed and its payload whole; Onedata returned the right file. Outside FAi, DeepSeek SR1i #1 [0] (design/12, the re-run) passed the brief's id with one uuid digit changed: 25.0 answered `400 posix enoent`, and the tool "This provider reports nothing at file id '…': it may have been deleted, or the value is not a file id. Give a path, /<space_name>/<path>, or a file id." That hint does not say the id may be mis-copied; DeepSeek never copied the id again and ran out of tokens (findings log M-50).
+  - **An id with a space inside** (Haiku #4 [3]) is neither a path nor hex, so the tool resolved it as a relative path under the client's root and answered that the path was not found. Haiku copied the id again and passed (M-50).
+- **Classifications (5 FAIL, 2 NEEDS_REVIEW):**
+  - **Qwen3.6 #1: mis-copied ids, never copied again. Model capability (L3b, M-35).** 22 refusals, each saying "copy it exactly from the earlier answer, or give the path"; it read the directory by path at [4] but never a file; answered "none".
+  - **Qwen3.6 #4: the guard worked and the answer is right; FAIL by FAi's required call.** [1] its copy of the second id (179 digits) was refused; [4] it read `log_20200102.dat` by path, as the refusal offers, and answered `log_20200102.dat`. FAi requires each mode to come back from a call by the id given (above, "Required call"), and this one came by path. M-32's reopen clause is met in its letter ("a trace from a tool's error to the switch to the path"). It is not L3a: the tool refused a broken id and named the right alternative; what fails the trial is the scenario's rule, which exists to exercise the id form (the other three ids were read by id). **Operator's call:** keep the rule (FAIL), or count a by-path read of a file whose given id the tool refused as incomplete.
+  - **Qwen3-Coder #0, #4 (FAIL), #1, #5 (NEEDS_REVIEW, FAIL either way): no name. Model capability (L3b, M-33).** Each read the four modes by id and never asked for `name`, then answered "the name of the second file, which is `log_file_2` … I will respond with "none"" (#0), "the file with different permissions is the second file" (#1, #4), or "the name of the second file, which is `<its id>`" (#5). The judge read #1 and #5 as naming the second id, the reader as unclear; no file is named under either reading.
+  - **Qwen3-Coder #2: a mis-copied id, never copied again. Model capability (L3b, M-35).** [0] a 178-digit copy, refused; [1] `<dir>/<id>` as a path, not found; [2] the same 178 digits, refused again; [3] an invented `log1.log`; answered "none".
+- **The bar.** All seven are Qwen (Qwen3.6 2, Qwen3-Coder 5), and no control trial failed, so the two-family clause does not apply. Nor does the third: no trace runs from the tool's text to a wrong answer. The refusal says "copy it exactly … or give the path", and every model that followed either half recovered.
+- **The Aim (design/10), per remaining failure** (each a decision for the operator, below):
+  - Qwen3-Coder's missing `name` (4 of 8 trials, 5 of 8 before): M-33's accommodation, the tool returning `name` beside whatever attributes are asked for. A result-shape change: free while the tool is experimental (FAi re-run), a K=3 smoke re-run once it is stable.
+  - The not-found hint for an id given through the tool, and a value of hex digits with spaces in it (M-50): say the id may be mis-copied, as the `403` and `spaceNotSupportedBy` hints do; refuse the second as an incomplete id. Error-hint changes, at the same cost.
+  - The mis-copies not copied again (Qwen3.6 #1, Qwen3-Coder #2): none beyond the guard; the tool cannot know which id the model meant (M-35).
+
+**Verdict: PASSES gate 4** (2026-11-24). The control passes every trial of both runs (32 and 8). The guard's refusal was exposed in 28 calls, and the model recovered in four of the six trials that met it; the failures that remain are one family's, none tool-attributable. The guard's reworded `403` and `spaceNotSupportedBy` hints stay NOT VERIFIED (no model was exposed to them). The offline rescore is `rescore-rerun-k8-2026-11-23`, in the evidence store.
+
+- **After the review of the id guard (2026-11-24).** The re-run above was taken with PR #46's guard. The review found a same-length splice that passed it (see "Review of the id guard"); the guard now checks the id as Onedata's encoder writes it. FAi therefore runs once more at K=8 on the six-config panel, with LCi, SR1 and SR1i (run `rerun2-k8`), and the promotion waits for it. Its pass test: every control trial passes, and no new tool-attributable failure appears; an id that was not the brief's is refused before any request with "not a complete file id", or reaches Onedata and draws a hint that leads with the provider's refusal and asks for the file's id to be copied exactly or its path given.
 
 ## External review (2026-11-20)
 
@@ -297,3 +326,13 @@ This file. To complete it:
 
 - **Run order and the K1 hash.** This promotion changes the K1 set's surface (`dc1d10dc…` → `21aef26a…`), which design/11 records as the surface for V3, V3n and V3o. Run design/11's gate 4 before this branch merges, or record its run against the new K1 hash. The parallel package of `schedule_file_replication` uses the K1 set too.
 - **The API legs' direct call path.** For the `openai_compat` and `anthropic` legs the panel calls `app.call_tool` with no MCP session (the Claude SDK and CLI legs go through the loopback HTTP server). A relative path then made `ctx.list_roots()` raise a `RuntimeError` ("session is not available"), not the `Paths must start with '/'` hint a real client gets. **Fixed for the three file tools** (review, 7: they catch it and give the hint). The stable path-taking tools keep `_resolve_with_mcp_root` as it is; fixing them there needs their own gates.
+
+### After the FAi re-run (2026-11-23)
+
+Each is the Aim's question (design/10): a modest change, or a recorded "not changed". The first three cost an FAi re-run while the tool is experimental, and a K=3 smoke re-run of its rows once it is stable (design/10, "Staying stable").
+
+- **FAi's required call and the guard's advice.** Qwen3.6 #4 followed the refusal's "or give the path" and answered rightly, and FAi's rule failed it (gate 4, the re-run). Keep the rule, or count a by-path read of a file whose given id the tool refused as incomplete.
+- **`name` with every answer** (M-33): Qwen3-Coder again read the modes by id without `name` in 4 of 8 FAi trials.
+- **The guard's edges** (M-50): the not-found hint for an id given through the tool could say the id may be mis-copied, as the `403` and `spaceNotSupportedBy` hints do; and a value of hex digits with spaces in it could be refused as an incomplete id instead of being resolved as a relative path.
+- **The live test's guard cases** have not run against the federation (gate 3). `make valfed-files-live` records them; the K=8 re-run already met both cases live.
+- **External review of the post-gate-4 changes.** The id guard (PR #46) was not reviewed by an external model before the re-run, as far as this record shows; design/10's gate 5 asks for a review before the validation run.
