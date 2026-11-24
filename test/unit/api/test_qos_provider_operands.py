@@ -15,13 +15,13 @@ import pytest
 from pytest_httpx import HTTPXMock
 
 from onedata_mcp.api import qos
+from test.unit.object_ids import object_id
 
 BASE = "https://oneprovider.example/api/v3/oneprovider"
 SPACE_ID = "9JO5__9nL1b01YEvwnft1r20gwgwlkIp19ND_n8hgxs"
 _PAYLOAD = f"guid#t_w-ghd1c7eDoMvTmo-gW_3aszvpHkGzy6Xw4#{SPACE_ID}".encode()
-# a file id of the 25.0 shape: an 8-byte header whose sixth byte is the payload's length, then
-# the payload, in hex
-FILE_ID = (bytes([0, 0, 0, 0, 0, len(_PAYLOAD), 0x5C, 0xF4]) + _PAYLOAD).hex().upper()
+# a file id as Onedata's encoder writes it (`test/unit/object_ids.py`)
+FILE_ID = object_id(_PAYLOAD)
 LOCAL_ID, OWNER_ID = "pLocal0123456789abcdef", "pOwner0123456789abcdef"
 PROVIDERS = [
     {"providerId": LOCAL_ID, "providerName": "provider-a"},

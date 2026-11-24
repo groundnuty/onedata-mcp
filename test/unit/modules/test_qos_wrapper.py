@@ -16,6 +16,7 @@ from onedata_mcp.modules import qos as qos_module
 from onedata_mcp.token_policy import WRITE_TOOL_NAMES
 from onedata_mcp.tool_maturity import ALL_KNOWN, FLAG_GATED
 from onedata_mcp.utils import MAX_ERROR_CHARS
+from test.unit.object_ids import object_id
 
 HOST = "provider.example"
 QOS_URL = f"https://{HOST}/api/v3/oneprovider/qos_requirements"
@@ -335,7 +336,7 @@ async def test_a_summary_without_a_requirements_mapping_is_passed_on_unchanged(
 
 SPACE_ID = "9JO5__9nL1b01YEvwnft1r20gwgwlkIp19ND_n8hgxs"
 _PAYLOAD = f"guid#t_w-ghd1c7eDoMvTmo-gW_3aszvpHkGzy6Xw4#{SPACE_ID}".encode()
-FILE_ID = (bytes([0, 0, 0, 0, 0, len(_PAYLOAD), 0x5C, 0xF4]) + _PAYLOAD).hex().upper()
+FILE_ID = object_id(_PAYLOAD)
 SPACE_URL = f"https://{HOST}/api/v3/oneprovider/spaces/{SPACE_ID}"
 PROVIDERS = [
     {"providerId": "pLocal0123456789abcdef", "providerName": "provider-a"},

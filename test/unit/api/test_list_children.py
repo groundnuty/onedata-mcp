@@ -22,16 +22,17 @@ from onedata_mcp.api import files
 from onedata_mcp.modules import files as files_module
 from onedata_mcp.tool_maturity import ALL_KNOWN, FLAG_GATED
 from onedata_mcp.utils import OnedataApiError
+from test.unit.object_ids import object_id
 
 API = "https://provider.example/api/v3/oneprovider"
 SPACE_ID = "9JO5__9nL1b01YEvwnft1r20gwgwlkIp19ND_n8hgxs"
 
 
 def whole_id(uuid: str = "0cb444f249735948f20eaf93a2dfe54bch3e33", space_id: str = SPACE_ID) -> str:
-    """A file id of the 25.0 shape: an 8-byte header whose sixth byte is the payload's length,
-    then `guid#<uuid>#<space id>`, all in hex."""
+    """A file id as Onedata's encoder writes it (`test/unit/object_ids.py`): the hex of an
+    8-byte header and `guid#<uuid>#<space id>`."""
     payload = f"guid#{uuid}#{space_id}".encode()
-    return (bytes([0, 0, 0, 0, 0, len(payload), 0x52, 0x73]) + payload).hex().upper()
+    return object_id(payload)
 
 
 DIR = whole_id()
@@ -123,13 +124,40 @@ async def test_a_token_with_a_nonzero_offset_is_refused_before_any_request(
 # --- the id goes into the path percent-encoded -----------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("value", "encoded"), [("ab?c", "ab%3Fc"), ("ab#c", "ab%23c"), ("ab/x", "ab%2Fx")]
-)
+@pytest.mark.parametrize(("value", "encoded"), [("ab?c", "ab%3Fc"), ("ab#c", "ab%23c")])
 def test_an_id_is_percent_encoded_into_its_path_segment(value: str, encoded: str) -> None:
-    """The last defence: `?` and `#` would cut the request path short and `/` would add
-    segments. No such value reaches it through the tool, which refuses it first (below)."""
+    """The last defence: `?` and `#` would cut the request path short. No such value reaches it
+    through the tool, which refuses it first (below)."""
     assert files._id_in_path(value, value) == encoded
+
+
+def test_an_id_with_a_slash_is_refused_by_the_shared_segment_guard() -> None:
+    """`/` would add segments; the shared guard (`utils.id_segment`) refuses it, as the stable
+    tools' ids are refused (issue #44)."""
+    with pytest.raises(ValueError, match="contains '/'"):
+        files._id_in_path("ab/x", "/Alpha/x")
+
+
+@pytest.mark.asyncio
+async def test_the_id_a_lookup_returns_goes_through_the_shared_segment_guard(
+    httpx_mock: HTTPXMock,
+) -> None:
+    """A path resolves to Onedata's id, which is not checked as a copy; it still goes into the
+    listing through `_file_id_segment`, which refuses a `/` rather than encoding it."""
+    httpx_mock.add_response(method="POST", url=lookup_url("/Alpha/d"), json={"fileId": "ab/cd"})
+
+    with pytest.raises(ValueError, match="contains '/'"):
+        await files.list_children("/Alpha/d", limit=10, offset=0)
+
+    assert listings(httpx_mock) == []  # no `/data/ab%2Fcd/children`
+
+
+@pytest.mark.asyncio
+async def test_the_type_probe_goes_through_the_shared_segment_guard(httpx_mock: HTTPXMock) -> None:
+    """The one type read that tells a file from a one-file directory: an id with a `/` is not
+    sent (the probe then says nothing, as for any probe that fails)."""
+    assert await files._kind_of("ab/cd") is None
+    assert httpx_mock.get_requests() == []
 
 
 @pytest.mark.asyncio
@@ -523,8 +551,9 @@ async def test_a_file_on_the_way_of_the_path_names_a_component(httpx_mock: HTTPX
         ),
         (
             onedata_error(400, "spaceNotSupportedBy"),
-            f"Could not list file id {files._shown(DIR)}: this provider reports that it does "
-            "not support the space in the id. The id may be mis-copied",
+            f"This provider does not support the space of file id {files._shown(DIR)}, so it "
+            "cannot list it here; the space may still exist. If it is not the id of the file you "
+            "mean",
         ),
         (
             {"status_code": 404, "json": {"error": {"description": "(Onedata's own text)"}}},
@@ -532,11 +561,13 @@ async def test_a_file_on_the_way_of_the_path_names_a_component(httpx_mock: HTTPX
         ),
         (
             onedata_error(403, "forbidden"),
-            f"Could not list file id {files._shown(DIR)}: the id may be mis-copied",
+            f"Not allowed to list file id {files._shown(DIR)}: the token has no access to it. If "
+            "it is not the id of the file you mean",
         ),
         (
             onedata_error(400, "posix", "eacces"),
-            f"Could not list file id {files._shown(DIR)}: the id may be mis-copied",
+            f"Not allowed to list file id {files._shown(DIR)}: the token has no access to it. If "
+            "it is not the id of the file you mean",
         ),
     ],
 )
@@ -564,9 +595,11 @@ def _the_token_sees(monkeypatch: pytest.MonkeyPatch, *space_ids: str) -> None:
     [onedata_error(403, "forbidden"), onedata_error(400, "posix", "eacces")],
     ids=["403", "eacces"],
 )
-async def test_a_permission_refusal_of_an_id_says_it_may_be_mis_copied(
+async def test_a_permission_refusal_of_an_id_leads_with_the_refusal(
     httpx_mock: HTTPXMock, monkeypatch: pytest.MonkeyPatch, error: dict
 ) -> None:
+    """The id passed the check on a whole id: the refusal first, the copy as a condition, and
+    no claim that a missing or changed character gives this answer."""
     _the_token_sees(monkeypatch, SPACE_ID)  # the id's space is one of them
     httpx_mock.add_response(method="GET", url=f"{API}/data/{DIR}/children", **error)
 
@@ -574,10 +607,13 @@ async def test_a_permission_refusal_of_an_id_says_it_may_be_mis_copied(
         await files.list_children(DIR, limit=10, offset=0)
 
     text = str(caught.value)
-    assert text.startswith(f"Could not list file id {files._shown(DIR)}: the id may be mis-copied")
-    assert "or the token may have no access to the file" in text  # the other reading stays
-    assert "Copy the id exactly from the earlier answer, or give the path" in text
-    assert "will not help" not in text and "Not allowed" not in text
+    assert text.startswith(
+        f"Not allowed to list file id {files._shown(DIR)}: the token has no access to it. If it "
+        "is not the id of the file you mean, copy that file's id exactly from the earlier "
+        "answer, or give the path, /<space_name>/<path>."
+    )
+    assert "will not help" not in text
+    assert "missing or changed" not in text and "mis-copied" not in text
     assert "not one this token sees" not in text
     assert "(Onedata's own text)" in text
 
@@ -594,12 +630,12 @@ async def test_an_id_whose_space_the_token_does_not_see_says_so(
     with pytest.raises(OnedataApiError) as caught:
         await files.list_children(DIR, limit=10, offset=0)
 
-    assert "the id may be mis-copied" in str(caught.value)
+    assert "If it is not the id of the file you mean" in str(caught.value)
     assert "The space in the id is not one this token sees at this provider." in str(caught.value)
 
 
 @pytest.mark.asyncio
-async def test_a_space_not_supported_for_an_id_says_it_may_be_mis_copied_and_lists_the_spaces(
+async def test_a_space_not_supported_for_an_id_leads_with_the_provider_and_lists_the_spaces(
     httpx_mock: HTTPXMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _the_token_sees(monkeypatch, "s0")
@@ -616,11 +652,14 @@ async def test_a_space_not_supported_for_an_id_says_it_may_be_mis_copied_and_lis
         await files.list_children(DIR, limit=10, offset=0)
 
     text = str(caught.value)
-    assert text.startswith(f"Could not list file id {files._shown(DIR)}: this provider reports")
-    assert "The id may be mis-copied" in text and "or give the path" in text
+    assert text.startswith(
+        f"This provider does not support the space of file id {files._shown(DIR)}, so it cannot "
+        "list it here; the space may still exist. If it is not the id of the file you mean"
+    )
+    assert "or give the path" in text
     assert "The space in the id is not one this token sees at this provider." in text
     assert 'Spaces this token sees at this provider: "Alpha".' in text
-    assert "so it cannot list it here" not in text  # the old claim about the provider
+    assert "missing or changed" not in text and "mis-copied" not in text
 
 
 @pytest.mark.asyncio

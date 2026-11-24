@@ -23,6 +23,7 @@ from fastmcp import Client, FastMCP
 from pytest_httpx import HTTPXMock
 
 from onedata_mcp.modules import files as files_module
+from test.unit.object_ids import file_id
 
 
 def _set_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -434,6 +435,111 @@ async def test_relative_path_with_client_root_still_resolves(
             "get_file_attributes", {"file_id_or_path": "a.nc"}, raise_on_error=False
         )
     assert not result.is_error, result.content[0].text
+
+
+# ---------------------------------------------------------------------------
+# With an MCP root mounted, get_file_attributes and list_children tell a name from a copied id
+# by the id's own start (its header, or the hex of `guid#`), not by length: a long plain name is
+# resolved under the root, and a copied id, damaged or wrapped in punctuation, is checked as an
+# id instead of being looked up as a path (design/13-14).
+# ---------------------------------------------------------------------------
+
+ROOT = "file:///Alpha"
+COPIED_ID = file_id("0cb444f249735948f20eaf93a2dfe54bch3e33", "s0")
+DATA = r"https://provider\.example/api/v3/oneprovider/data/"
+ID_TOOLS = [
+    ("get_file_attributes", "file_id_or_path", "", {"name": "d", "type": "DIR"}),
+    ("list_children", "parent_id_or_path", "/children", {"children": [], "isLast": True}),
+]
+
+
+def _lookups(httpx_mock: HTTPXMock) -> list:
+    return [r for r in httpx_mock.get_requests() if "/lookup-file-id/" in r.url.path]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("tool", "arg", "suffix", "body"), ID_TOOLS)
+async def test_a_long_plain_name_is_resolved_under_the_root(
+    monkeypatch: pytest.MonkeyPatch,
+    files_mcp: FastMCP,
+    httpx_mock: HTTPXMock,
+    tool: str,
+    arg: str,
+    suffix: str,
+    body: dict,
+) -> None:
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="POST",
+        url=_lookup_url("/Alpha/quarterlyreportsarchive"),
+        json={"fileId": COPIED_ID},
+    )
+    httpx_mock.add_response(
+        method="GET", url=re.compile(rf"{DATA}{COPIED_ID}{suffix}(\?.*)?$"), json=body
+    )
+    async with Client(files_mcp, roots=[ROOT]) as client:
+        result = await client.call_tool(
+            tool, {arg: "quarterlyreportsarchive"}, raise_on_error=False
+        )
+    assert not result.is_error, result.content[0].text
+    assert len(_lookups(httpx_mock)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("tool", "arg", "suffix", "body"), ID_TOOLS)
+@pytest.mark.parametrize("value", [COPIED_ID, COPIED_ID.lower()])
+async def test_a_copied_id_is_used_as_an_id_with_a_root_mounted(
+    monkeypatch: pytest.MonkeyPatch,
+    files_mcp: FastMCP,
+    httpx_mock: HTTPXMock,
+    tool: str,
+    arg: str,
+    suffix: str,
+    body: dict,
+    value: str,
+) -> None:
+    _set_env(monkeypatch)
+    httpx_mock.add_response(
+        method="GET", url=re.compile(rf"{DATA}{value}{suffix}(\?.*)?$"), json=body
+    )
+    async with Client(files_mcp, roots=[ROOT]) as client:
+        result = await client.call_tool(tool, {arg: value}, raise_on_error=False)
+    assert not result.is_error, result.content[0].text
+    assert _lookups(httpx_mock) == []
+
+
+DAMAGED_COPIES = {
+    "a full stop after it": COPIED_ID + ".",
+    "in backticks": f"`{COPIED_ID}`",
+    "in quotes": f'"{COPIED_ID}"',
+    "a space after the header's zeros (a recorded copy)": COPIED_ID[:11] + " " + COPIED_ID[11:],
+    "a hyphen inside": COPIED_ID[:40] + "-" + COPIED_ID[40:],
+    "a leading zero dropped (a recorded copy)": COPIED_ID[1:],
+    "the payload without its header": COPIED_ID[16:],
+    "a header spliced onto it": "000000000052FFFF" + COPIED_ID[16:],
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("tool", "arg", "suffix", "body"), ID_TOOLS)
+@pytest.mark.parametrize("name", list(DAMAGED_COPIES))
+async def test_a_damaged_copy_is_checked_as_an_id_not_looked_up_under_the_root(
+    monkeypatch: pytest.MonkeyPatch,
+    files_mcp: FastMCP,
+    httpx_mock: HTTPXMock,
+    tool: str,
+    arg: str,
+    suffix: str,
+    body: dict,
+    name: str,
+) -> None:
+    _set_env(monkeypatch)
+    async with Client(files_mcp, roots=[ROOT]) as client:
+        result = await client.call_tool(tool, {arg: DAMAGED_COPIES[name]}, raise_on_error=False)
+    assert result.is_error
+    text = result.content[0].text
+    assert "is not a complete file id; copy it exactly from the earlier answer" in text, text
+    assert httpx_mock.get_requests() == []  # no lookup under the root, nothing sent as an id
 
 
 # ---------------------------------------------------------------------------

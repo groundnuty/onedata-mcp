@@ -1,5 +1,6 @@
 import json
 import re
+from collections.abc import Callable
 from typing import Annotated, Any, Optional
 from urllib.parse import urlparse
 
@@ -152,6 +153,34 @@ def _is_probable_file_id(value: str) -> bool:
     return bool(ONEDATA_FILE_ID_PATTERN.fullmatch(value))
 
 
+# How a file id starts, in hex (ctool `file_id:build_objectid/2`): the header's first five bytes,
+# which the encoder writes as zeros, and, after the header, the start of the payload (`guid#`,
+# `shareGuid#`, or the older id's Erlang term).
+_ID_HEADER_ZEROS = "0" * 10
+_ID_PAYLOAD_STARTS = tuple(
+    start.hex() for start in (b"guid#", b"shareGuid#", b"\x83h\x03d\x00\x04guid")
+)
+_ID_HEAD_CHARS = 48  # the header and the payload's start, with room for a few digits lost or added
+
+
+def _starts_as_file_id(value: str) -> bool:
+    """Whether `value`, which has no `/`, starts as a file id does, by its own start rather than
+    its length: so a copied id is sent on as an id, to be checked as one, and anything else
+    is a name to resolve under an MCP root.
+
+    Its first characters, punctuation and spaces left out, must be the header's ten zeros and
+    sixteen hex digits in all, or hold the hex of a payload's start (`guid#`, ...): a copy with
+    a digit lost from the header, quotes around it, a space or a full stop in it, or without its
+    header is still an id. A name (`quarterlyreportsarchive`, `log_20200101.dat`, a hash) is
+    not, whatever its length."""
+    if "/" in value:
+        return False
+    head = re.sub(r"[^0-9A-Za-z]", "", value[:_ID_HEAD_CHARS]).lower()
+    if head.startswith(_ID_HEADER_ZEROS) and re.fullmatch(r"[0-9a-f]{16}", head[:16]):
+        return True
+    return any(start in head for start in _ID_PAYLOAD_STARTS)
+
+
 def _root_uri_to_path(root_uri: str) -> str | None:
     parsed = urlparse(root_uri)
     if parsed.scheme == "onedata":
@@ -166,12 +195,14 @@ def _root_uri_to_path(root_uri: str) -> str | None:
     return path if path.startswith("/") else f"/{path}"
 
 
-async def _resolve_with_mcp_root(path_or_id: str, ctx: Optional[Context]) -> str:
+async def _resolve_with_mcp_root(
+    path_or_id: str, ctx: Optional[Context], *, is_id: Callable[[str], bool] = _is_probable_file_id
+) -> str:
     if not path_or_id or path_or_id.startswith("/"):
         return path_or_id
 
     # Preserve explicit file identifiers; only relative paths are root-resolved.
-    if _is_probable_file_id(path_or_id):
+    if is_id(path_or_id):
         return path_or_id
 
     if ctx is None:
@@ -197,14 +228,22 @@ async def _resolve_with_mcp_root(path_or_id: str, ctx: Optional[Context]) -> str
     return f"{root_path.rstrip('/')}/{path_or_id.lstrip('/')}"
 
 
-async def _resolve_or_hint(path_or_id: str, ctx: Optional[Context], form: str) -> str:
+async def _resolve_or_hint(
+    path_or_id: str, ctx: Optional[Context], form: str, *, copied_ids: bool = False
+) -> str:
     """`_resolve_with_mcp_root` for get_file_attributes, list_children and create_directory
     (design/13-15), with the same hint when there is no MCP session to ask for roots. An
     in-process call, as the validation panel's API legs make, has none: `ctx.list_roots()` then
-    raises a RuntimeError ("session is not available"), which said nothing about the path. The
-    stable tools keep `_resolve_with_mcp_root` as it is."""
+    raises a RuntimeError ("session is not available"), which said nothing about the path.
+
+    `copied_ids` (get_file_attributes, list_children, whose ids are checked as copies): a value
+    is an id when it starts as one (`_starts_as_file_id`), not when it is 20 or more letters
+    and digits, so a long plain name is resolved under the root, and a copied id with
+    punctuation in it is checked as an id, not looked up as a path. create_directory, which
+    takes no id, and the stable tools keep `_resolve_with_mcp_root` as it is."""
+    is_id = _starts_as_file_id if copied_ids else _is_probable_file_id
     try:
-        return await _resolve_with_mcp_root(path_or_id, ctx)
+        return await _resolve_with_mcp_root(path_or_id, ctx, is_id=is_id)
     except RuntimeError:
         raise ValueError(f"Paths must start with '/': use {form} (got {path_or_id!r}).") from None
 
@@ -265,7 +304,7 @@ def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
         ctx: Optional[Context] = None,
     ) -> dict[str, Any]:
         file_id_or_path = await _resolve_or_hint(
-            file_id_or_path, ctx, "/<space_name>/<path_to_file>"
+            file_id_or_path, ctx, "/<space_name>/<path_to_file>", copied_ids=True
         )
         return await get_file_attributes(file_id_or_path, attributes=attributes, copied_id=True)
 
@@ -302,7 +341,7 @@ def register_module(mcp: FastMCP, *, experimental: bool = False) -> None:
         ctx: Optional[Context] = None,
     ) -> dict[str, Any]:
         parent_id_or_path = await _resolve_or_hint(
-            parent_id_or_path, ctx, "/<space_name>/<path_to_directory>"
+            parent_id_or_path, ctx, "/<space_name>/<path_to_directory>", copied_ids=True
         )
         return await list_children(
             parent_id_or_path, attributes=attributes, limit=limit, offset=offset, token=token

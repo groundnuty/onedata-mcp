@@ -187,10 +187,11 @@ async def create_transfer(
 # <name>", which contradicts the hint, and a model believed it (`_StandsAlone`).
 #
 # A file given as an id is the one a model copied out of an earlier answer, and a bad copy (a
-# dropped, changed or doubled character) is answered with a 403 or `spaceNotSupportedBy` that
-# says nothing about a copy. So an id that cannot be whole is refused before any request
-# (`_file_id_parts`), and for an id both answers say the id may be mis-copied. A path keeps its
-# hints.
+# dropped, changed, doubled or spliced character) is answered with a 403 or `spaceNotSupportedBy`
+# that says nothing about a copy, or acts on another file. So an id Onedata's encoder could not
+# have written is refused before any request (`_file_id_parts`); for an id that passes, both
+# answers give the refusal first and then what to do if it is another file's id. A path keeps
+# its hints.
 # ---------------------------------------------------------------------------
 
 _SHOWN_MAX = 80
@@ -470,24 +471,84 @@ def _lookup_error_hint(shown_file: str, error: OnedataApiError) -> str | None:
     return None
 
 
+# After a refusal of a file given as an id: the id passed the check on a whole id, so it is one
+# Onedata wrote, but it may be another file's.
+_NOT_THE_FILE = (
+    "If it is not the id of the file you mean, copy that file's id exactly from the earlier "
+    "answer, or give its path, /<space_name>/<path_to_file>."
+)
+
+
+def _unsupported_by(error: OnedataApiError) -> tuple[str | None, str | None]:
+    """(`details.providerId`, `details.spaceId`) of a `spaceNotSupportedBy` error, each None
+    when it is not a non-empty string. ctool's `od_error_space_not_supported_by` gives both."""
+    error_obj = error.body.get("error")
+    details = error_obj.get("details") if isinstance(error_obj, dict) else None
+    if not isinstance(details, dict):
+        return None, None
+    pid, sid = details.get("providerId"), details.get("spaceId")
+    return (
+        pid if isinstance(pid, str) and pid else None,
+        sid if isinstance(sid, str) and sid else None,
+    )
+
+
+def _unsupported_space_lead(
+    error: OnedataApiError, shown_file: str, shown_target: str, target: str, from_path: bool
+) -> str:
+    """The first sentence for `spaceNotSupportedBy`: which provider lacks support for which
+    space, from the error's own details.
+
+    A 25.0 replication request checks that this provider (the one the request went to)
+    supports the file's space, then that the target does (op-worker
+    `transfer_middleware_plugin:validate_file_transfer_creation/3`), and names the provider
+    that failed. So a `providerId` equal to the target is the target, and any other is this
+    provider: a target that supports the space would not change the answer then. The target is
+    said to be no provider's id, not a provider without support: a provider's name given as the
+    id reaches here when the providers could not be listed (M-46). Without a provider in the
+    details, a path (which this provider resolved) points at the target, and an id at either."""
+    pid, sid = _unsupported_by(error)
+    space = f"space {_shown(sid)}" if sid else "the file's space"
+    if pid is not None and pid == target:
+        return (
+            f"Cannot replicate {shown_file} to {shown_target}: Onedata reports that no provider "
+            f"with the id {shown_target}, the target, supports {space}."
+        )
+    if pid is not None:
+        return (
+            f"Cannot replicate {shown_file}: Onedata reports that provider {_shown(pid)}, this "
+            f"provider (the one the request went to, not the target {shown_target}), does not "
+            f"support {space}, so it cannot schedule the replication."
+        )
+    if from_path:
+        return (
+            f"Cannot replicate to {shown_target}: no provider with that id supports the space of "
+            f"{shown_file}."
+        )
+    return (
+        f"Cannot replicate {shown_file} to {shown_target}: Onedata reports that {space} is not "
+        f"supported, without saying by which provider: this provider (the one the request went "
+        f"to) or the target {shown_target}."
+    )
+
+
 def _permission_hint(
     shown_file: str, error: OnedataApiError, *, copied_id: bool = False
 ) -> str | None:
     """For a 403, or a 4xx whose body says forbidden. The same body on a 5xx is not one.
-    `copied_id`: the file was given as an id, which a bad copy is refused like a missing
-    privilege is (the note for the id's space follows, `_replication_error_hint`)."""
+    `copied_id`: the file was given as an id. It passed the check on a whole id, so it is one
+    Onedata wrote; the refusal comes first, then what to do if it is another file's (the note
+    for the id's space follows, `_replication_error_hint`)."""
     status, error_id, errno, _ = _error_parts(error)
     if status == 403 or (
         _is_client_error(status) and (error_id == "forbidden" or errno in {"eacces", "eperm"})
     ):
         if copied_id:
             return (
-                f"Onedata refused the replication of {shown_file} with a permission error. The "
-                "file id may be mis-copied (an id with a missing or changed character is "
-                "refused like this): copy it exactly from the earlier answer, or give the "
-                f"path, {_PATH_FORM}. If the id is exact, the token may not schedule "
-                "replications in this space (the space privilege space_schedule_replication), "
-                "may not read the file, or is read-only."
+                f"Not allowed to schedule a replication of {shown_file}: the token may not "
+                "schedule replications in this space (the space privilege "
+                "space_schedule_replication), may not read the file, or is read-only. "
+                f"{_NOT_THE_FILE}"
             )
         return (
             f"Not allowed to schedule a replication of {shown_file}: the token may not schedule "
@@ -511,10 +572,10 @@ async def _replication_error_hint(
       Onedata said about it, unless Onedata names the file field, and alone: Onedata's own
       message, which says the space is not supported by that "provider", contradicts it. (Only
       reached when `_refuse_unusable_target` could not list the providers before the request.)
-    - Onedata says the space is not supported: for a file given as a path, no provider with
-      the target's id supports the space (true of a name, too, when the providers could not be
-      listed); for a file given as an id it may as well be the id's space, so the id may be
-      mis-copied (and a 403 for an id says so too);
+    - Onedata says the space is not supported: first which provider lacks support for which
+      space, from the error's details (`_unsupported_space_lead`: the target, or this provider);
+      for a file given as an id, then what to do if it is another file's id (a 403 for an id
+      says that too, after the refusal);
     - `details.key` names the provider field: not a valid provider id for the space (no claim
       about support);
     - the file: blamed only when the key names the file field;
@@ -541,27 +602,22 @@ async def _replication_error_hint(
     if (pid := _id_of_name(providers, target)) is not None:
         # Alone: Onedata's "space is not supported by provider <name>" would contradict it.
         return _StandsAlone(_name_given_as_id_hint(pid, shown_target, shown_file, providers))
-    if error_id == "spaceNotSupportedBy" and not from_path:
-        # Onedata says a space is not supported, not whose: the target's, or the one in a file
-        # id that was copied wrongly.
-        unseen = (await _id_space_note(file_arg, list_spaces=False)).strip()
+    if error_id == "spaceNotSupportedBy":
+        lead = _unsupported_space_lead(error, shown_file, shown_target, target, from_path)
+        # Without the provider in the details, whether the id's space is one this provider
+        # supports for the token tells the two readings apart; with it, it repeats the lead.
+        unseen = ""
+        if not from_path and _unsupported_by(error)[0] is None:
+            unseen = (await _id_space_note(file_arg, list_spaces=False)).strip()
         return " ".join(
             part
             for part in (
-                f"Cannot replicate {shown_file} to {shown_target}: Onedata says a space is not "
-                "supported. Either the file id may be mis-copied (an id with a missing or "
-                "changed character gives this answer), so copy it exactly from the earlier "
-                f"answer or give the path, or no provider with the id {shown_target} supports "
-                "the file's space.",
+                lead,
+                "" if from_path else _NOT_THE_FILE,
                 unseen,
                 _providers_sentence(providers),
             )
             if part
-        )
-    if error_id == "spaceNotSupportedBy":
-        return (
-            f"Cannot replicate to {shown_target}: no provider with that id supports the space of "
-            f"{shown_file}. {_providers_sentence(providers)}"
         )
     if key in _PROVIDER_FIELDS:
         return (

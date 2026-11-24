@@ -16,15 +16,15 @@ from onedata_mcp.api.transfers import SCHEDULED_NOTE
 from onedata_mcp.modules import transfers as transfers_module
 from onedata_mcp.token_policy import WRITE_TOOL_NAMES
 from onedata_mcp.tool_maturity import ALL_KNOWN, FLAG_GATED
+from test.unit.object_ids import object_id
 
 HOST = "provider.example"
 BASE = f"https://{HOST}/api/v3/oneprovider"
 TOOL = "schedule_file_replication"
 SPACE_ID = "9JO5__9nL1b01YEvwnft1r20gwgwlkIp19ND_n8hgxs"
 _PAYLOAD = f"guid#t_w-ghd1c7eDoMvTmo-gW_3aszvpHkGzy6Xw4#{SPACE_ID}".encode()
-# a file id of the 25.0 shape: an 8-byte header whose sixth byte is the payload's length, then
-# the payload, in hex
-FILE_ID = (bytes([0, 0, 0, 0, 0, len(_PAYLOAD), 0x5C, 0xF4]) + _PAYLOAD).hex().upper()
+# a file id as Onedata's encoder writes it (`test/unit/object_ids.py`)
+FILE_ID = object_id(_PAYLOAD)
 TARGET = "pLocal0123456789abcdef"
 
 
@@ -199,8 +199,16 @@ async def test_a_relative_path_is_refused_without_a_request(
             {"error": {"id": "badValueIdentifier", "details": {"key": "fileId"}}},
             "No file is known",
         ),
-        (403, {"error": {"id": "forbidden", "description": "no"}}, "may be mis-copied"),
-        (400, {"error": {"id": "spaceNotSupportedBy"}}, "the file id may be mis-copied"),
+        (
+            403,
+            {"error": {"id": "forbidden", "description": "no"}},
+            "Not allowed to schedule a replication of",
+        ),
+        (
+            400,
+            {"error": {"id": "spaceNotSupportedBy"}},
+            "If it is not the id of the file you mean",
+        ),
         (500, {"error": {"id": "internalServerError"}}, "status=500"),
     ],
 )

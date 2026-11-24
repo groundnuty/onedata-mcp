@@ -23,6 +23,7 @@ from pytest_httpx import HTTPXMock
 
 from onedata_mcp.api import readiness
 from onedata_mcp.api.readiness import Distribution
+from test.unit.object_ids import object_id
 
 LOCAL = "pLocal"
 OWNER = "pOwner"
@@ -3759,7 +3760,7 @@ async def test_review_the_advice_states_every_reason_not_only_the_largest(fed: F
 def _whole_id(uuid: str, space_id: str) -> str:
     """A 25.0-shaped file id (`api.files._file_id_parts` reads its space id)."""
     payload = f"guid#{uuid}#{space_id}".encode()
-    return (bytes([0, 0, 0, 0, 0, len(payload), 0, 0]) + payload).hex().upper()
+    return object_id(payload)
 
 
 @pytest.mark.asyncio

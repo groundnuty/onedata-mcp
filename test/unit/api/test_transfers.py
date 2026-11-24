@@ -10,6 +10,7 @@ from pytest_httpx import HTTPXMock
 
 from onedata_mcp.api import transfers
 from onedata_mcp.utils import MAX_ERROR_CHARS, OnedataApiError
+from test.unit.object_ids import object_id
 
 
 def _set_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -185,10 +186,10 @@ PROVIDERS = {
 
 
 def _guid(space_id: str = SPACE_ID, uuid: str = "t_w-ghd1c7eDoMvTmo-gW_3aszvpHkGzy6Xw4") -> str:
-    """A file id of the 25.0 shape: an 8-byte header whose sixth byte is the payload's length,
-    then `guid#<uuid>#<space id>`, all in hex."""
+    """A file id as Onedata's encoder writes it (`test/unit/object_ids.py`): the hex of an
+    8-byte header and `guid#<uuid>#<space id>`."""
     payload = f"guid#{uuid}#{space_id}".encode()
-    return (bytes([0, 0, 0, 0, 0, len(payload), 0x5C, 0xF4]) + payload).hex().upper()
+    return object_id(payload)
 
 
 FILE_ID = _guid()
@@ -297,20 +298,49 @@ async def test_an_id_that_cannot_be_whole_is_refused_before_any_request(
 async def test_a_path_and_a_whole_id_are_not_refused_as_incomplete(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
-    """The check is on a value that is not a path, and passes any whole id, a changed letter in
-    its uuid included (Onedata's to refuse: nothing here can tell)."""
+    """The check is on a value that is not a path, and passes a whole id as given."""
     _set_env(monkeypatch)
     httpx_mock.add_response(method="POST", url=TRANSFERS_URL, json={"transferId": "t1"})
     _resolves(httpx_mock, FILE_ID)
     httpx_mock.add_response(method="POST", url=TRANSFERS_URL, json={"transferId": "t2"})
-    changed = FILE_ID[:37] + "5" + FILE_ID[38:]  # one digit for another, inside the uuid
-    assert changed != FILE_ID
 
-    await transfers.schedule_file_replication(changed, "pLocal0123456789abcdef")
+    await transfers.schedule_file_replication(FILE_ID.lower(), "pLocal0123456789abcdef")
     await transfers.schedule_file_replication(PATH, "pLocal0123456789abcdef")
 
     posts = [r for r in httpx_mock.get_requests() if r.url.path.endswith("/transfers")]
-    assert [json.loads(r.content)["fileId"] for r in posts] == [changed, FILE_ID]
+    assert [json.loads(r.content)["fileId"] for r in posts] == [FILE_ID.lower(), FILE_ID]
+
+
+OTHER_FILE_ID = _guid(uuid="f" * len("t_w-ghd1c7eDoMvTmo-gW_3aszvpHkGzy6Xw4"))  # the same length
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "copied",
+    [
+        # 25.0 does not check the CRC: it would copy the file whose payload this is, FILE_ID's
+        OTHER_FILE_ID[:16] + FILE_ID[16:],
+        FILE_ID[:37] + "5" + FILE_ID[38:],  # one digit for another, inside the uuid
+        FILE_ID[:-4] + ("0" if FILE_ID[-4] != "0" else "1") + FILE_ID[-3:],  # in the space id
+    ],
+    ids=["a header spliced onto another file's payload", "a changed uuid", "a changed space"],
+)
+async def test_an_id_of_the_right_length_that_the_encoder_did_not_write_is_never_scheduled(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, copied: str
+) -> None:
+    """Such an id is the right length and decodes, so 25.0 would act on whatever file its
+    payload names. The CRC shows it, and nothing is scheduled."""
+    _set_env(monkeypatch)
+    assert len(copied) == len(FILE_ID) and copied != FILE_ID
+
+    with pytest.raises(ValueError) as excinfo:
+        await transfers.schedule_file_replication(
+            copied, "pLocal0123456789abcdef", check_providers=True
+        )
+
+    text = str(excinfo.value)
+    assert "is not a complete file id; copy it exactly from the earlier answer" in text
+    assert httpx_mock.get_requests() == []  # no listing, no transfer
 
 
 @pytest.mark.asyncio
@@ -569,11 +599,14 @@ async def test_a_target_that_does_not_support_the_space_lists_the_providers_that
 
     text = await _failure(PATH, "pOder")
 
-    assert text.startswith("Cannot replicate to 'pOder': no provider with that id supports")
+    assert text.startswith(
+        f"Cannot replicate {transfers._shown(PATH)} to 'pOder': Onedata reports that no provider "
+        f"with the id 'pOder', the target, supports space '{SPACE_ID}'. The providers that support"
+    )
     assert "vistula-dc (id 'pLocal0123456789abcdef')" in text
     assert "nordic-marine-dc (id 'pOwner0123456789abcdef')" in text
     assert "is a provider's name" not in text
-    assert "mis-copied" not in text  # a path has no copy to blame
+    assert "If it is not the id" not in text  # a path has no copy to blame
     assert "Space is not supported by provider pOder." in text  # Onedata's message follows
 
 
@@ -714,11 +747,13 @@ async def test_a_space_id_in_the_details_that_is_not_an_id_is_not_put_into_a_url
         (403, {"error": {"id": "posix", "details": {"errno": "eperm"}, "description": "eperm"}}),
     ],
 )
-async def test_a_permission_error_for_a_file_given_as_an_id_says_it_may_be_mis_copied(
+async def test_a_permission_error_for_a_file_given_as_an_id_leads_with_the_refusal(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, status: int, body: dict
 ) -> None:
-    """A bad copy of an id is refused like a missing privilege, so the hint names both, the
-    copy first, and no longer says that a retry will not help."""
+    """The id passed the check on a whole id, so it is one Onedata wrote: the refusal comes
+    first, and the copy is a condition after it. Nothing claims that a missing or changed
+    character gives this answer (one is refused before any request), or that a retry will not
+    help (another file's id is what a model would copy wrongly)."""
     _set_env(monkeypatch)
     _post_error(httpx_mock, status, body)
     _token_sees_spaces(httpx_mock)
@@ -726,11 +761,15 @@ async def test_a_permission_error_for_a_file_given_as_an_id_says_it_may_be_mis_c
     text = await _failure(FILE_ID, "pLocal0123456789abcdef")
 
     hint = text.split(" [", 1)[0]
-    assert hint.startswith("Onedata refused the replication of ")
-    assert "may be mis-copied" in hint and "copy it exactly from the earlier answer" in hint
-    assert "or give the path" in hint
-    assert "space_schedule_replication" in hint  # the other reading stays
-    assert "will not help" not in text and "Not allowed" not in text
+    assert hint.startswith(
+        f"Not allowed to schedule a replication of {transfers._shown(FILE_ID)}: the token may "
+        "not schedule replications in this space (the space privilege "
+        "space_schedule_replication), may not read the file, or is read-only. If it is not the "
+        "id of the file you mean, copy that file's id exactly from the earlier answer, or give "
+        "its path, /<space_name>/<path_to_file>."
+    )
+    assert "missing or changed" not in text and "mis-copied" not in text
+    assert "will not help" not in text
     assert "providers that support" not in text  # not mistaken for a provider problem
     assert "not one this token sees" not in text  # the id's space is one of the token's
 
@@ -739,14 +778,14 @@ async def test_a_permission_error_for_a_file_given_as_an_id_says_it_may_be_mis_c
 async def test_an_id_whose_space_the_token_does_not_see_says_so(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
-    """A whole id, as a bad copy of the space part gives one: its space is not the token's."""
+    """A whole id of a space the token is not in: most likely another file's id."""
     _set_env(monkeypatch)
     _post_error(httpx_mock, 403, {"error": {"id": "forbidden"}})
     _token_sees_spaces(httpx_mock, "someOtherSpace0123456789")
 
     text = await _failure(FILE_ID, "pLocal0123456789abcdef")
 
-    assert "may be mis-copied" in text
+    assert "If it is not the id of the file you mean" in text
     assert "The space in the id is not one this token sees at this provider." in text
 
 
@@ -776,42 +815,76 @@ async def test_a_permission_error_for_a_file_given_as_a_path_keeps_its_hint(
 
 
 @pytest.mark.asyncio
-async def test_a_space_not_supported_for_a_file_given_as_an_id_may_be_the_ids_space(
+def _unsupported(provider_id: str) -> dict:
+    """25.0's `spaceNotSupportedBy` for the id's space and the provider that lacks support
+    (ctool `od_error_space_not_supported_by`: both in `details`)."""
+    return {
+        "error": {
+            "id": "spaceNotSupportedBy",
+            "details": {"spaceId": SPACE_ID, "providerId": provider_id},
+            "description": f'Specified space: "{SPACE_ID}" is not supported by provider '
+            f'"{provider_id}".',
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_target_that_does_not_support_the_ids_space_is_named_first(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
-    """Onedata says a space is not supported, not whose. For an id it may be the one in the id,
-    which a bad copy garbles; the target is still named as the other possibility, and the
-    providers are still listed."""
+    """The details name the target: the hint says so first, points at the target, and lists
+    the providers that would do; the id comes second, as a condition."""
     _set_env(monkeypatch)
-    _post_error(
-        httpx_mock,
-        400,
-        {
-            "error": {
-                "id": "spaceNotSupportedBy",
-                "details": {"spaceId": SPACE_ID, "providerId": "pOder"},
-            }
-        },
-    )
+    _post_error(httpx_mock, 400, _unsupported("pOder"))
     httpx_mock.add_response(method="GET", url=f"{BASE}/spaces/{SPACE_ID}", json=PROVIDERS)
     _token_sees_spaces(httpx_mock)
 
     text = await _failure(FILE_ID, "pOder")
 
     hint = text.split(" [", 1)[0]
-    assert hint.startswith(f"Cannot replicate {transfers._shown(FILE_ID)} to 'pOder': ")
-    assert "the file id may be mis-copied" in hint
-    assert "copy it exactly from the earlier answer or give the path" in hint
-    assert "no provider with the id 'pOder' supports the file's space" in hint
+    assert hint.startswith(
+        f"Cannot replicate {transfers._shown(FILE_ID)} to 'pOder': Onedata reports that no "
+        f"provider with the id 'pOder', the target, supports space '{SPACE_ID}'. If it is not the "
+        "id of the file you mean, copy that file's id exactly from the earlier answer, or give "
+        "its path"
+    )
     assert "vistula-dc (id 'pLocal0123456789abcdef')" in hint
+    assert "mis-copied" not in hint and "missing or changed" not in hint
     assert "not one this token sees" not in hint
     assert "(status=400)" in text  # Onedata's own message follows
 
 
 @pytest.mark.asyncio
-async def test_a_space_not_supported_for_an_id_whose_space_is_unseen_says_so(
+async def test_a_space_this_provider_does_not_support_is_not_blamed_on_the_target(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
+    """25.0 checks the provider the request went to before the target. When the details name
+    a provider other than the target, that is this provider: the target (here one that supports
+    the space) is not what to change, and the hint says so."""
+    _set_env(monkeypatch)
+    _post_error(httpx_mock, 400, _unsupported("pContacted0123456789ab"))
+    httpx_mock.add_response(method="GET", url=f"{BASE}/spaces/{SPACE_ID}", json=PROVIDERS)
+    _token_sees_spaces(httpx_mock, "someOtherSpace0123456789")
+
+    text = await _failure(FILE_ID, "pOwner0123456789abcdef")
+
+    hint = text.split(" [", 1)[0]
+    assert hint.startswith(
+        f"Cannot replicate {transfers._shown(FILE_ID)}: Onedata reports that provider "
+        "'pContacted0123456789ab', this provider (the one the request went to, not the target "
+        f"'pOwner0123456789abcdef'), does not support space '{SPACE_ID}', so it cannot schedule "
+        "the replication. If it is not the id of the file you mean"
+    )
+    assert "no provider with" not in hint and "the target, supports" not in hint
+    assert "not one this token sees" not in hint  # the lead already says it
+
+
+@pytest.mark.asyncio
+async def test_a_space_not_supported_without_details_names_both_providers_it_may_be(
+    monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
+) -> None:
+    """No provider in the details: either may be meant, and whether the token sees the id's
+    space at this provider tells them apart, so that note is given."""
     _set_env(monkeypatch)
     _post_error(httpx_mock, 400, {"error": {"id": "spaceNotSupportedBy"}})
     httpx_mock.add_response(method="GET", url=f"{BASE}/spaces/{SPACE_ID}", json=PROVIDERS)
@@ -819,8 +892,13 @@ async def test_a_space_not_supported_for_an_id_whose_space_is_unseen_says_so(
 
     text = await _failure(FILE_ID, "pOder")
 
-    assert "the file id may be mis-copied" in text
-    assert "The space in the id is not one this token sees at this provider." in text
+    hint = text.split(" [", 1)[0]
+    assert hint.startswith(
+        f"Cannot replicate {transfers._shown(FILE_ID)} to 'pOder': Onedata reports that the "
+        "file's space is not supported, without saying by which provider: this provider (the "
+        "one the request went to) or the target 'pOder'. If it is not the id of the file you mean"
+    )
+    assert "The space in the id is not one this token sees at this provider." in hint
 
 
 @pytest.mark.asyncio

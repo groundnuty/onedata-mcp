@@ -134,9 +134,9 @@ async def get_file_id(path: str) -> str:
 # --- A file id in a request path, and errors a caller can act on --------------------------------
 #
 # Used by get_file_attributes, list_children and create_directory (design/13-15). They keep
-# their own refusals and answers. The stable tools that share `_normalize_path_to_file_id` put
-# their id into the path through `_file_id_segment` (`utils.id_segment`, issue #44): the id is
-# encoded, and an empty id, `.`, `..` or a `/` is refused before any request.
+# their own refusals and answers. Every tool puts a file id into the path through
+# `_file_id_segment` (`utils.id_segment`, issue #44), the id a path lookup returned included:
+# the id is encoded, and an empty id, `.`, `..` or a `/` is refused before any request.
 
 _SHOWN_MAX = 80
 _HOW_TO_NAME_A_FILE = "Give a path, /<space_name>/<path>, or a file id."
@@ -174,95 +174,126 @@ def _refuse_unusable_id(file_id: str, file_id_or_path: str) -> None:
 
 
 def _id_in_path(file_id: str, file_id_or_path: str) -> str:
-    """The file id as one percent-encoded path segment.
+    """The file id as one percent-encoded path segment, through the shared guard
+    (`_file_id_segment`): whether the caller gave it or a path lookup returned it.
 
-    Unencoded, a `?` or `#` in an id cuts the request path short, and a `/` adds segments. An
-    empty id, `.` or `..` is refused (`_refuse_unusable_id`)."""
+    Unencoded, a `?` or `#` in an id cuts the request path short; a `/` would add segments, and
+    is refused. An empty id, `.` or `..` is refused first with the caller's value echoed
+    (`_refuse_unusable_id`)."""
     _refuse_unusable_id(file_id, file_id_or_path)
-    return quote(file_id, safe="")
+    return _file_id_segment(file_id)
 
 
 # --- A complete file id, and a refusal that may only mean a bad copy ----------------------------
 #
-# A model copies a 180-character hex id out of an earlier answer, and sometimes drops, changes
-# or doubles characters (design/12-14, gate 4). Onedata answers such an id with 403,
-# `spaceNotSupportedBy`, `badValueIdentifier` or a bare 400, none of which says "bad copy". So
-# the tools refuse an id that cannot be whole before any request, and read a 403 or
-# `spaceNotSupportedBy` for an id as possibly a bad copy. Only for an id the caller copied
-# (`copied_id`, which the MCP tool sets): readiness and the stable download tool pass ids that
-# came from Onedata and keep their own handling.
+# A model copies a 180-character hex id out of an earlier answer, and sometimes drops, changes,
+# doubles or splices characters (design/12-14, gate 4). Onedata answers such an id with 403,
+# `spaceNotSupportedBy`, `badValueIdentifier` or a bare 400, none of which says "bad copy", or,
+# for a header spliced onto another file's payload, acts on that other file. So the tools refuse,
+# before any request, an id that is not one Onedata's encoder could have written. Only for an id
+# the caller copied (`copied_id`, which the MCP tool sets): readiness and the stable download
+# tool pass ids that came from Onedata and keep their own handling.
 
 _FILE_ID_HEADER = 8  # bytes
-_FILE_ID_PART = re.compile(r"[A-Za-z0-9_-]{1,128}")
+_FILE_ID_MAX_PAYLOAD = 320  # bytes: ctool's `file_id:build_objectid/2` refuses a longer one
 _UNSEEN_SPACE = " The space in the id is not one this token sees at this provider."
+# After a refusal of a whole id: the id is one Onedata wrote, but perhaps another file's.
+_NOT_THE_FILE = (
+    "If it is not the id of the file you mean, copy that file's id exactly from the earlier "
+    "answer, or give the path, /<space_name>/<path>."
+)
 # The payload of the id of an older Onedata: the Erlang term {guid, Uuid, SpaceId}, as
 # `83 h 03 d 00 04 "guid"` and two binaries (`m`, a 4-byte length, the bytes).
 _TERM_GUID = b"\x83h\x03d\x00\x04guid"
 
 
-def _term_ids(payload: bytes) -> list[str] | None:
+def _crc16(data: bytes) -> int:
+    """The CRC-16 of ctool's `file_id:crc16/1`: polynomial 0x8005, reflected, initial value 0,
+    no final XOR (its check value, of `123456789`, is 0xBB3D)."""
+    crc = 0
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
+    return crc
+
+
+def _object_id_payload(value: str) -> bytes | None:
+    """The payload of `value` if it is an object id as Onedata's encoder writes it; None else.
+
+    ctool `src/utils/file_id.erl` (`build_objectid/2`) writes, in hex, an 8-byte header and the
+    payload: a zero byte, the 3-byte enterprise number, a zero byte, the payload's length as one
+    byte (`Length:8`, so modulo 256), and a CRC-16 of the whole id written with that field zero,
+    big-endian. It refuses a payload over 320 bytes. On decode (`objectid_to_guid/1`) 25.0 checks
+    only the two zero bytes, so a changed digit or a header spliced onto another file's payload
+    reaches it as another, valid-looking id; the CRC is what shows them."""
+    if not value or len(value) % 2 or not re.fullmatch(r"[0-9A-Fa-f]+", value):
+        return None
+    raw = bytes.fromhex(value)
+    header, payload = raw[:_FILE_ID_HEADER], raw[_FILE_ID_HEADER:]
+    if not payload or len(payload) > _FILE_ID_MAX_PAYLOAD:
+        return None
+    if header[0] != 0 or header[4] != 0 or header[5] != len(payload) % 256:
+        return None
+    if int.from_bytes(header[6:8], "big") != _crc16(header[:6] + b"\0\0" + payload):
+        return None
+    return payload
+
+
+def _term_ids(payload: bytes) -> list[bytes] | None:
     """The uuid and space id of an older id's payload, `{guid, Uuid, SpaceId}` as an Erlang term;
-    None if it is not exactly that."""
+    None if it is not exactly that, each binary within what is left of the payload."""
     rest, ids = payload[len(_TERM_GUID) :], []
     for _ in range(2):
         if len(rest) < 5 or rest[0] != 0x6D:
             return None
         size = int.from_bytes(rest[1:5], "big")
-        try:
-            ids.append(rest[5 : 5 + size].decode("ascii"))
-        except UnicodeDecodeError:
+        if len(rest) < 5 + size:
             return None
+        ids.append(rest[5 : 5 + size])
         rest = rest[5 + size :]
     return None if rest else ids
 
 
 def _file_id_parts(value: str) -> tuple[str, str] | None:
-    """(uuid, space id) of a complete file id; None for anything else.
+    """(uuid, space id) of a whole file id; None for anything else.
 
-    The id is hex. It decodes to an 8-byte header and a payload, which is one of:
+    The id must be an object id as the encoder writes it (`_object_id_payload`: the zero bytes,
+    the length byte, the 320-byte limit and the CRC, for every form). Its payload is one of:
 
-    - `guid#<uuid>#<space id>` in ASCII: what a 25.0 Oneprovider returns. The header's sixth
-      byte is the payload's length (CDMI object-id layout): the swagger's example id has
-      0x5C = 92 payload bytes, and all 383 distinct ids that a 25.0 Oneprovider returned in the
-      validation runs, trash and archive roots included, have their own payload length there,
-      `guid#` at byte 8 and exactly two more `#`. The length byte is what shows a byte dropped
-      from an otherwise well-formed id.
-    - the same as an Erlang term (an older id: the swagger README's example, whose length byte
-      0x91 is its 145 payload bytes). The length byte is checked here too.
-    - `shareGuid#<uuid>#<space id>#<share id>`, the id of a file as seen through a share (the
-      swagger's examples show only its first characters). Its length byte is not checked: no
-      whole example is at hand to show it holds.
+    - `guid#<uuid>#<space id>`: what a 25.0 Oneprovider returns (ctool `file_id:pack_guid/2`);
+    - `shareGuid#<uuid>#<space id>#<share id>`, the id of a file seen through a share
+      (`pack_share_guid/3`, encoded by the same `build_objectid`);
+    - the Erlang term `{guid, Uuid, SpaceId}`, the older id of the swagger README's example.
+      25.0's own decoder (`unpack_share_guid/1`) reads only the two `#` forms, so it would refuse
+      this one itself; it is accepted here so that no id Onedata documents is refused locally.
 
-    The rest of the header is not checked (the 2-byte checksum is not known here), so a header
-    spliced onto another file's payload passes; a changed hex digit inside the uuid passes too,
-    and is Onedata's to refuse.
+    The space id is not empty (`pack_guid/2` requires that). The parts have no length cap: the
+    payload limit bounds them, and under a longer `datastore_doc_key_length` a trash or archives
+    root's uuid is over 128 characters. All the ids a 25.0 Oneprovider returned in the
+    validation runs pass (`test_file_ids.py`).
     """
-    if not value or len(value) % 2 or not re.fullmatch(r"[0-9A-Fa-f]+", value):
+    payload = _object_id_payload(value)
+    if payload is None:
         return None
-    raw = bytes.fromhex(value)
-    payload = raw[_FILE_ID_HEADER:]
-    if not payload:
-        return None
-    length_ok = len(payload) > 0xFF or raw[5] == len(payload)
-    ids: list[str] | None
+    ids: list[bytes] | None
     if payload.startswith(_TERM_GUID):
-        ids = _term_ids(payload) if length_ok else None
+        ids = _term_ids(payload)
     else:
-        try:
-            parts = payload.decode("ascii").split("#")
-        except UnicodeDecodeError:
-            return None
-        if parts[0] == "guid" and len(parts) == 3 and length_ok:
+        parts = payload.split(b"#")
+        if parts[0] == b"guid" and len(parts) == 3:
             ids = parts[1:]
-        elif parts[0] == "shareGuid" and len(parts) == 4:
+        elif parts[0] == b"shareGuid" and len(parts) == 4:
             ids = parts[1:3]
-            if not _FILE_ID_PART.fullmatch(parts[3]):
-                return None
         else:
             return None
-    if ids is None or not all(_FILE_ID_PART.fullmatch(part) for part in ids):
+    if ids is None or not ids[1]:
         return None
-    return ids[0], ids[1]
+    try:
+        uuid, space_id = (part.decode("ascii") for part in ids)
+    except UnicodeDecodeError:  # Onedata's keys are alphanumeric (cluster-worker datastore_key)
+        return None
+    return uuid, space_id
 
 
 def _incomplete_file_id_message(value: str) -> str:
@@ -423,17 +454,16 @@ async def _file_error(
     own message. Specific diagnoses need distinguishing evidence: a 403 or an access errno, a
     structured not-found, `spaceNotSupportedBy`, an `enotdir` while resolving a path, an id
     rejected as such. A bare 404 gets the possible causes, not one of them. `lookup`: the error
-    came from resolving the path. `copied_id`: the caller typed the id from an earlier answer,
-    so for an id a 403 or `spaceNotSupportedBy` may mean a bad copy and says so (a path keeps
-    the diagnoses above)."""
+    came from resolving the path. `copied_id`: the caller typed the id from an earlier answer.
+    Such an id passed `_require_complete_id`, so it is one Onedata wrote, but it may be another
+    file's: for an id, a 403 or `spaceNotSupportedBy` gives the provider's refusal first and then,
+    as a condition, what to do if it is not the file meant (a path keeps the diagnoses above)."""
     target = _target(file_id_or_path)
     copied = copied_id and not lookup and not file_id_or_path.startswith("/")
     if _is_forbidden(error) and copied:
         hint = (
-            f"Could not {action} {target}: the id may be mis-copied (an id with a missing or "
-            "changed character is refused like this), or the token may have no access to the "
-            "file. Copy the id exactly from the earlier answer, or give the path, "
-            f"/<space_name>/<path>.{await _id_space_note(file_id_or_path, list_spaces=False)}"
+            f"Not allowed to {action} {target}: the token has no access to it. {_NOT_THE_FILE}"
+            f"{await _id_space_note(file_id_or_path, list_spaces=False)}"
         )
     elif _is_forbidden(error):
         hint = (
@@ -442,10 +472,8 @@ async def _file_error(
         )
     elif _is_client_error(error) and error.error_id == "spaceNotSupportedBy" and copied:
         hint = (
-            f"Could not {action} {target}: this provider reports that it does not support the "
-            "space in the id. The id may be mis-copied (an id with a missing or changed "
-            "character gives the same answer): copy it exactly from the earlier answer, or "
-            "give the path, /<space_name>/<path>."
+            f"This provider does not support the space of {target}, so it cannot {action} it "
+            f"here; the space may still exist. {_NOT_THE_FILE}"
             f"{await _id_space_note(file_id_or_path, list_spaces=True)}"
         )
     elif _is_client_error(error) and error.error_id == "spaceNotSupportedBy":
@@ -520,9 +548,10 @@ async def get_file_attributes(
     established about it (`_file_error`), followed by Onedata's own message.
 
     `copied_id` is set by the MCP tool, whose id a model copied from an earlier answer: an id
-    that cannot be whole is then refused before any request, and a refusal of an id may say it
-    was mis-copied. The other callers (the stable download tool, readiness) pass ids that came
-    from Onedata and keep their handling."""
+    that Onedata's encoder could not have written is then refused before any request, and a
+    refusal of an id says what to do if it is not the file meant. A path's id, from the lookup,
+    is not checked as a copy. The other callers (the stable download tool, readiness) pass ids
+    that came from Onedata and keep their handling."""
     config = get_oneprovider_config()
     requested_attributes = tuple[str, ...](attributes or DEFAULT_FILE_ATTRIBUTE_KEYS)
     _reject_deprecated_attributes(requested_attributes)
@@ -567,9 +596,10 @@ async def list_children(
     sent, and a non-zero offset with a token is refused. A failure is raised with what this
     provider established about it (`_file_error`; not a directory), followed by Onedata's own
     message. 25.0 lists a regular file as its own only entry instead of failing; that first
-    page is refused here (`_lists_itself`). An id that cannot be whole is refused before any
-    request, and a 403 or `spaceNotSupportedBy` for an id says it may be mis-copied. When
-    `isLast` is false the answer says so in `more` (`_more_note`)."""
+    page is refused here (`_lists_itself`). An id that Onedata's encoder could not have written
+    is refused before any request, and a 403 or `spaceNotSupportedBy` for an id says what to do
+    if it is not the directory meant. When `isLast` is false the answer says so in `more`
+    (`_more_note`)."""
     config = get_oneprovider_config()
     requested_attributes = tuple[str, ...](attributes or DEFAULT_FILE_ATTRIBUTE_KEYS)
     _reject_deprecated_attributes(requested_attributes)
@@ -634,12 +664,13 @@ def _more_note(body: Any) -> Any:
 
 
 async def _kind_of(file_id: str) -> str | None:
-    """The `type` of the file with this id (REG, DIR or SYMLNK); None if it cannot be read."""
+    """The `type` of the file with this id (REG, DIR or SYMLNK); None if it cannot be read, or
+    if the id cannot be one path segment (`_file_id_segment`)."""
     try:
         response = await request(
             get_oneprovider_config(),
             "GET",
-            f"/data/{quote(file_id, safe='')}",
+            f"/data/{_file_id_segment(file_id)}",
             json_body={"attributes": ["type"]},
         )
     except Exception:  # noqa: BLE001 - then nothing is said about what the target is
